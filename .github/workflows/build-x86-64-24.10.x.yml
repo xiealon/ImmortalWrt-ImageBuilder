@@ -8,7 +8,7 @@ on:
       luci_version:
         description: "选择luci版本"
         required: false
-        default: "24.10.6"
+        default: "24.10.0"
         type: choice
         options:
           - 24.10.0
@@ -21,12 +21,12 @@ on:
       custom_router_ip:
         description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
         required: true
-        default: "192.168.100.1"
+        default: "10.1.1.200"
       profile:
         description: '选择软件包空间大小'
         required: true
         type: choice
-        default: '1G'
+        default: '10G'
         options:
           - '1G'
           - '2G'
@@ -124,7 +124,7 @@ jobs:
             20G)
               ROOTFS_SIZE=20480
               ;;
-          esac
+            esac
           echo "ROOTFS_SIZE=$ROOTFS_SIZE" >> $GITHUB_ENV
           include_docker="${{ github.event.inputs.include_docker }}"
           luci_version="${{ github.event.inputs.luci_version }}"

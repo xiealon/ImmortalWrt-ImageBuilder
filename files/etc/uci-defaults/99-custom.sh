@@ -110,11 +110,11 @@ esac
          echo "default router ip is 10.1.1.200" >> $LOGFILE
 #     fi
 
-# 删除wan接口 所有接口添加为lan 关闭DHCP与DHCPV6以及RA
+# 禁用wan接口 所有接口添加为lan 关闭DHCP与DHCPV6以及RA
   uci set network.lan.gateway='10.1.1.1'
   uci set network.lan.dns='10.1.1.1'
-  uci delete network.wan='1'
-  uci delete network.wan6='1'
+  uci set network.wan.disable='1'
+  uci set network.wan6.disable='1'
   uci set network.lan.ifname='eth0 eth1 eth2 eth3 eth4 eth5'
   uci set network.lan.type='bridge'
   uci set dhcp.lan.ignore='1'
@@ -122,6 +122,9 @@ esac
   uci set dhcp.lan.ra='disabled'
   uci set dhcp.lan.dhcpv6='disabled'
   uci set dhcp.lan.ndp='disabled'
+  uci commit network
+  uci commit dhcp
+  
     
     # PPPoE设置
 #     echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE

@@ -124,7 +124,7 @@ jobs:
             20G)
               ROOTFS_SIZE=20480
               ;;
-            esac
+          esac
           echo "ROOTFS_SIZE=$ROOTFS_SIZE" >> $GITHUB_ENV
           include_docker="${{ github.event.inputs.include_docker }}"
           luci_version="${{ github.event.inputs.luci_version }}"

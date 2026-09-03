@@ -64,6 +64,7 @@ PACKAGES="$PACKAGES luci-i18n-filemanager-zh-cn"
 PACKAGES="$PACKAGES $CUSTOM_PACKAGES"
 
 PACKAGES="$PACKAGES luci-app-openclash"
+PACKAGES="$PACKAGES luci-app-ssr-plus"
 
 
 # 判断是否需要编译 Docker 插件

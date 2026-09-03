@@ -59,80 +59,94 @@ case "$board_name" in
 esac
 
 # 3. 配置网络
-if [ "$count" -eq 1 ]; then
+# if [ "$count" -eq 1 ]; then
     # 单网口设备，DHCP模式
-    uci set network.lan.proto='dhcp'
-    uci delete network.lan.ipaddr
-    uci delete network.lan.netmask
-    uci delete network.lan.gateway
-    uci delete network.lan.dns
-    uci commit network
-elif [ "$count" -gt 1 ]; then
+#     uci set network.lan.proto='dhcp'
+#     uci delete network.lan.ipaddr
+#     uci delete network.lan.netmask
+#     uci delete network.lan.gateway
+#     uci delete network.lan.dns
+#     uci commit network
+# elif [ "$count" -gt 1 ]; then
     # 多网口设备配置
     # 配置WAN
-    uci set network.wan=interface
-    uci set network.wan.device="$wan_ifname"
-    uci set network.wan.proto='dhcp'
+#     uci set network.wan=interface
+#     uci set network.wan.device="$wan_ifname"
+#     uci set network.wan.proto='dhcp'
 
     # 配置WAN6
-    uci set network.wan6=interface
-    uci set network.wan6.device="$wan_ifname"
-    uci set network.wan6.proto='dhcpv6'
+#     uci set network.wan6=interface
+#     uci set network.wan6.device="$wan_ifname"
+#     uci set network.wan6.proto='dhcpv6'
 
     # 查找 br-lan 设备 section
-    section=$(uci show network | awk -F '[.=]' '/\.@?device\[\d+\]\.name=.br-lan.$/ {print $2; exit}')
-    if [ -z "$section" ]; then
-        echo "error：cannot find device 'br-lan'." >>$LOGFILE
-    else
+#     section=$(uci show network | awk -F '[.=]' '/\.@?device\[\d+\]\.name=.br-lan.$/ {print $2; exit}')
+#     if [ -z "$section" ]; then
+#         echo "error：cannot find device 'br-lan'." >>$LOGFILE
+#     else
         # 删除原有ports
-        uci -q delete "network.$section.ports"
+#         uci -q delete "network.$section.ports"
         # 添加LAN接口端口
-        for port in $lan_ifnames; do
-            uci add_list "network.$section.ports"="$port"
-        done
-        echo "Updated br-lan ports: $lan_ifnames" >>$LOGFILE
-    fi
+#         for port in $lan_ifnames; do
+#             uci add_list "network.$section.ports"="$port"
+#         done
+#         echo "Updated br-lan ports: $lan_ifnames" >>$LOGFILE
+#     fi
 
     # LAN口设置静态IP
     uci set network.lan.proto='static'
     # 多网口设备 支持修改为别的管理后台地址 在Github Action 的UI上自行输入即可 
     uci set network.lan.netmask='255.255.255.0'
+
     # 设置路由器管理后台地址
-    IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
-    if [ -f "$IP_VALUE_FILE" ]; then
-        CUSTOM_IP=$(cat "$IP_VALUE_FILE")
+#     IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
+#     if [ -f "$IP_VALUE_FILE" ]; then
+#         CUSTOM_IP=$(cat "$IP_VALUE_FILE")
         # 用户在UI上设置的路由器后台管理地址
-        uci set network.lan.ipaddr=$CUSTOM_IP
-        echo "custom router ip is $CUSTOM_IP" >> $LOGFILE
-    else
-        uci set network.lan.ipaddr='192.168.100.1'
-        echo "default router ip is 192.168.100.1" >> $LOGFILE
-    fi
+#         uci set network.lan.ipaddr=$CUSTOM_IP
+#         echo "custom router ip is $CUSTOM_IP" >> $LOGFILE
+#     else
+         uci set network.lan.ipaddr='10.1.1.200'
+         echo "default router ip is 10.1.1.200" >> $LOGFILE
+#     fi
 
+# 删除wan接口 所有接口添加为lan 关闭DHCP与DHCPV6以及RA
+  uci set network.lan.gateway='10.1.1.1'
+  uci set network.lan.dns='10.1.1.1'
+  uci delete network.wan='1'
+  uci delete network.wan6='1'
+  uci set network.lan.ifname='eth0 eth1 eth2 eth3 eth4 eth5'
+  uci set network.lan.type='bridge'
+  uci set dhcp.lan.ignore='1'
+  uci set dhcp.lan.dhcpv4='disabled'
+  uci set dhcp.lan.ra='disabled'
+  uci set dhcp.lan.dhcpv6='disabled'
+  uci set dhcp.lan.ndp='disabled'
+    
     # PPPoE设置
-    echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE
-    if [ "$enable_pppoe" = "yes" ]; then
-        echo "PPPoE enabled, configuring..." >>$LOGFILE
-        uci set network.wan.proto='pppoe'
-        uci set network.wan.username="$pppoe_account"
-        uci set network.wan.password="$pppoe_password"
-        uci set network.wan.peerdns='1'
-        uci set network.wan.auto='1'
-        uci set network.wan6.proto='none'
-        echo "PPPoE config done." >>$LOGFILE
-    else
-        echo "PPPoE not enabled." >>$LOGFILE
-    fi
-
-    uci commit network
-fi
+#     echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE
+#     if [ "$enable_pppoe" = "yes" ]; then
+#         echo "PPPoE enabled, configuring..." >>$LOGFILE
+#         uci set network.wan.proto='pppoe'
+#         uci set network.wan.username="$pppoe_account"
+#         uci set network.wan.password="$pppoe_password"
+#         uci set network.wan.peerdns='1'
+#         uci set network.wan.auto='1'
+#         uci set network.wan6.proto='none'
+#         echo "PPPoE config done." >>$LOGFILE
+#     else
+#         echo "PPPoE not enabled." >>$LOGFILE
+#     fi
+#
+#     uci commit network
+# fi
 
 # 设置所有网口可访问网页终端
-uci delete ttyd.@ttyd[0].interface
+  uci delete ttyd.@ttyd[0].interface
 
 # 设置所有网口可连接 SSH
-uci set dropbear.@dropbear[0].Interface=''
-uci commit
+  uci set dropbear.@dropbear[0].Interface=''
+  uci commit
 
 # 设置编译作者信息
 FILE_PATH="/etc/openwrt_release"

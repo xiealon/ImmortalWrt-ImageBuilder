@@ -1,6 +1,8 @@
 name: Build 24.10.x x86-64
 
 on:
+  schedule:
+    - cron: '0 0 * * 5'
   workflow_dispatch:
     inputs:
       luci_version:

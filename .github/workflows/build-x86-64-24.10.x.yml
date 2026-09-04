@@ -61,6 +61,33 @@ on:
         description: "宽带密码 (若启用PPPoE)"
         required: false
 
+  workflow_call:
+    inputs:
+      luci_version:
+        required: false
+        default: "24.10.0"
+        type: string
+      custom_router_ip:
+        required: true
+        default: "10.1.1.200"
+        type: string
+      profile:
+        required: true
+        default: "10G"
+        type: string
+      enable_store:
+        required: false
+        default: true
+        type: boolean
+      include_docker:
+        required: true
+        default: "yes"
+        type: string
+      enable_pppoe:
+        required: true
+        default: "no"
+        type: string
+
 permissions:
   contents: write
 

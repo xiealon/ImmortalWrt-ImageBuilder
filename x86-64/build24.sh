@@ -52,12 +52,15 @@ PACKAGES="$PACKAGES luci-i18n-firewall-zh-cn"
 PACKAGES="$PACKAGES luci-theme-argon"
 PACKAGES="$PACKAGES luci-app-argon-config"
 PACKAGES="$PACKAGES luci-i18n-argon-config-zh-cn"
-PACKAGES="$PACKAGES luci-app-openclash"
-PACKAGES="$PACKAGES luci-app-ssr-plus"
-#24.10
+
+# 24.10
 PACKAGES="$PACKAGES luci-i18n-package-manager-zh-cn"
 PACKAGES="$PACKAGES luci-i18n-ttyd-zh-cn"
 PACKAGES="$PACKAGES openssh-sftp-server"
+
+# uanFANG // openclash ＆ ssr
+PACKAGES="$PACKAGES base-files libuci lua luci-base curl bash coreutils-nohup dnsmasq-full"
+PACKAGES="$PACKAGES luci-app-openclash luci-app-ssr-plus"
 
 # 文件管理器
 PACKAGES="$PACKAGES luci-i18n-filemanager-zh-cn"

@@ -179,7 +179,8 @@ fi
   uci commit dhcp
 
 
-# 设置主题为strap-dark 语言为auto 开启表格筛选器
+# 设置主题为argon(其他主题不好用 进阶设置那个看了没什么用）
+# 语言为auto 开启表格筛选器
   uci set luci.main.mediaurlbase="/luci-static/argon"
   uci set luci.main.lang='auto'
   uci set luci.main.tablefilter='1'

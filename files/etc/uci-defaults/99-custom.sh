@@ -37,65 +37,49 @@ fi
          # echo "default router ip is 10.1.1.200" >> $LOGFILE
 #     fi
 
-# =============================================================================
-# 1. 禁用 WAN/WAN6（修正字段名）
-# =============================================================================
-# ⚠️ 24.10 中 disable 字段无效，必须用 disabled
 uci set network.wan.disabled='1'
 uci set network.wan6.disabled='1'
 
-# =============================================================================
-# 2. 【核心】DSA 架构下重建 br-lan（24.10 强制要求）
-# =============================================================================
-# 清理旧版废弃配置
-uci -q delete network.lan.ifname     # ❌ 24.10 已彻底移除 ifname 支持
-uci -q delete network.br_lan.ifname   # ← ⭐清理 device 段的废弃 ifname
-uci -q delete network.lan.type          # ❌ type 不属于 interface 段
-uci -q delete network.lan.device
-uci -q delete network.br_lan
+while uci -q show network.@device[0] >/dev/null; do
+    uci -q delete network.@device[0]
+done
+for sec in $(uci show network | grep "=device" | cut -d. -f2 | cut -d= -f1); do
+    if [ "$sec" != "br_lan" ] && echo "$sec" | grep -q "^cfg"; then
+        uci -q delete network.$sec
+    fi
+done
 
+uci -q delete network.lan.ifname
+uci -q delete network.lan.type
 
-# 显式创建 br-lan 桥接设备（DSA 标准）
 uci set network.br_lan=device
 uci set network.br_lan.name='br-lan'
 uci set network.br_lan.type='bridge'
-uci set network.br_lan.bridge_empty='1' # ⭐ 虚拟机必加：允许空桥启动
+uci set network.br_lan.bridge_empty='1'
 
-# 动态添加所有可用物理/虚拟口（自动适配 enp0s3/ens33 等命名）
-uci -q delete network.br_lan.ports   # ⭐ 关键修复：先清空旧端口列表，再动态添加（防止重复执行时端口累积）
-for port in $(ls /sys/class/net/ | grep -E '^(eth|en|lan)' | grep -v lo); do
+uci -q delete network.br_lan.ports
+for port in $(ls /sys/class/net/ | grep -E '^(eth|en|lan)' | grep -v -E '(lo|docker|veth|br-|tun|tap)'); do
     uci add_list network.br_lan.ports="$port"
 done
-
-# 绑定 lan 逻辑接口到 br-lan
 uci set network.lan.device='br-lan'
-
-# =============================================================================
-# 3. LAN 静态 IP / 网关 / DNS（保留你的原始配置）
-# =============================================================================
 uci set network.lan.proto='static'
 uci set network.lan.ipaddr='10.1.1.200'
 uci set network.lan.netmask='255.255.255.0'
 uci set network.lan.gateway='10.1.1.1'
 uci set network.lan.dns='10.1.1.1'
 
-# =============================================================================
-# 4. 关闭 DHCP / RA / NDP（ImmortalWrt 24.10 字段微调）
-# =============================================================================
-uci set dhcp.lan.ignore='1'             # 忽略此接口 = 关闭 DHCPv4
-uci set dhcp.lan.dhcpv4='disabled'      # 双保险
-uci set dhcp.lan.ra='disabled'          # 关闭 IPv6 RA
-uci set dhcp.lan.dhcpv6='disabled'      # 关闭 DHCPv6
-uci set dhcp.lan.ndp='disabled'         # 关闭 NDP 代理
-
-# ⚠️ 删除 authoritative 需用通配符，硬编码 section ID 在 24.10 易失效
+uci set dhcp.lan.ignore='1'
+uci set dhcp.lan.dhcpv4='disabled'
+uci set dhcp.lan.ra='disabled'
+uci set dhcp.lan.dhcpv6='disabled'
+uci set dhcp.lan.ndp='disabled'
 uci -q delete dhcp.@dnsmasq[0].authoritative
 
-# =============================================================================
-# 5. 提交并生效（24.10 需同时重载 network + dnsmasq）
-# =============================================================================
 uci commit network
 uci commit dhcp
+
+rm -f /tmp/luci-indexcache*.json 2>/dev/null
+rm -rf /tmp/luci-modulecache/ 2>/dev/null
 
 echo "default router ip is 10.1.1.200" >> $LOGFILE
 

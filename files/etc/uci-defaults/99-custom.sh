@@ -179,9 +179,10 @@ fi
   uci commit dhcp
 
 
-# 设置主题为酷猫 语言为自动
-  uci set luci.main.mediaurlbase="/luci-static/bootstrap-dark"
+# 设置主题为strap-dark 语言为auto 开启表格筛选器
+  uci set luci.main.mediaurlbase="/luci-static/argon"
   uci set luci.main.lang='auto'
+  uci set luci.main.tablefilter='1'
   uci commit luci
 
   

@@ -60,6 +60,7 @@ uci set network.br_lan.type='bridge'
 uci set network.br_lan.bridge_empty='1' # ⭐ 虚拟机必加：允许空桥启动
 
 # 动态添加所有可用物理/虚拟口（自动适配 enp0s3/ens33 等命名）
+uci -q delete network.br_lan.ports
 for port in $(ls /sys/class/net/ | grep -E '^(eth|en|lan)' | grep -v lo); do
     uci add_list network.br_lan.ports="$port"
 done

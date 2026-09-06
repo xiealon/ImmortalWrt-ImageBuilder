@@ -78,9 +78,6 @@ uci -q delete dhcp.@dnsmasq[0].authoritative
 uci commit network
 uci commit dhcp
 
-rm -f /tmp/luci-indexcache*.json 2>/dev/null
-rm -rf /tmp/luci-modulecache/ 2>/dev/null
-
 echo "default router ip is 10.1.1.200" >> $LOGFILE
 
 # 设置主题为argon(其他主题不好用 进阶设置那个看了没什么用）
@@ -90,10 +87,9 @@ echo "default router ip is 10.1.1.200" >> $LOGFILE
   uci set luci.main.tablefilter='1'
   uci commit luci
 
-# 默认开启qbittorrent服务//种子下载，需要触发默认配置
-#不要开！也不要添加了。
-  # uci set qbittorrent.config.enabled='1'
-  # uci commit qbittorrent
+# 默认开启qbittorrent服务//种子下载
+  uci set qbittorrent.config.enabled='1'
+  uci commit
 
     # PPPoE设置
 #     echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE
@@ -176,29 +172,25 @@ if command -v dockerd >/dev/null 2>&1; then
     uci commit firewall
 
 # 追加新的 zone + forwarding 配置
-cat << EOF >> "$FW_FILE" 
-
+cat << EOF >> "$FW_FILE"
 config zone 'docker'
     option name 'docker'
     option input 'ACCEPT'
     option output 'ACCEPT'
     option forward 'ACCEPT'
-    list network 'docker0'       # ⭐ 必须绑定 Docker 桥接接口
-    list subnet '172.16.0.0/12'  # 保留作为辅助匹配（可选）
+    list device 'docker0'        # ⭐ 正确：直接匹配设备名
+    # list subnet '172.16.0.0/12'  # ⚠️ 可选，但通常不需要
 
 config forwarding
     option src 'docker'
     option dest 'lan'
-
 config forwarding
     option src 'docker'
     option dest 'wan'
-
 config forwarding
     option src 'lan'
     option dest 'docker'
 EOF
-
 else
     echo "未检测到 Docker，跳过防火墙配置。"
 fi

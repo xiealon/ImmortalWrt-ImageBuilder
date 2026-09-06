@@ -180,7 +180,7 @@ fi
 
 
 # 设置主题为酷猫 语言为自动
-  uci set luci.main.mediaurlbase="/luci-static/kucat"
+  uci set luci.main.mediaurlbase="/luci-static/bootstrap-dark"
   uci set luci.main.lang='auto'
   uci commit luci
 

@@ -33,8 +33,8 @@ fi
 #         uci set network.lan.ipaddr=$CUSTOM_IP
 #         echo "custom router ip is $CUSTOM_IP" >> $LOGFILE
 #     else
-         uci set network.lan.ipaddr='10.1.1.200'
-         echo "default router ip is 10.1.1.200" >> $LOGFILE
+         # uci set network.lan.ipaddr='10.1.1.200'
+         # echo "default router ip is 10.1.1.200" >> $LOGFILE
 #     fi
 
 # =============================================================================
@@ -48,10 +48,12 @@ uci set network.wan6.disabled='1'
 # 2. 【核心】DSA 架构下重建 br-lan（24.10 强制要求）
 # =============================================================================
 # 清理旧版废弃配置
-uci -q delete network.lan.ifname        # ❌ 24.10 已彻底移除 ifname 支持
+uci -q delete network.lan.ifname     # ❌ 24.10 已彻底移除 ifname 支持
+uci -q delete network.br_lan.ifname   # ← ⭐清理 device 段的废弃 ifname
 uci -q delete network.lan.type          # ❌ type 不属于 interface 段
 uci -q delete network.lan.device
 uci -q delete network.br_lan
+
 
 # 显式创建 br-lan 桥接设备（DSA 标准）
 uci set network.br_lan=device
@@ -60,7 +62,7 @@ uci set network.br_lan.type='bridge'
 uci set network.br_lan.bridge_empty='1' # ⭐ 虚拟机必加：允许空桥启动
 
 # 动态添加所有可用物理/虚拟口（自动适配 enp0s3/ens33 等命名）
-uci -q delete network.br_lan.ports
+uci -q delete network.br_lan.ports   # ⭐ 关键修复：先清空旧端口列表，再动态添加（防止重复执行时端口累积）
 for port in $(ls /sys/class/net/ | grep -E '^(eth|en|lan)' | grep -v lo); do
     uci add_list network.br_lan.ports="$port"
 done
@@ -72,6 +74,7 @@ uci set network.lan.device='br-lan'
 # 3. LAN 静态 IP / 网关 / DNS（保留你的原始配置）
 # =============================================================================
 uci set network.lan.proto='static'
+uci set network.lan.ipaddr='10.1.1.200'
 uci set network.lan.netmask='255.255.255.0'
 uci set network.lan.gateway='10.1.1.1'
 uci set network.lan.dns='10.1.1.1'
@@ -93,6 +96,8 @@ uci -q delete dhcp.@dnsmasq[0].authoritative
 # =============================================================================
 uci commit network
 uci commit dhcp
+
+echo "default router ip is 10.1.1.200" >> $LOGFILE
 
 # 设置主题为argon(其他主题不好用 进阶设置那个看了没什么用）
 # 语言为auto 开启表格筛选器

@@ -192,26 +192,27 @@ if command -v dockerd >/dev/null 2>&1; then
     uci commit firewall
 
 # 追加新的 zone + forwarding 配置
-cat <<EOF >>"$FW_FILE"
+cat >> "$FW_FILE" << EOF
 
 config zone 'docker'
-  option input 'ACCEPT'
-  option output 'ACCEPT'
-  option forward 'ACCEPT'
-  option name 'docker'
-  list subnet '172.16.0.0/12'
+    option name 'docker'
+    option input 'ACCEPT'
+    option output 'ACCEPT'
+    option forward 'ACCEPT'
+    list network 'docker0'       # ⭐ 必须绑定 Docker 桥接接口
+    list subnet '172.16.0.0/12'  # 保留作为辅助匹配（可选）
 
 config forwarding
-  option src 'docker'
-  option dest 'lan'
+    option src 'docker'
+    option dest 'lan'
 
 config forwarding
-  option src 'docker'
-  option dest 'wan'
+    option src 'docker'
+    option dest 'wan'
 
 config forwarding
-  option src 'lan'
-  option dest 'docker'
+    option src 'lan'
+    option dest 'docker'
 EOF
 
 else

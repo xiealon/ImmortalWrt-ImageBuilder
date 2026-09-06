@@ -37,45 +37,61 @@ fi
          echo "default router ip is 10.1.1.200" >> $LOGFILE
 #     fi
 
-# 禁用wan接口  
-  uci set network.wan.disable='1'
-  uci set network.wan6.disable='1'
+# =============================================================================
+# 1. 禁用 WAN/WAN6（修正字段名）
+# =============================================================================
+# ⚠️ 24.10 中 disable 字段无效，必须用 disabled
+uci set network.wan.disabled='1'
+uci set network.wan6.disabled='1'
 
-  
-# 所有接口添加为lan
-  uci set network.lan.ifname='eth0 eth1 eth2 eth3 eth4 eth5'
+# =============================================================================
+# 2. 【核心】DSA 架构下重建 br-lan（24.10 强制要求）
+# =============================================================================
+# 清理旧版废弃配置
+uci -q delete network.lan.ifname        # ❌ 24.10 已彻底移除 ifname 支持
+uci -q delete network.lan.type          # ❌ type 不属于 interface 段
+uci -q delete network.lan.device
+uci -q delete network.br_lan
 
-# LAN口设置静态IP
-  uci set network.lan.proto='static'
-  
-# netmask子网掩码
-   uci set network.lan.netmask='255.255.255.0'
+# 显式创建 br-lan 桥接设备（DSA 标准）
+uci set network.br_lan=device
+uci set network.br_lan.name='br-lan'
+uci set network.br_lan.type='bridge'
+uci set network.br_lan.bridge_empty='1' # ⭐ 虚拟机必加：允许空桥启动
 
-# 网关设置
-  uci set network.lan.gateway='10.1.1.1'
-  
-# dns 设置
-  uci set network.lan.dns='10.1.1.1'
-  
-# 阿里云公共 DNS 223.5.5.5 223.6.6.6
-# 腾讯 DNSPod 119.29.29.29 182.254.116.116
-# 百度公共 DNS 180.76.76.76
-# 华为云 DNS 122.112.208.1 139.9.23.90
-# Google Public DNS 8.8.8.8 8.8.4.4
-# Cloudflare DNS
+# 动态添加所有可用物理/虚拟口（自动适配 enp0s3/ens33 等命名）
+for port in $(ls /sys/class/net/ | grep -E '^(eth|en|lan)' | grep -v lo); do
+    uci add_list network.br_lan.ports="$port"
+done
 
-# 关闭DHCP与DHCPV6以及RA 
-# 关闭dnsmasq强制DHCP服务器
-  
-  uci set network.lan.type='bridge'
-  uci set dhcp.lan.ignore='1'
-  uci set dhcp.lan.dhcpv4='disabled'
-  uci set dhcp.lan.ra='disabled'
-  uci set dhcp.lan.dhcpv6='disabled'
-  uci set dhcp.lan.ndp='disabled'
-  uci del dhcp.cfg01411c.authoritative
-  uci commit network
-  uci commit dhcp
+# 绑定 lan 逻辑接口到 br-lan
+uci set network.lan.device='br-lan'
+
+# =============================================================================
+# 3. LAN 静态 IP / 网关 / DNS（保留你的原始配置）
+# =============================================================================
+uci set network.lan.proto='static'
+uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.gateway='10.1.1.1'
+uci set network.lan.dns='10.1.1.1'
+
+# =============================================================================
+# 4. 关闭 DHCP / RA / NDP（ImmortalWrt 24.10 字段微调）
+# =============================================================================
+uci set dhcp.lan.ignore='1'             # 忽略此接口 = 关闭 DHCPv4
+uci set dhcp.lan.dhcpv4='disabled'      # 双保险
+uci set dhcp.lan.ra='disabled'          # 关闭 IPv6 RA
+uci set dhcp.lan.dhcpv6='disabled'      # 关闭 DHCPv6
+uci set dhcp.lan.ndp='disabled'         # 关闭 NDP 代理
+
+# ⚠️ 删除 authoritative 需用通配符，硬编码 section ID 在 24.10 易失效
+uci -q delete dhcp.@dnsmasq[0].authoritative
+
+# =============================================================================
+# 5. 提交并生效（24.10 需同时重载 network + dnsmasq）
+# =============================================================================
+uci commit network
+uci commit dhcp
 
 # 设置主题为argon(其他主题不好用 进阶设置那个看了没什么用）
 # 语言为auto 开启表格筛选器

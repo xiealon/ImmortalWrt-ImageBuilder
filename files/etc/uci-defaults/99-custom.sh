@@ -146,7 +146,24 @@ fi
   uci set network.lan.gateway='10.1.1.1'
 # dns 设置
   uci set network.lan.dns='10.1.1.1'
-  uci set network.lan.dns='2'
+  
+# 阿里云公共 DNS
+  uci set network.lan.dns='223.5.5.5 223.6.6.6'
+
+# 腾讯 DNSPod
+  uci set network.lan.dns='119.29.29.29 182.254.116.116'
+
+# 百度公共 DNS
+ uci set network.lan.dns='180.76.76.76'
+
+# 华为云 DNS
+  uci set network.lan.dns='122.112.208.1 139.9.23.90'
+
+# Google Public DNS
+  uci set network.lan.dns='8.8.8.8 8.8.4.4'
+
+# Cloudflare DNS
+  uci set network.lan.dns='1.1.1.1 1.0.0.1'
   
   uci set network.wan.disable='1'
   uci set network.wan6.disable='1'

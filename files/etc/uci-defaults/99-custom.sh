@@ -176,7 +176,7 @@ if command -v dockerd >/dev/null 2>&1; then
     uci commit firewall
 
 # 追加新的 zone + forwarding 配置
-cat >> "$FW_FILE" << EOF
+cat << EOF >> "$FW_FILE" 
 
 config zone 'docker'
     option name 'docker'

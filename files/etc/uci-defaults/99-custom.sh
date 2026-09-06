@@ -141,9 +141,9 @@ fi
          echo "default router ip is 10.1.1.200" >> $LOGFILE
 #     fi
 
-# 禁用wan接口 所有接口添加为lan 关闭DHCP与DHCPV6以及RA 
-# 关闭dnsmasq强制DHCP服务器
+# 网关设置
   uci set network.lan.gateway='10.1.1.1'
+  
 # dns 设置
   uci set network.lan.dns='10.1.1.1'
   
@@ -164,7 +164,9 @@ fi
 
 # Cloudflare DNS
   uci set network.lan.dns='1.1.1.1 1.0.0.1'
-  
+
+# 禁用wan接口 所有接口添加为lan 关闭DHCP与DHCPV6以及RA 
+# 关闭dnsmasq强制DHCP服务器
   uci set network.wan.disable='1'
   uci set network.wan6.disable='1'
   # uci set network.lan.ifname='eth0 eth1 eth2 eth3 eth4 eth5'
@@ -186,9 +188,10 @@ fi
   uci set luci.main.tablefilter='1'
   uci commit luci
 
-  
-  
-    
+# 默认开启qbittorrent服务//种子下载
+  uci set qbittorrent.config.enabled='1'
+  uci commit qbittorrent
+
     # PPPoE设置
 #     echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE
 #     if [ "$enable_pppoe" = "yes" ]; then

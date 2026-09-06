@@ -106,9 +106,10 @@ echo "default router ip is 10.1.1.200" >> $LOGFILE
   uci set luci.main.tablefilter='1'
   uci commit luci
 
-# 默认开启qbittorrent服务//种子下载
-  uci set qbittorrent.config.enabled='1'
-  uci commit qbittorrent
+# 默认开启qbittorrent服务//种子下载，需要触发默认配置
+#不要开！也不要添加了。
+  # uci set qbittorrent.config.enabled='1'
+  # uci commit qbittorrent
 
     # PPPoE设置
 #     echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE

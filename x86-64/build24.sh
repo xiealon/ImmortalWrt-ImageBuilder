@@ -59,7 +59,7 @@ PACKAGES="$PACKAGES luci-i18n-ttyd-zh-cn"
 PACKAGES="$PACKAGES openssh-sftp-server"
 
 # uanFANG // openclash ＆ ssr
-PACKAGES="$PACKAGES base-files libuci lua luci-base curl bash coreutils-nohup dnsmasq-full"
+PACKAGES="$PACKAGES base-files libuci lua luci-base curl bash coreutils-nohup -dnsmasq dnsmasq-full"
 PACKAGES="$PACKAGES luci-app-openclash luci-app-ssr-plus"
 
 # 文件管理器

@@ -23,111 +23,7 @@ else
     . "$SETTINGS_FILE"
 fi
 
-# 1. 先获取所有物理接口列表
-ifnames=""
-for iface in /sys/class/net/*; do
-    iface_name=$(basename "$iface")
-    if [ -e "$iface/device" ] && echo "$iface_name" | grep -Eq '^eth|^en'; then
-        ifnames="$ifnames $iface_name"
-    fi
-done
-ifnames=$(echo "$ifnames" | awk '{$1=$1};1')
-
-count=$(echo "$ifnames" | wc -w)
-echo "Detected physical interfaces: $ifnames" >>"$LOGFILE"
-echo "Interface count: $count" >>"$LOGFILE"
-
-# 2. 根据板子型号映射WAN和LAN接口
-board_name=$(cat /tmp/sysinfo/board_name 2>/dev/null || echo "unknown")
-echo "Board detected: $board_name" >>"$LOGFILE"
-
-wan_ifname=""
-lan_ifnames=""
-# 此处特殊处理个别开发板网口顺序问题
-case "$board_name" in
-    "radxa,e20c"|"friendlyarm,nanopi-r5c")
-        wan_ifname="eth1"
-        lan_ifnames="eth0"
-        echo "Using $board_name mapping: WAN=$wan_ifname LAN=$lan_ifnames" >>"$LOGFILE"
-        ;;
-    *)
-        # [元配置] 默认第一个接口为WAN，其余为LAN（已禁用，保留备查）
-        # wan_ifname=$(echo "$ifnames" | awk '{print $1}')
-        # lan_ifnames=$(echo "$ifnames" | cut -d ' ' -f2-)
-        # echo "Using default mapping: WAN=$wan_ifname LAN=$lan_ifnames" >>"$LOGFILE"
-
-        # 当前生效逻辑：所有接口均作为LAN，带判空保护
-        if [ -z "${ifnames:-}" ]; then
-            echo "WARNING: No network interfaces detected, skipping LAN mapping" >>"$LOGFILE"
-            wan_ifname=""
-            lan_ifnames=""
-        else
-            wan_ifname=""
-            lan_ifnames="$ifnames"
-            echo "Using default mapping: WAN=(none) LAN=$lan_ifnames" >>"$LOGFILE"
-        fi
-        ;;
-esac
-
-# 3. 配置网络
-# =============================================================================
-# [元配置] 原始多模式网络配置逻辑（单口DHCP/多口WAN+LAN桥接），已禁用保留备查
-# =============================================================================
-# if [ "$count" -eq 1 ]; then
-#     # 单网口设备，DHCP模式
-#     uci set network.lan.proto='dhcp'
-#     uci delete network.lan.ipaddr
-#     uci delete network.lan.netmask
-#     uci delete network.lan.gateway
-#     uci delete network.lan.dns
-#     uci commit network
-# elif [ "$count" -gt 1 ]; then
-#     # 多网口设备配置
-#     # 配置WAN
-#     uci set network.wan=interface
-#     uci set network.wan.device="$wan_ifname"
-#     uci set network.wan.proto='dhcp'
-#     # 配置WAN6
-#     uci set network.wan6=interface
-#     uci set network.wan6.device="$wan_ifname"
-#     uci set network.wan6.proto='dhcpv6'
-#     # 查找 br-lan 设备 section
-#     section=$(uci show network | awk -F '[.=]' '/\.@?device$$\d+$$\.name=.br-lan.$/ {print $2; exit}')
-#     if [ -z "$section" ]; then
-#         echo "error：cannot find device 'br-lan'." >>$LOGFILE
-#     else
-#         # 删除原有ports
-#         uci -q delete "network.$section.ports"
-#         # 添加LAN接口端口
-#         for port in $lan_ifnames; do
-#             uci add_list "network.$section.ports"="$port"
-#         done
-#         echo "Updated br-lan ports: $lan_ifnames" >>$LOGFILE
-#     fi
-# fi
-
-# =============================================================================
-# [当前生效] 全LAN模式：仅更新 br-lan 端口成员，不创建WAN/WAN6接口
-# =============================================================================
-if [ -n "${lan_ifnames:-}" ]; then
-    section=$(uci show network | awk -F '[.=]' '/\.@?device$$\d+$$\.name=.br-lan.$/ {print $2; exit}')
-    if [ -z "$section" ]; then
-        echo "ERROR: Cannot find device 'br-lan', skipping port update" >>"$LOGFILE"
-    else
-        uci -q delete "network.$section.ports"
-        for port in $lan_ifnames; do
-            uci add_list "network.$section.ports"="$port"
-        done
-        uci commit network
-        echo "Updated br-lan ports (ALL-LAN mode): $lan_ifnames" >>"$LOGFILE"
-    fi
-else
-    echo "SKIP: lan_ifnames is empty, no br-lan port update performed" >>"$LOGFILE"
-fi
-    # LAN口设置静态IP
-    uci set network.lan.proto='static'
-    # 多网口设备 支持修改为别的管理后台地址 在Github Action 的UI上自行输入即可 
-    uci set network.lan.netmask='255.255.255.0'
+    
 
     # 设置路由器管理后台地址
 #     IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
@@ -140,6 +36,20 @@ fi
          uci set network.lan.ipaddr='10.1.1.200'
          echo "default router ip is 10.1.1.200" >> $LOGFILE
 #     fi
+
+# 禁用wan接口  
+  uci set network.wan.disable='1'
+  uci set network.wan6.disable='1'
+
+  
+# 所有接口添加为lan
+  uci set network.lan.ifname='eth0 eth1 eth2 eth3 eth4 eth5'
+
+# LAN口设置静态IP
+  uci set network.lan.proto='static'
+  
+# netmask子网掩码
+   uci set network.lan.netmask='255.255.255.0'
 
 # 网关设置
   uci set network.lan.gateway='10.1.1.1'
@@ -154,11 +64,9 @@ fi
 # Google Public DNS 8.8.8.8 8.8.4.4
 # Cloudflare DNS
 
-# 禁用wan接口 所有接口添加为lan 关闭DHCP与DHCPV6以及RA 
+# 关闭DHCP与DHCPV6以及RA 
 # 关闭dnsmasq强制DHCP服务器
-  uci set network.wan.disable='1'
-  uci set network.wan6.disable='1'
-  # uci set network.lan.ifname='eth0 eth1 eth2 eth3 eth4 eth5'
+  
   uci set network.lan.type='bridge'
   uci set dhcp.lan.ignore='1'
   uci set dhcp.lan.dhcpv4='disabled'
@@ -168,7 +76,6 @@ fi
   uci del dhcp.cfg01411c.authoritative
   uci commit network
   uci commit dhcp
-
 
 # 设置主题为argon(其他主题不好用 进阶设置那个看了没什么用）
 # 语言为auto 开启表格筛选器

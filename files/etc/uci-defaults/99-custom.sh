@@ -174,6 +174,10 @@ if command -v dockerd >/dev/null 2>&1; then
 # 追加新的 zone + forwarding 配置
 cat << EOF >> "$FW_FILE"
 config zone 'docker'
+  option input 'ACCEPT'
+  option output 'ACCEPT'
+  option forward 'ACCEPT'
+  option name 'docker'
     # list device 'docker0'        # ⭐ 正确：直接匹配设备名
     # list subnet '172.16.0.0/12'  # ⚠️ 可选，但通常不需要
 

@@ -40,15 +40,6 @@ fi
 uci set network.wan.disabled='1'
 uci set network.wan6.disabled='1'
 
-while uci -q show network.@device[0] >/dev/null; do
-    uci -q delete network.@device[0]
-done
-for sec in $(uci show network | grep "=device" | cut -d. -f2 | cut -d= -f1); do
-    if [ "$sec" != "br_lan" ] && echo "$sec" | grep -q "^cfg"; then
-        uci -q delete network.$sec
-    fi
-done
-
 uci -q delete network.lan.ifname
 uci -q delete network.lan.type
 
@@ -56,6 +47,13 @@ uci set network.br_lan=device
 uci set network.br_lan.name='br-lan'
 uci set network.br_lan.type='bridge'
 uci set network.br_lan.bridge_empty='1'
+
+if [ -n "$(uci -q get network.br_lan.name)" ]; then
+    for idx in $(uci show network | grep -oE '@device\[[0-9]+\]' | grep -oE '[0-9]+' | sort -rn); do
+        [ "$(uci -q get network.@device[$idx].name)" = "br-lan" ] && \
+            uci delete network.@device[$idx]
+    done
+fi
 
 uci -q delete network.br_lan.ports
 for port in $(ls /sys/class/net/ | grep -E '^(eth|en|lan)' | grep -v -E '(lo|docker|veth|br-|tun|tap)'); do

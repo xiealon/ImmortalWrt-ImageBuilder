@@ -43,11 +43,14 @@ uci set network.wan6.disabled='1'
 uci -q delete network.lan.ifname
 uci -q delete network.lan.type
 
+# 创建一个br_lan接口 命名为br-lan
 uci set network.br_lan=device
 uci set network.br_lan.name='br-lan'
 uci set network.br_lan.type='bridge'
 uci set network.br_lan.bridge_empty='1'
 
+# 获取所有接口设置为br_lan的名称，如果没有则结束
+# 查看所有获取的名称如果为匿名则删除（从大到小））
 if [ -n "$(uci -q get network.br_lan.name)" ]; then
     for idx in $(uci show network | grep -oE '@device\[[0-9]+\]' | grep -oE '[0-9]+' | sort -rn); do
         [ "$(uci -q get network.@device[$idx].name)" = "br-lan" ] && \
@@ -55,10 +58,15 @@ if [ -n "$(uci -q get network.br_lan.name)" ]; then
     done
 fi
 
+# 删除br_lan的所有接口
 uci -q delete network.br_lan.ports
+# 查看设备上所有名称为eth，en，lan的接口
+# 将查看到的接口添加进入br-lan接口
 for port in $(ls /sys/class/net/ | grep -E '^(eth|en|lan)' | grep -v -E '(lo|docker|veth|br-|tun|tap)'); do
     uci add_list network.br_lan.ports="$port"
 done
+
+# 将br-lan添加进入lan口并设置ip，掩码，网关，dns
 uci set network.lan.device='br-lan'
 uci set network.lan.proto='static'
 uci set network.lan.ipaddr='10.1.1.200'
@@ -66,15 +74,19 @@ uci set network.lan.netmask='255.255.255.0'
 uci set network.lan.gateway='10.1.1.1'
 uci set network.lan.dns='10.1.1.1'
 
+# 忽略lan口的dhcp/v6
 uci set dhcp.lan.ignore='1'
 uci set dhcp.lan.dhcpv4='disabled'
 uci set dhcp.lan.ra='disabled'
 uci set dhcp.lan.dhcpv6='disabled'
 uci set dhcp.lan.ndp='disabled'
+
+# 关闭dhcp页面的强制dhcp客户端（唯一客户端））
 uci -q delete dhcp.@dnsmasq[0].authoritative
 
 uci commit network
 uci commit dhcp
+uci commit
 
 echo "default router ip is 10.1.1.200" >> $LOGFILE
 
@@ -83,11 +95,11 @@ echo "default router ip is 10.1.1.200" >> $LOGFILE
   uci set luci.main.mediaurlbase="/luci-static/argon"
   uci set luci.main.lang='auto'
   uci set luci.main.tablefilter='1'
-  uci commit luci
-
-# 默认开启qbittorrent服务//种子下载
-  uci set qbittorrent.config.enabled='1'
   uci commit
+
+# 开启qbittorrent服务//种子下载
+  # uci set qbittorrent.config.enabled='1'
+  # uci commit
 
     # PPPoE设置
 #     echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE
@@ -153,44 +165,67 @@ if command -v dockerd >/dev/null 2>&1; then
     echo "检测到 Docker，正在配置防火墙规则..."
     FW_FILE="/etc/config/firewall"
 
-    # 删除所有名为 docker 的 zone
-    uci delete firewall.docker
+    # 1. 安全删除所有名为 'docker' 的 zone（正确遍历匿名段）
+    for idx in $(uci show firewall | grep "=zone" | cut -d[ -f2 | cut -d] -f1 | sort -rn); do
+        name=$(uci get firewall.@zone[$idx].name 2>/dev/null)
+        if [ "$name" = "docker" ]; then
+            echo "Deleting zone @zone[$idx] (name=docker)"
+            uci delete firewall.@zone[$idx]
+        fi
+    done
 
-    # 先获取所有 forwarding 索引，倒序排列删除
+    # 2. 安全删除所有涉及 'docker' 的 forwarding
     for idx in $(uci show firewall | grep "=forwarding" | cut -d[ -f2 | cut -d] -f1 | sort -rn); do
         src=$(uci get firewall.@forwarding[$idx].src 2>/dev/null)
         dest=$(uci get firewall.@forwarding[$idx].dest 2>/dev/null)
-        echo "Checking forwarding index $idx: src=$src dest=$dest"
         if [ "$src" = "docker" ] || [ "$dest" = "docker" ]; then
-            echo "Deleting forwarding @forwarding[$idx]"
+            echo "Deleting forwarding @forwarding[$idx] (src=$src, dest=$dest)"
             uci delete firewall.@forwarding[$idx]
         fi
     done
-    # 提交删除
+
+    # 3. 提交删除操作
     uci commit firewall
 
-# 追加新的 zone + forwarding 配置
-cat << EOF >> "$FW_FILE"
-config zone 'docker'
-  option input 'ACCEPT'
-  option output 'ACCEPT'
-  option forward 'ACCEPT'
-  option name 'docker'
-    # list device 'docker0'        # ⭐ 正确：直接匹配设备名
-    # list subnet '172.16.0.0/12'  # ⚠️ 可选，但通常不需要
+    # 4. 追加新配置（EOF 必须顶格，device 必须启用）
+    cat >> "$FW_FILE" << 'EOF'
+config zone
+    option name 'docker'
+    option input 'ACCEPT'
+    option output 'ACCEPT'
+    option forward 'ACCEPT'
+    list network 'docker0'
 
 config forwarding
     option src 'docker'
     option dest 'lan'
+
 config forwarding
     option src 'docker'
     option dest 'wan'
+
 config forwarding
     option src 'lan'
     option dest 'docker'
 EOF
+
+    # 5. 禁用 Docker 自动 iptables 管理（防止规则被覆盖）
+    # DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
+    # mkdir -p /etc/docker
+    # if [ ! -f "$DOCKER_DAEMON_JSON" ]; then
+        # echo '{"iptables": false}' > "$DOCKER_DAEMON_JSON"
+    # else
+        # 简单合并（生产环境建议用 jq）
+        # sed -i 's/"iptables"\s*:\s*true/"iptables": false/' "$DOCKER_DAEMON_JSON"
+    # fi
+
+    # 6. 重载防火墙使配置生效
+    /etc/init.d/firewall restart
+    echo "✅ Docker 防火墙规则配置完成并已生效"
 else
     echo "未检测到 Docker，跳过防火墙配置。"
 fi
+
+exit 0
 
 exit 0

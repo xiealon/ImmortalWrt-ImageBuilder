@@ -195,6 +195,7 @@ config zone
     option output 'ACCEPT'
     option forward 'ACCEPT'
     list network 'docker0'
+    list network 'docker'
     list subnet '10.16.0.0/12'
 
 config forwarding

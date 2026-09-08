@@ -49,8 +49,8 @@ uci set network.br_lan.name='br-lan'
 uci set network.br_lan.type='bridge'
 uci set network.br_lan.bridge_empty='1'
 
-# 获取所有接口设置为br_lan的名称，如果没有则结束
-# 查看所有获取的名称如果为匿名则删除（从大到小））
+# 获取所有接口设置为br_lan的名称，如果没有则结束。
+# 查看所有获取的名称为br-lan删除（从大到小））
 if [ -n "$(uci -q get network.br_lan.name)" ]; then
     for idx in $(uci show network | grep -oE '@device\[[0-9]+\]' | grep -oE '[0-9]+' | sort -rn); do
         [ "$(uci -q get network.@device[$idx].name)" = "br-lan" ] && \

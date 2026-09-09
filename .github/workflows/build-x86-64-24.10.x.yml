@@ -6,7 +6,7 @@ on:
       luci_version:
         description: "选择luci版本"
         required: false
-        default: "24.10.0"
+        default: "24.10.6"
         type: choice
         options:
           - 24.10.0
@@ -24,7 +24,7 @@ on:
         description: '选择软件包空间大小'
         required: true
         type: choice
-        default: '10G'
+        default: '2G'
         options:
           - '1G'
           - '2G'
@@ -65,7 +65,7 @@ on:
     inputs:
       luci_version:
         required: false
-        default: "24.10.0"
+        default: "24.10.6"
         type: string
       custom_router_ip:
         required: true
@@ -73,7 +73,7 @@ on:
         type: string
       profile:
         required: true
-        default: "10G"
+        default: "20G"
         type: string
       enable_store:
         required: false

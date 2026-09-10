@@ -23,8 +23,9 @@ else
     . "$SETTINGS_FILE"
 fi
 
-# 将lan口下设备改为未指定并删除br_lan
+# 将lan口下设备改为未指定并删除cfg030f15/br_lan
 uci del network.lan.device
+uci del network.cfg030f15
 uci del network.br_lan
 
 # 禁用WAN口

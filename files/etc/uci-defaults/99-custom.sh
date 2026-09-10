@@ -37,18 +37,6 @@ fi
          # echo "default router ip is 10.1.1.200" >> $LOGFILE
 #     fi
 
-uci set network.wan.disabled='1'
-uci set network.wan6.disabled='1'
-
-uci -q delete network.lan.ifname
-uci -q delete network.lan.type
-
-# 创建一个br_lan接口 命名为br-lan
-uci set network.br_lan=device
-uci set network.br_lan.name='br-lan'
-uci set network.br_lan.type='bridge'
-uci set network.br_lan.bridge_empty='1'
-
 # 获取所有接口设置为br_lan的名称，如果没有则结束。
 # 查看所有获取的名称为br-lan删除（从大到小））
 if [ -n "$(uci -q get network.br_lan.name)" ]; then
@@ -57,6 +45,15 @@ if [ -n "$(uci -q get network.br_lan.name)" ]; then
             uci delete network.@device[$idx]
     done
 fi
+
+uci set network.wan.disabled='1'
+uci set network.wan6.disabled='1'
+
+# 创建一个br_lan接口 命名为br-lan
+uci set network.br_lan=device
+uci set network.br_lan.name='br-lan'
+uci set network.br_lan.type='bridge'
+uci set network.br_lan.bridge_empty='1'
 
 # 删除br_lan的所有接口
 uci -q delete network.br_lan.ports

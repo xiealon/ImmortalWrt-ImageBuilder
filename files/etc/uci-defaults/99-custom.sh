@@ -23,10 +23,6 @@ else
     . "$SETTINGS_FILE"
 fi
 
-# 将lan口下设备改为未指定并删除br_lan
-uci del network.lan.device
-uci del network.br_lan
-
 # 禁用WAN口
 uci set network.wan.disabled='1'
 uci set network.wan6.disabled='1'

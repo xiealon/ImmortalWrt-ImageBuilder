@@ -63,12 +63,15 @@ uci set dhcp.lan.ndp='disabled'
 # 关闭dhcp页面的强制dhcp客户端（唯一客户端））
 uci -q del dhcp.@dnsmasq[0].authoritative
 
-# 已知修复在新建br_lan接口情况下会出现一个多余br-lan接口cfg030f15
-uci del network.cfg030f15
-
 # 提交
 uci commit
 
+# 已知修复在新建br_lan接口情况下会出现一个多余br-lan接口cfg030f15
+# 提交
+uci del network.cfg030f15
+uci commit
+
+# 输出信息
 echo "default router ip is 10.1.1.200" >> $LOGFILE
 
 # 设置主题为argon(其他主题不好用 进阶设置那个看了没什么用）
@@ -78,7 +81,7 @@ echo "default router ip is 10.1.1.200" >> $LOGFILE
   uci set luci.main.tablefilter='1'
   uci commit
 
-# 开启qbittorrent服务//种子下载
+# qbittorrent服务//种子下载
   # uci set qbittorrent.config.enabled='1'
   # uci commit
 

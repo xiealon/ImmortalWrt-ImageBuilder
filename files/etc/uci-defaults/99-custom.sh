@@ -131,8 +131,7 @@ config zone
     option forward 'ACCEPT'
     list network 'docker0'
     list network 'docker'
-    list network '172.16.0.0/16
-    list subnet '10.16.0.0/12'
+    list network '172.16.0.0/16'
 
 config forwarding
     option src 'docker'

@@ -23,9 +23,8 @@ else
     . "$SETTINGS_FILE"
 fi
 
-# 将lan口下设备改为未指定并删除cfg030f15/br_lan
+# 将lan口下设备改为未指定并删除br_lan
 uci del network.lan.device
-uci del network.cfg030f15
 uci del network.br_lan
 
 # 禁用WAN口
@@ -63,6 +62,9 @@ uci set dhcp.lan.ndp='disabled'
 
 # 关闭dhcp页面的强制dhcp客户端（唯一客户端））
 uci -q del dhcp.@dnsmasq[0].authoritative
+
+# 已知修复在新建br_lan接口情况下会出现一个多余br-lan接口cfg030f15
+uci del network.cfg030f15
 
 # 提交
 uci commit

@@ -62,7 +62,7 @@ uci -q del dhcp.@dnsmasq[0].authoritative
 # 提交
 uci commit
 
-# 已知修复在新建br_lan接口情况下会出现一个多余br-lan接口cfg030f15
+# 已知修复在新建br_lan接口情况下会出现一个默认的br-lan接口cfg030f15
 # 提交
 uci del network.cfg030f15
 uci commit

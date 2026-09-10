@@ -28,9 +28,9 @@ uci set network.wan.disabled='1'
 uci set network.wan6.disabled='1'
 
 # 创建一个br_lan接口 命名为br-lan
-uci set network.br_lan=device
-uci set network.br_lan.name='br-lan'
-uci set network.br_lan.type='bridge'
+# uci set network.br_lan=device
+# uci set network.br_lan.name='br-lan'
+# uci set network.br_lan.type='bridge'
 uci set network.br_lan.bridge_empty='1'
 
 # 删除br_lan的所有接口
@@ -64,8 +64,8 @@ uci commit
 
 # 已知修复在新建br_lan接口情况下会出现一个默认的br-lan接口cfg030f15
 # 提交
-uci del network.cfg030f15
-uci commit
+# uci del network.cfg030f15
+# uci commit
 
 # 输出信息
 echo "default router ip is 10.1.1.200" >> $LOGFILE

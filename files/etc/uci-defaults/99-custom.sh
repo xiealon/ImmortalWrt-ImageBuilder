@@ -23,29 +23,11 @@ else
     . "$SETTINGS_FILE"
 fi
 
-    
+# 将lan口下设备改为未指定并删除br_lan
+uci del network.lan.device
+uci del network.br_lan
 
-    # 设置路由器管理后台地址
-#     IP_VALUE_FILE="/etc/config/custom_router_ip.txt"
-#     if [ -f "$IP_VALUE_FILE" ]; then
-#         CUSTOM_IP=$(cat "$IP_VALUE_FILE")
-        # 用户在UI上设置的路由器后台管理地址
-#         uci set network.lan.ipaddr=$CUSTOM_IP
-#         echo "custom router ip is $CUSTOM_IP" >> $LOGFILE
-#     else
-         # uci set network.lan.ipaddr='10.1.1.200'
-         # echo "default router ip is 10.1.1.200" >> $LOGFILE
-#     fi
-
-# 获取所有接口设置为br_lan的名称，如果没有则结束。
-# 查看所有获取的名称为br-lan删除（从大到小））
-if [ -n "$(uci -q get network.br_lan.name)" ]; then
-    for idx in $(uci show network | grep -oE '@device\[[0-9]+\]' | grep -oE '[0-9]+' | sort -rn); do
-        [ "$(uci -q get network.@device[$idx].name)" = "br-lan" ] && \
-            uci delete network.@device[$idx]
-    done
-fi
-
+# 禁用WAN口
 uci set network.wan.disabled='1'
 uci set network.wan6.disabled='1'
 
@@ -56,7 +38,7 @@ uci set network.br_lan.type='bridge'
 uci set network.br_lan.bridge_empty='1'
 
 # 删除br_lan的所有接口
-uci -q delete network.br_lan.ports
+uci -q del network.br_lan.ports
 # 查看设备上所有名称为eth，en，lan的接口
 # 将查看到的接口添加进入br-lan接口
 for port in $(ls /sys/class/net/ | grep -E '^(eth|en|lan)' | grep -v -E '(lo|docker|veth|br-|tun|tap)'); do
@@ -79,10 +61,9 @@ uci set dhcp.lan.dhcpv6='disabled'
 uci set dhcp.lan.ndp='disabled'
 
 # 关闭dhcp页面的强制dhcp客户端（唯一客户端））
-uci -q delete dhcp.@dnsmasq[0].authoritative
+uci -q del dhcp.@dnsmasq[0].authoritative
 
-uci commit network
-uci commit dhcp
+# 提交
 uci commit
 
 echo "default router ip is 10.1.1.200" >> $LOGFILE
@@ -117,7 +98,7 @@ echo "default router ip is 10.1.1.200" >> $LOGFILE
 # fi
 
 # 设置所有网口可访问网页终端
-  uci delete ttyd.@ttyd[0].interface
+  uci del ttyd.@ttyd[0].interface
 
 # 设置所有网口可连接 SSH
   uci set dropbear.@dropbear[0].Interface=''
@@ -156,7 +137,7 @@ if [ -f /usr/bin/quickfile ]; then
 fi
 
 # 若安装了dockerd 则设置docker的防火墙规则
-# 扩大docker涵盖的子网范围 '172.16.0.0/12'
+# 扩大docker涵盖的子网范围 '172.16.0.0/12'以及'10.16.0.0/12'
 # 方便各类docker容器的端口顺利通过防火墙 
 if command -v dockerd >/dev/null 2>&1; then
     echo "检测到 Docker，正在配置防火墙规则..."
@@ -193,6 +174,7 @@ config zone
     option forward 'ACCEPT'
     list network 'docker0'
     list network 'docker'
+    list network '172.16.0.0/12
     list subnet '10.16.0.0/12'
 
 config forwarding

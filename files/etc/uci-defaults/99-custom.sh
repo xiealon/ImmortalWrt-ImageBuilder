@@ -79,24 +79,6 @@ echo "default router ip is 10.1.1.200" >> $LOGFILE
   # uci set qbittorrent.config.enabled='1'
   # uci commit
 
-    # PPPoE设置
-#     echo "enable_pppoe value: $enable_pppoe" >>$LOGFILE
-#     if [ "$enable_pppoe" = "yes" ]; then
-#         echo "PPPoE enabled, configuring..." >>$LOGFILE
-#         uci set network.wan.proto='pppoe'
-#         uci set network.wan.username="$pppoe_account"
-#         uci set network.wan.password="$pppoe_password"
-#         uci set network.wan.peerdns='1'
-#         uci set network.wan.auto='1'
-#         uci set network.wan6.proto='none'
-#         echo "PPPoE config done." >>$LOGFILE
-#     else
-#         echo "PPPoE not enabled." >>$LOGFILE
-#     fi
-#
-#     uci commit network
-# fi
-
 # 设置所有网口可访问网页终端
   uci del ttyd.@ttyd[0].interface
 
@@ -108,33 +90,6 @@ echo "default router ip is 10.1.1.200" >> $LOGFILE
 FILE_PATH="/etc/openwrt_release"
 NEW_DESCRIPTION="Packaged by wukongdaily"
 sed -i "s/DISTRIB_DESCRIPTION='[^']*'/DISTRIB_DESCRIPTION='$NEW_DESCRIPTION'/" "$FILE_PATH"
-
-# 若luci-app-advancedplus (进阶设置)已安装 则去除zsh的调用 防止命令行报 /usb/bin/zsh: not found的提示
-if [ -f /usr/lib/lua/luci/controller/advancedplus.lua ]; then
-    sed -i '/\/usr\/bin\/zsh/d' /etc/profile
-    sed -i '/\/bin\/zsh/d' /etc/init.d/advancedplus
-    sed -i '/\/usr\/bin\/zsh/d' /etc/init.d/advancedplus
-    echo "fix ttyd show msg: /usb/bin/zsh: not found" >>$LOGFILE
-fi
-
-# 只有安装了 luci-app-quickfile 才执行
-if [ -f /usr/bin/quickfile ]; then
-    uci set nginx.global.uci_enable='true'
-    uci del nginx._lan 2>/dev/null
-    uci del nginx._redirect2ssl 2>/dev/null
-
-    uci add nginx server
-    uci rename nginx.@server[-1]='_lan'
-
-    uci set nginx._lan.server_name='_lan'
-    uci add_list nginx._lan.listen='80 default_server'
-    uci add_list nginx._lan.listen='[::]:80 default_server'
-    uci add_list nginx._lan.include='conf.d/*.locations'
-    uci set nginx._lan.access_log='off; # logd openwrt'
-
-    uci commit nginx
-    echo "fix quickfile nginx config" >>$LOGFILE
-fi
 
 # 若安装了dockerd 则设置docker的防火墙规则
 # 扩大docker涵盖的子网范围 '172.16.0.0/12'以及'10.16.0.0/12'

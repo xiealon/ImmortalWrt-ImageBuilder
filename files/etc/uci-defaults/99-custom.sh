@@ -70,9 +70,9 @@ uci del dhcp.lan.ndp
 uci -q del dhcp.@dnsmasq[0].authoritative
 
 # 创建Docker接口为Docker
-uci set network.docker=interface
-uci set network.docker.proto='none'
-uci set network.docker.device='docker0'
+#uci set network.docker=interface
+#uci set network.docker.proto='none'
+#uci set network.docker.device='docker0'
 
 # 提交
 uci commit

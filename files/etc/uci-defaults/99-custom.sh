@@ -150,11 +150,20 @@ EOF
     # 5. 禁用 Docker 自动 iptables 管理（防止规则被覆盖）
     DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
     mkdir -p /etc/docker
-    if [ ! -f "$DOCKER_DAEMON_JSON" ]; then
-        echo '{"iptables": false}' > "$DOCKER_DAEMON_JSON"
+
+    # 如果文件不存在或为空，先初始化一个合法 JSON
+    if [ ! -s "$DOCKER_DAEMON_JSON" ]; then
+        echo '{}' > "$DOCKER_DAEMON_JSON"
+    fi
+
+    # 使用临时文件 + mv 实现原子写入，避免写入中途崩溃导致文件损坏
+    tmp=$(mktemp)
+    if jq '.iptables = false' "$DOCKER_DAEMON_JSON" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$DOCKER_DAEMON_JSON"
     else
-        # 简单合并（生产环境建议用 jq）
-        sed -i 's/"iptables"\s*:\s*true/"iptables": false/' "$DOCKER_DAEMON_JSON"
+        # jq 解析失败（原文件非法JSON），降级为覆盖写入
+        echo '{"iptables": false}' > "$DOCKER_DAEMON_JSON"
+        rm -f "$tmp"
     fi
 
     # 6. 重载防火墙使配置生效

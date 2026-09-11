@@ -69,18 +69,14 @@ uci del dhcp.lan.ndp
 # 关闭dhcp页面的强制dhcp客户端（唯一客户端））
 uci -q del dhcp.@dnsmasq[0].authoritative
 
-# 创建Docker接口为Docker
-#uci set network.docker=interface
-#uci set network.docker.proto='none'
-#uci set network.docker.device='docker0'
-
 # 提交
 uci commit
 
-# 已知修复在新建br_lan接口情况下会出现一个默认的br-lan接口cfg030f15
+# 已知修复在新建br_lan接口情况下会出现一个默认名称的br-lan接口cfg030f15
+# 请确定好该项数值
 # 提交
-# uci del network.cfg030f15
-# uci commit
+uci del network.cfg030f15
+uci commit
 
 # 输出信息
 echo "default router ip is 10.1.1.200" >> $LOGFILE

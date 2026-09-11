@@ -27,6 +27,11 @@ fi
 uci set network.wan.disabled='1'
 uci set network.wan6.disabled='1'
 
+# 使lan接口为未指定状态
+# 删除系统内的br_lan接口
+uci del network.lan.device
+uci del network.br_lan
+
 # 创建一个br_lan接口 命名为br-lan
 uci set network.br_lan=device
 uci set network.br_lan.name='br-lan'
@@ -50,15 +55,24 @@ uci set network.lan.netmask='255.255.255.0'
 uci set network.lan.gateway='10.1.1.1'
 uci set network.lan.dns='10.1.1.1'
 
-# 忽略lan口的dhcp/v6
+# 忽略lan口的dhcp
 uci set dhcp.lan.ignore='1'
-uci set dhcp.lan.dhcpv4='disabled'
-uci set dhcp.lan.ra='disabled'
-uci set dhcp.lan.dhcpv6='disabled'
-uci set dhcp.lan.ndp='disabled'
+# 禁用RA路由通告
+uci del dhcp.lan.ra
+uci del dhcp.lan.max_preferred_lifetime
+uci del dhcp.lan.max_valid_lifetime
+# 禁用DHCPv6
+uci del dhcp.lan.dhcpv6
+# 忽略接口的NDP
+uci del dhcp.lan.ndp
 
 # 关闭dhcp页面的强制dhcp客户端（唯一客户端））
 uci -q del dhcp.@dnsmasq[0].authoritative
+
+# 创建Docker接口为Docker
+uci set network.docker=interface
+uci set network.docker.proto='none'
+uci set network.docker.device='docker0'
 
 # 提交
 uci commit
@@ -101,7 +115,7 @@ if command -v dockerd >/dev/null 2>&1; then
     echo "检测到 Docker，正在配置防火墙规则..."
     FW_FILE="/etc/config/firewall"
 
-    # 1. 安全删除所有名为 'docker' 的 zone（正确遍历匿名段）
+    # 安全删除所有名为 'docker' 的 zone（正确遍历匿名段）
     for idx in $(uci show firewall | grep "=zone" | cut -d[ -f2 | cut -d] -f1 | sort -rn); do
         name=$(uci get firewall.@zone[$idx].name 2>/dev/null)
         if [ "$name" = "docker" ]; then
@@ -110,7 +124,7 @@ if command -v dockerd >/dev/null 2>&1; then
         fi
     done
 
-    # 2. 安全删除所有涉及 'docker' 的 forwarding
+    # 安全删除所有涉及 'docker' 的 forwarding
     for idx in $(uci show firewall | grep "=forwarding" | cut -d[ -f2 | cut -d] -f1 | sort -rn); do
         src=$(uci get firewall.@forwarding[$idx].src 2>/dev/null)
         dest=$(uci get firewall.@forwarding[$idx].dest 2>/dev/null)
@@ -120,10 +134,10 @@ if command -v dockerd >/dev/null 2>&1; then
         fi
     done
 
-    # 3. 提交删除操作
-    uci commit firewall
+    # 提交
+    uci commit
 
-    # 4. 追加新配置（EOF 必须顶格，device 必须启用）
+    # 追加新配置（EOF 必须顶格，device 必须启用）
     cat >> "$FW_FILE" << 'EOF'
 config zone
     option name 'docker'
@@ -147,18 +161,7 @@ config forwarding
     option dest 'docker'
 EOF
 
-    # 5. 禁用 Docker 自动 iptables 管理（防止规则被覆盖）
-    # 两行搞定，不需要 jq，不需要 mkdir，不需要临时文件
-    # uci set dockerd.globals.iptables='0'
-    # uci commit dockerd
-    # 确保 globals section 存在（某些旧版固件可能没有）
-    uci -q get dockerd.globals >/dev/null || uci set dockerd.globals=globals
-    # 设置 nftables 后端
-    uci set dockerd.globals.iptables='1'
-    uci set dockerd.globals.firewall_backend='nftables'
-    uci commit dockerd
-    
-    # 6. 重载防火墙使配置生效
+    # 重载防火墙使配置生效
     /etc/init.d/firewall restart
     echo "✅ Docker 防火墙规则配置完成并已生效"
 else

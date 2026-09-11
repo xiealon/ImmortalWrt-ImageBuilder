@@ -57,9 +57,6 @@ PACKAGES="$PACKAGES luci-i18n-argon-config-zh-cn"
 # 24.10
 PACKAGES="$PACKAGES luci-i18n-package-manager-zh-cn"
 PACKAGES="$PACKAGES luci-i18n-ttyd-zh-cn"
-PACKAGES="$PACKAGES openssh-sftp-server"
-
-# uanFANG // openclash ＆ ssr
 PACKAGES="$PACKAGES base-files libuci lua luci-base curl bash coreutils-nohup"
 
 # 文件管理器

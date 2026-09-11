@@ -148,14 +148,14 @@ config forwarding
 EOF
 
     # 5. 禁用 Docker 自动 iptables 管理（防止规则被覆盖）
-    # DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
-    # mkdir -p /etc/docker
-    # if [ ! -f "$DOCKER_DAEMON_JSON" ]; then
-        # echo '{"iptables": false}' > "$DOCKER_DAEMON_JSON"
-    # else
+    DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
+    mkdir -p /etc/docker
+    if [ ! -f "$DOCKER_DAEMON_JSON" ]; then
+        echo '{"iptables": false}' > "$DOCKER_DAEMON_JSON"
+    else
         # 简单合并（生产环境建议用 jq）
-        # sed -i 's/"iptables"\s*:\s*true/"iptables": false/' "$DOCKER_DAEMON_JSON"
-    # fi
+        sed -i 's/"iptables"\s*:\s*true/"iptables": false/' "$DOCKER_DAEMON_JSON"
+    fi
 
     # 6. 重载防火墙使配置生效
     /etc/init.d/firewall restart

@@ -149,7 +149,13 @@ EOF
 
     # 5. 禁用 Docker 自动 iptables 管理（防止规则被覆盖）
     # 两行搞定，不需要 jq，不需要 mkdir，不需要临时文件
-    uci set dockerd.globals.iptables='0'
+    # uci set dockerd.globals.iptables='0'
+    # uci commit dockerd
+    # 确保 globals section 存在（某些旧版固件可能没有）
+    uci -q get dockerd.globals >/dev/null || uci set dockerd.globals=globals
+    # 设置 nftables 后端
+    uci set dockerd.globals.iptables='1'
+    uci set dockerd.globals.firewall_backend='nftables'
     uci commit dockerd
     
     # 6. 重载防火墙使配置生效

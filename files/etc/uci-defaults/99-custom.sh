@@ -144,7 +144,6 @@ config zone
     option input 'ACCEPT'
     option output 'ACCEPT'
     option forward 'ACCEPT'
-    list network 'docker0'
     list network 'docker'
     list network '172.17.0.0/16'
 

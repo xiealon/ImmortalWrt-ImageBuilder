@@ -28,15 +28,16 @@ uci set network.wan.disabled='1'
 uci set network.wan6.disabled='1'
 
 # 创建一个br_lan接口 命名为br-lan
-# uci set network.br_lan=device
-# uci set network.br_lan.name='br-lan'
-# uci set network.br_lan.type='bridge'
+uci set network.br_lan=device
+uci set network.br_lan.name='br-lan'
+uci set network.br_lan.type='bridge'
 uci set network.br_lan.bridge_empty='1'
 
 # 删除br_lan的所有接口
-uci -q del network.br_lan.ports
 # 查看设备上所有名称为eth，en，lan的接口
 # 将查看到的接口添加进入br-lan接口
+uci -q del network.br_lan.ports
+
 for port in $(ls /sys/class/net/ | grep -E '^(eth|en|lan)' | grep -v -E '(lo|docker|veth|br-|tun|tap)'); do
     uci add_list network.br_lan.ports="$port"
 done

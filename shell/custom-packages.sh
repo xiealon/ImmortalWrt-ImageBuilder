@@ -46,7 +46,8 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-dufs-zh-cn"
 # CrowdSec + SFTP 支持
 # CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec"
 # CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec-firewall-bouncer"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"
+# CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-crowdsec-firewall-bouncer"
+# CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES openssh-sftp-server"
 #
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-3ginfo-lite-zh-cn"

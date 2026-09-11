@@ -45,14 +45,15 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-rtp2httpd luci-i18n-rtp2httpd-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-dufs-zh-cn"
 
 #===========================以下imm仓库内的软件==============================↓
+# CrowdSec 完整套件 + SFTP 支持
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec crowdsec-firewall-bouncer-nftables openssh-sftp-server"
+#
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-3ginfo-lite-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-acl-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-acme-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-adblock-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-aria2-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-cloudflared-zh-cn"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-crowdsec"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec-firewall-bouncer"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-ddns-go-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-email-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-eoip-zh-cn"

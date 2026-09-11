@@ -148,24 +148,26 @@ config forwarding
 EOF
 
     # 5. 禁用 Docker 自动 iptables 管理（防止规则被覆盖）
+    # 如果 jq 不存在则尝试安装；安装失败则跳过 jq 方案
+    if ! command -v jq >/dev/null 2>&1; then
+        opkg update >/dev/null 2>&1 && opkg install jq >/dev/null 2>&1
+    fi
+
     DOCKER_DAEMON_JSON="/etc/docker/daemon.json"
     mkdir -p /etc/docker
 
-    # 如果文件不存在或为空，先初始化一个合法 JSON
     if [ ! -s "$DOCKER_DAEMON_JSON" ]; then
         echo '{}' > "$DOCKER_DAEMON_JSON"
     fi
 
-    # 使用临时文件 + mv 实现原子写入，避免写入中途崩溃导致文件损坏
     tmp=$(mktemp)
-    if jq '.iptables = false' "$DOCKER_DAEMON_JSON" > "$tmp" 2>/dev/null; then
+    if command -v jq >/dev/null 2>&1 && jq '.iptables = false' "$DOCKER_DAEMON_JSON" > "$tmp" 2>/dev/null; then
         mv "$tmp" "$DOCKER_DAEMON_JSON"
     else
-        # jq 解析失败（原文件非法JSON），降级为覆盖写入
+    # jq 不可用或解析失败，安全降级
         echo '{"iptables": false}' > "$DOCKER_DAEMON_JSON"
         rm -f "$tmp"
     fi
-
     # 6. 重载防火墙使配置生效
     /etc/init.d/firewall restart
     echo "✅ Docker 防火墙规则配置完成并已生效"

@@ -93,6 +93,10 @@ else
     echo "⚪️ 未选择 luci-app-openclash"
 fi
 
+# 在 make image 之前添加
+mkdir -p /home/build/immortalwrt/files/etc/config
+touch /home/build/immortalwrt/files/etc/config/crowdsec
+
 # 构建镜像
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Building image with the following packages:"
 echo "$PACKAGES"

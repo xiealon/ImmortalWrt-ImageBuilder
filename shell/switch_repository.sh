@@ -8,5 +8,5 @@ echo "========================================"
 echo "Updating repositories.conf"
 echo "========================================"
 # 恢复默认repositories
-#sed -i "s#${OFFICIAL}#${BASE_URL}#g" repositories.conf
+sed -i "s#${OFFICIAL}#${BASE_URL}#g" repositories.conf
 cat repositories.conf

@@ -44,7 +44,7 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-dufs-zh-cn"
 
 #===========================以下imm仓库内的软件==============================↓
 # CrowdSec + SFTP 支持
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec"
+# CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec-firewall-bouncer"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-crowdsec-firewall-bouncer"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"

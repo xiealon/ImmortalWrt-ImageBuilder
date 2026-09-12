@@ -85,7 +85,7 @@ echo "default router ip is 10.1.1.200" >> $LOGFILE
 # 语言为auto 开启表格筛选器
   uci set luci.main.mediaurlbase="/luci-static/argon"
   uci set luci.main.lang='auto'
-  uci set luci.main.tablefilter='1'
+  uci set luci.main.tablefilters='1'
   uci commit
 
 # qbittorrent服务//种子下载

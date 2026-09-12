@@ -81,9 +81,9 @@ uci commit
 # 输出信息
 echo "default router ip is 10.1.1.200" >> $LOGFILE
 
-# 设置主题为argon(其他主题不好用 进阶设置那个看了没什么用）
+# 设置主题为Bootstrap
 # 语言为auto 开启表格筛选器
-  uci set luci.main.mediaurlbase="/luci-static/argon"
+  uci set luci.main.mediaurlbase="/luci-static/bootstrap"
   uci set luci.main.lang='auto'
   uci set luci.main.tablefilters='1'
   uci commit

@@ -43,12 +43,9 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-rtp2httpd luci-i18n-rtp2httpd-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-dufs-zh-cn"
 
 #===========================以下imm仓库内的软件==============================↓
-# CrowdSec + SFTP 支持
-# CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec-firewall-bouncer"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-crowdsec-firewall-bouncer"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES openssh-sftp-server"
+# ban ip
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-banip-zh-cn"
 # usb无线网卡+随身WiFi
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-3ginfo-lite-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES usb-modeswitch usbutils"

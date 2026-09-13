@@ -49,8 +49,8 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-3ginfo-lite-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES usb-modeswitch usbutils"
 # banip
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-banip-zh-cn"
-# fail2ban+sshguard
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES fail2ban sshguard"
+# fail2ban
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES fail2ban"
 #
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-acl-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-acme-zh-cn"

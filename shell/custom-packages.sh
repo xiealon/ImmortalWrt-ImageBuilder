@@ -47,10 +47,10 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-3ginfo-lite-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES usb-modeswitch usbutils"
 # banip
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-banip-zh-cn"
-# crowdsec-firewall-bouncer
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"
-#CUSTOM_PACKAGES="$CUSTOM_PACKAGES  "
+# crowdsec-firewall-bouncer 配合容器crowdsec增强安全性
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec-firewall-bouncer"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-crowdsec-firewall-bouncer "
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"
 #
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-acl-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-acme-zh-cn"

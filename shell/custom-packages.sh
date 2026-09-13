@@ -47,6 +47,10 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES usb-modeswitch usbutils"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-banip-zh-cn"
 # fail2ban
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES fail2ban"
+# udp2raw
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES udp2raw luci-app-udp2raw"
+# wstunnel
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES wstunnel luci-app-wstunnel"
 #
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-acl-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-acme-zh-cn"

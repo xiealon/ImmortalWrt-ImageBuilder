@@ -50,7 +50,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES usb-modeswitch usbutils"
 # banip
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-banip-zh-cn"
 # crowd
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES -crowdsec crowdsec"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"
 # luci-app-categorize
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-acl-zh-cn"

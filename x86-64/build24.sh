@@ -50,8 +50,8 @@ PACKAGES="$PACKAGES curl"
 PACKAGES="$PACKAGES -dnsmasq dnsmasq-full"
 PACKAGES="$PACKAGES luci-i18n-diskman-zh-cn"
 PACKAGES="$PACKAGES luci-i18n-firewall-zh-cn"
-PACKAGES="PACKAGES luci-theme-design"
-PACKAGES="PACKAGES luci-theme-design-config"
+PACKAGES="$PACKAGES luci-theme-design"
+PACKAGES="$PACKAGES luci-theme-design-config"
 
 # 24.10
 PACKAGES="$PACKAGES luci-i18n-package-manager-zh-cn"

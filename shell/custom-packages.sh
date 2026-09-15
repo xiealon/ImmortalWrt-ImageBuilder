@@ -15,6 +15,7 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-openclash luci-compat kmod-tun kmod-i
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-homeproxy-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES netbird"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-netbird"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-strongswan-swanctl"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn"

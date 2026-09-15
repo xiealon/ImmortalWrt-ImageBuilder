@@ -43,9 +43,8 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES fail2ban"
 # usb无线网卡+随身WiFi
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-3ginfo-lite-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES usb-modeswitch usbutils"
-# banip
+# banip//crowdsec-firewall-bouncer 配合容器crowdsec增强安全性
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-banip-zh-cn"
-# crowdsec-firewall-bouncer 配合容器crowdsec增强安全性
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec-firewall-bouncer"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-crowdsec-firewall-bouncer "
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"
@@ -82,8 +81,10 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-smartdns-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-sqm-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-statistics-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-syncthing-zh-cn"
-#
+# wol
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-wol-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-timewol-zh-cn"
+#
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-ttyd-zh-cn"
 #
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-udpxy-zh-cn"

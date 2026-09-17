@@ -68,8 +68,14 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-frps-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-hd-idle-zh-cn"
 #
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-keepalived-zh-cn"
-#
+# lxc
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-lxc-zh-cn"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc luci-app-lxc lxc-templates"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-veth kmod-macvlan kmod-bridge"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-nf-nat kmod-nf-conntrack kmod-tun"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-ipv6 kmod-nft-tproxy kmod-nft-nat"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES ip-full dnsmasq-full bridge-utils"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES tar gzip xz-utils nftables"
 #
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-openlist-zh-cn"
 #

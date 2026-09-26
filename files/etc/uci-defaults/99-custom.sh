@@ -23,9 +23,9 @@ else
     . "$SETTINGS_FILE"
 fi
 
-BPS_IP='10.1.1.201'    #IP地址
-BPS_GW='10.1.1.1'      #网关
-BPS_DN='10.1.1.1'      #DNS
+BPS_IP='10.1.1.201'    #IP地址/LAN
+BPS_GW='10.1.1.1'      #网关/LAN
+BPS_DN='10.1.1.1'      #DNS/LAN
 LXC_IP='10.0.0.1'      #LXC地址
 LSC_IP='10.0.0.0/24'   #LXC NAT转发IP
 

@@ -55,14 +55,13 @@ uci set dhcp.lxc.interface='lxc'
 uci set dhcp.lxc.start='100'
 uci set dhcp.lxc.limit='150'
 uci set dhcp.lxc.leasetime='1h'
-#----------防火墙：独立 lxc 区 + 动态伪装 + 双向转发 ----------
+#----------防火墙：独立 lxc 区 ＆ 双向转发 ----------
 uci set firewall.lxczone=zone
 uci set firewall.lxczone.name='lxc'
 uci set firewall.lxczone.network='lxc'
 uci set firewall.lxczone.input='ACCEPT'
 uci set firewall.lxczone.output='ACCEPT'
 uci set firewall.lxczone.forward='ACCEPT'
-uci set firewall.lxczone.masq='1'
 # 容器 -> 内网/外网
 uci set firewall.lxc2lan=forwarding
 uci set firewall.lxc2lan.src='lxc'
@@ -79,6 +78,14 @@ uci set firewall.lxc2vpn.dest='vpn'
 uci set firewall.lan2lxc=forwarding
 uci set firewall.lan2lxc.src='lan'
 uci set firewall.lan2lxc.dest='lxc'
+# 创建端口转发[nat]
+uci set firewall.lxcsnat=nat
+uci set firewall.lxcsnat.name='lxc-snat'
+uci add_list firewall.lxcsnat.proto='all'
+uci set firewall.lxcsnat.src='lan'
+uci set firewall.lxcsnat.src_ip='10.0.0.0/24'
+uci set firewall.lxcsnat.target='SNAT'
+uci set firewall.lxcsnat.snat_ip='192.168.3.201'
 # 提交
 uci commit
 

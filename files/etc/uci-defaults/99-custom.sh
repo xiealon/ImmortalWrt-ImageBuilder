@@ -23,6 +23,7 @@ else
     . "$SETTINGS_FILE"
 fi
 
+# IP/网关/DNS设置（附带LXC）
 BPS_IP='10.1.1.201'    #IP地址/LAN
 BPS_GW='10.1.1.1'      #网关/LAN
 BPS_DN='10.1.1.1'      #DNS/LAN

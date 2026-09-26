@@ -23,9 +23,12 @@ else
     . "$SETTINGS_FILE"
 fi
 
-BYPASS_IP='10.1.1.201' # IP地址
-BYPASS_GW='10.1.1.1'   #网关
-BYPASS_DN='10.1.1.1'   #DNS
+BPS_IP='10.1.1.201'    #IP地址
+BPS_GW='10.1.1.1'      #网关
+BPS_DN='10.1.1.1'      #DNS
+LXC_IP='10.0.0.1'      #LXC地址
+LSC_IP='10.0.0.0/24'   #LXC NAT转发IP
+
 
 # 禁用WAN口
 uci set network.wan.disabled='1'
@@ -51,7 +54,7 @@ uci set network.lxcbr0.bridge_empty='1'
 uci set network.lxc=interface
 uci set network.lxc.device='lxcbr0'
 uci set network.lxc.proto='static'
-uci set network.lxc.ipaddr='10.0.0.1'
+uci set network.lxc.ipaddr="${LXC_IP}"
 uci set network.lxc.netmask='255.255.255.0'
 #----------DHCP：容器网段发 IP----------
 uci set dhcp.lxc=dhcp
@@ -87,9 +90,9 @@ uci set firewall.lxcsnat=nat
 uci set firewall.lxcsnat.name='lxc-snat'
 uci add_list firewall.lxcsnat.proto='all'
 uci set firewall.lxcsnat.src='lan'
-uci set firewall.lxcsnat.src_ip='10.0.0.0/24'
+uci set firewall.lxcsnat.src_ip="${LSC_IP}"
 uci set firewall.lxcsnat.target='SNAT'
-uci set firewall.lxcsnat.snat_ip="${BYPASS_IP}"
+uci set firewall.lxcsnat.snat_ip="${BPS_IP}"
 # 提交
 uci commit
 
@@ -105,10 +108,10 @@ done
 # 将br-lan添加进入lan口并设置ip，掩码，网关，dns
 uci set network.lan.device='br-lan'
 uci set network.lan.proto='static'
-uci set network.lan.ipaddr="${BYPASS_IP}"
+uci set network.lan.ipaddr="${BPS_IP}"
 uci set network.lan.netmask='255.255.255.0'
-uci set network.lan.gateway="${BYPASS_GW}"
-uci set network.lan.dns="${BYPASS_DN}"
+uci set network.lan.gateway="${BPS_GW}"
+uci set network.lan.dns="${BPS_DN}"
 
 # 忽略lan口的dhcp
 uci set dhcp.lan.ignore='1'
@@ -134,7 +137,7 @@ uci del network.cfg030f15
 uci commit
 
 # 输出信息
-echo "default router ip is 10.1.1.200" >> $LOGFILE
+echo "default router ip is ${BPS_IP}" >> $LOGFILE
 
 # 设置主题为Bootstrap
 # 语言为auto 开启表格筛选器

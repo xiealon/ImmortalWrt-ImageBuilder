@@ -38,6 +38,50 @@ uci set network.br_lan.name='br-lan'
 uci set network.br_lan.type='bridge'
 uci set network.br_lan.bridge_empty='1'
 
+# lxc
+#----------网络：lxcbr0 网桥 + lxc 接口----------
+uci set network.lxcbr0=device
+uci set network.lxcbr0.name='lxcbr0'
+uci set network.lxcbr0.type='bridge'
+uci set network.lxcbr0.bridge_empty='1'
+uci set network.lxc=interface
+uci set network.lxc.device='lxcbr0'
+uci set network.lxc.proto='static'
+uci set network.lxc.ipaddr='10.0.0.1'
+uci set network.lxc.netmask='255.255.255.0'
+#----------DHCP：容器网段发 IP----------
+uci set dhcp.lxc=dhcp
+uci set dhcp.lxc.interface='lxc'
+uci set dhcp.lxc.start='100'
+uci set dhcp.lxc.limit='150'
+uci set dhcp.lxc.leasetime='1h'
+#----------防火墙：独立 lxc 区 + 动态伪装 + 双向转发 ----------
+uci set firewall.lxczone=zone
+uci set firewall.lxczone.name='lxc'
+uci set firewall.lxczone.network='lxc'
+uci set firewall.lxczone.input='ACCEPT'
+uci set firewall.lxczone.output='ACCEPT'
+uci set firewall.lxczone.forward='ACCEPT'
+uci set firewall.lxczone.masq='1'
+# 容器 -> 内网/外网
+uci set firewall.lxc2lan=forwarding
+uci set firewall.lxc2lan.src='lxc'
+uci set firewall.lxc2lan.dest='lan'
+# 容器 -> docker 区（访问宿主 Docker 网段 172.16.0.0/12）
+uci set firewall.lxc2docker=forwarding
+uci set firewall.lxc2docker.src='lxc'
+uci set firewall.lxc2docker.dest='docker'
+# 容器 -> vpn 区（tun0，走 VPN 隧道出网）
+uci set firewall.lxc2vpn=forwarding
+uci set firewall.lxc2vpn.src='lxc'
+uci set firewall.lxc2vpn.dest='vpn'
+# 内网 -> 容器（局域网设备能直接访问容器）
+uci set firewall.lan2lxc=forwarding
+uci set firewall.lan2lxc.src='lan'
+uci set firewall.lan2lxc.dest='lxc'
+# 提交
+uci commit
+
 # 删除br_lan的所有接口
 # 查看设备上所有名称为eth，en，lan的接口
 # 将查看到的接口添加进入br-lan接口

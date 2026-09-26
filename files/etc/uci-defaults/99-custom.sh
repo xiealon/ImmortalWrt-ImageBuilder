@@ -23,6 +23,10 @@ else
     . "$SETTINGS_FILE"
 fi
 
+BYPASS_IP='10.1.1.201' # IP地址
+BYPASS_GW='10.1.1.1'   #网关
+BYPASS_DN='10.1.1.1'   #DNS
+
 # 禁用WAN口
 uci set network.wan.disabled='1'
 uci set network.wan6.disabled='1'
@@ -85,7 +89,7 @@ uci add_list firewall.lxcsnat.proto='all'
 uci set firewall.lxcsnat.src='lan'
 uci set firewall.lxcsnat.src_ip='10.0.0.0/24'
 uci set firewall.lxcsnat.target='SNAT'
-uci set firewall.lxcsnat.snat_ip='192.168.3.201'
+uci set firewall.lxcsnat.snat_ip="${BYPASS_IP}"
 # 提交
 uci commit
 
@@ -101,10 +105,10 @@ done
 # 将br-lan添加进入lan口并设置ip，掩码，网关，dns
 uci set network.lan.device='br-lan'
 uci set network.lan.proto='static'
-uci set network.lan.ipaddr='10.1.1.200'
+uci set network.lan.ipaddr="${BYPASS_IP}"
 uci set network.lan.netmask='255.255.255.0'
-uci set network.lan.gateway='10.1.1.1'
-uci set network.lan.dns='10.1.1.1'
+uci set network.lan.gateway="${BYPASS_GW}"
+uci set network.lan.dns="${BYPASS_DN}"
 
 # 忽略lan口的dhcp
 uci set dhcp.lan.ignore='1'

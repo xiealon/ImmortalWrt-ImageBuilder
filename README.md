@@ -51,7 +51,7 @@ uci set firewall.lan2lxc=forwarding
 uci set firewall.lan2lxc.src='lan'
 uci set firewall.lan2lxc.dest='lxc'
 
-# SNAT：src 按新写法填出接口侧 lan；若容器出网不通再改成 'lxc' 试
+# SNAT
 uci set firewall.lxcsnat=nat
 uci set firewall.lxcsnat.name='lxc-snat'
 uci add_list firewall.lxcsnat.proto='all'

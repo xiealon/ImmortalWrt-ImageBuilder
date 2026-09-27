@@ -7,7 +7,7 @@
 
 ---
 
-## 第 1 步 · 路由器装软件
+## 第 1 步 · 路由器装软件 ✅
 **干什么**：装 LXC 工具链（跑容器用）和 bouncer（执行封禁用）。**不装** crowdsec 主包，主程序放容器里。
 
 ```sh
@@ -17,7 +17,7 @@ opkg install lxc lxc-common lxc-configs lxc-attach lxc-info lxc-start lxc-stop l
 opkg install xz tar kmod-veth crowdsec-firewall-bouncer luci-app-crowdsec-firewall-bouncer
 ```
 
-## 第 2 步 · 建 LXC 网络
+## 第 2 步 · 建 LXC 网络 ✅
 **干什么**：建网桥 `lxcbr0` 给容器用，配上 DHCP、防火墙区，再做 SNAT 让容器能出网。
 
 ```sh

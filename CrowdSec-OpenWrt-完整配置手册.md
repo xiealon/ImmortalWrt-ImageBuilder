@@ -149,16 +149,32 @@ EOF
   - `service=ssh`：**ssh-bf 场景只认 service==ssh 的事件**，没有它爆破永远不触发
   - `source_ip` / `username`：从 Parsed 提取到 Meta，供场景和告警使用
 
-### 2.3 防呆替代方案（base64 写入，推荐）
+### 2.3 防呆替代方案（base64 写入）
 
-如果 heredoc 复制后缩进丢失（YAML 报错 / explain 结果不对），把上面内容在我这边编码成 base64 后一行写入：
+如果 heredoc 复制后缩进丢失（YAML 报错 / explain 结果不对），用下面这条一行式命令写入。base64 编码后是一整行、没有空格，任何复制渠道都不会变形。
+
+**base64 字符串怎么来的**：就是把 2.2 的 YAML 文件内容编码成 base64。生成方法（在其他电脑上做，路由器/容器侧不需要生成，只需解码）：
+
+```powershell
+# Windows PowerShell（把路径换成实际的 yaml 文件路径）
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\openwrt-dropbear.yaml"))
+```
 
 ```sh
-echo '<base64字符串>' | base64 -d > /etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml
+# Linux / macOS
+base64 -w0 openwrt-dropbear.yaml    # -w0 表示输出不换行，必须带
 ```
-- `echo '...'`：输出 base64 文本（一行、无空格，复制不会变形）
-- `base64 -d`：解码
+
+> 注意：base64 只是"无损搬运"手段，**如果将来修改了 YAML 内容，必须重新生成 base64**。下面是本手册对应版本（2.2 最终版）现成的编码，直接用即可：
+
+```sh
+echo 'bmFtZTogb3BlbndydC9kcm9wYmVhci1sb2dzCmRlc2NyaXB0aW9uOiBQYXJzZSBPcGVuV3J0IG5vbi1QQU0gZHJvcGJlYXIgbG9ncwpmaWx0ZXI6IGV2dC5QYXJzZWQucHJvZ3JhbSA9PSAnZHJvcGJlYXInCm9uc3VjY2VzczogbmV4dF9zdGFnZQpub2RlczoKICAtIGdyb2s6CiAgICAgIHBhdHRlcm46ICJCYWQgcGFzc3dvcmQgYXR0ZW1wdCBmb3IgJz8le0RBVEE6dXNlcm5hbWV9Jz8gZnJvbSAle0lQOnNvdXJjZV9pcH06JXtJTlQ6c291cmNlX3BvcnR9IgogICAgICBhcHBseV9vbjogbWVzc2FnZQogICAgc3RhdGljczoKICAgICAgLSBtZXRhOiBsb2dfdHlwZQogICAgICAgIHZhbHVlOiBzc2hfZmFpbGVkLWF1dGgKICAtIGdyb2s6CiAgICAgIHBhdHRlcm46ICJMb2dpbiBhdHRlbXB0IGZvciBub25leGlzdGVudCB1c2VyICV7R1JFRURZREFUQTp1c2VybmFtZX0gZnJvbSAle0lQOnNvdXJjZV9pcH06JXtJTlQ6c291cmNlX3BvcnR9IgogICAgICBhcHBseV9vbjogbWVzc2FnZQogICAgc3RhdGljczoKICAgICAgLSBtZXRhOiBsb2dfdHlwZQogICAgICAgIHZhbHVlOiBzc2hfZmFpbGVkLWF1dGgKICAtIGdyb2s6CiAgICAgIHBhdHRlcm46ICJFeGl0IGJlZm9yZSBhdXRoIGZyb20gPCV7SVA6c291cmNlX2lwfTole0lOVDpzb3VyY2VfcG9ydH0+IgogICAgICBhcHBseV9vbjogbWVzc2FnZQogICAgc3RhdGljczoKICAgICAgLSBtZXRhOiBsb2dfdHlwZQogICAgICAgIHZhbHVlOiBzc2hfZmFpbGVkLWF1dGgKICAtIGdyb2s6CiAgICAgIHBhdHRlcm46ICJQYXNzd29yZCBhdXRoIHN1Y2NlZWRlZCBmb3IgJz8le0RBVEE6dXNlcm5hbWV9Jz8gZnJvbSAle0lQOnNvdXJjZV9pcH06JXtJTlQ6c291cmNlX3BvcnR9IgogICAgICBhcHBseV9vbjogbWVzc2FnZQogICAgc3RhdGljczoKICAgICAgLSBtZXRhOiBsb2dfdHlwZQogICAgICAgIHZhbHVlOiBzc2hfYXV0aF9zdWNjZXNzCiAgLSBncm9rOgogICAgICBwYXR0ZXJuOiAiUHVia2V5IGF1dGggc3VjY2VlZGVkIGZvciAnPyV7REFUQTp1c2VybmFtZX0nPyB3aXRoIGtleSAle0RBVEE6a2V5X3R5cGV9IGZyb20gJXtJUDpzb3VyY2VfaXB9OiV7SU5UOnNvdXJjZV9wb3J0fSIKICAgICAgYXBwbHlfb246IG1lc3NhZ2UKICAgIHN0YXRpY3M6CiAgICAgIC0gbWV0YTogbG9nX3R5cGUKICAgICAgICB2YWx1ZTogc3NoX2F1dGhfc3VjY2VzcwpzdGF0aWNzOgogIC0gbWV0YTogc2VydmljZQogICAgdmFsdWU6IHNzaAogIC0gbWV0YTogc291cmNlX2lwCiAgICBleHByZXNzaW9uOiBldnQuUGFyc2VkLnNvdXJjZV9pcAogIC0gbWV0YTogdXNlcm5hbWUKICAgIGV4cHJlc3Npb246IGV2dC5QYXJzZWQudXNlcm5hbWUK' | base64 -d > /etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml
+```
+
+- `echo '...'`：输出 base64 文本（单引号保证 shell 不解释内容）
+- `base64 -d`：把 base64 解码回原始 YAML
 - `> 文件`：写入解析器文件
+- ⚠️ 命令很长，复制时确保**结尾的文件路径完整**（之前踩过复制截断、把内容写进目录报 "Is a directory" 的坑）。如果太长易截断，可先用 `echo '串' > /tmp/db.b64` 分段拼接，再 `base64 -d /tmp/db.b64 > 目标文件`
 
 写完验证：
 

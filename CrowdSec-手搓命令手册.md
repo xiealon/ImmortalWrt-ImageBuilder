@@ -7,10 +7,10 @@
 >
 > | 变量 | 本文取值 | 说明 |
 > |---|---|---|
-> | 路由器 LAN IP | `192.168.3.201` | 旁路由自身地址（SNAT 源、SSH 测试目标） |
+> | 路由器 LAN IP | `10.1.1.201` | 旁路由自身地址（SNAT 源、SSH 测试目标） |
 > | 容器网段 | `10.0.0.0/24` | lxcbr0 网段 |
 > | 网桥 IP | `10.0.0.1` | 容器的网关和 DNS |
-> | 容器 IP | `10.0.0.233` | CrowdSec Agent 所在地址 |
+> | 容器 IP | `10.0.0.10` | CrowdSec Agent 所在地址 |
 
 约定：命令前标 `路由#` 的在路由器上执行，标 `容器#` 的在容器里执行（用 `lxc-attach` 进去）。
 
@@ -63,14 +63,14 @@ uci set firewall.lan2lxc=forwarding
 uci set firewall.lan2lxc.src='lan'
 uci set firewall.lan2lxc.dest='lxc'
 
-# 路由# ---------- SNAT（src 必须是 lxc，写 lan 容器出不了网）----------
+# 路由# ---------- SNAT（src 按新写法填出接口侧 lan；不通再试 'lxc'）----------
 uci set firewall.lxcsnat=nat
 uci set firewall.lxcsnat.name='lxc-snat'
 uci add_list firewall.lxcsnat.proto='all'
-uci set firewall.lxcsnat.src='lxc'
+uci set firewall.lxcsnat.src='lan'
 uci set firewall.lxcsnat.src_ip='10.0.0.0/24'
 uci set firewall.lxcsnat.target='SNAT'
-uci set firewall.lxcsnat.snat_ip='192.168.3.201'
+uci set firewall.lxcsnat.snat_ip='10.1.1.201'
 
 uci commit
 service network restart
@@ -108,7 +108,7 @@ cat > /srv/lxc/ubuntu/rootfs/etc/systemd/network/10-eth0.network <<'EOF'
 Name=eth0
 
 [Network]
-Address=10.0.0.233/24
+Address=10.0.0.10/24
 Gateway=10.0.0.1
 DNS=10.0.0.1
 EOF
@@ -117,7 +117,7 @@ echo "nameserver 10.0.0.1" > /srv/lxc/ubuntu/rootfs/etc/resolv.conf
 echo "ubuntu" > /srv/lxc/ubuntu/rootfs/etc/hostname
 
 lxc-start -P /srv/lxc -n ubuntu
-ping -c2 10.0.0.233
+ping -c2 10.0.0.10
 ```
 
 > 容器必须放 `/srv/lxc`（OpenWrt 的 `/var` 是 tmpfs，放 `/var/lib/lxc` 重启就没了）。
@@ -141,6 +141,9 @@ systemctl restart crowdsec
 ```
 
 ## 5. 配置日志源 / 解析器 / 白名单
+
+> 这一步另拆了两个独立文件，方便整段复制：`CrowdSec-第5步-配置-heredoc.md`（可读版）和 `CrowdSec-第5步-配置-base64.md`（防丢缩进版，推荐）。内容与本节完全相同，二选一即可。
+> 下面把两种写法都保留，方便对照。
 
 ```sh
 # 容器# ---------- 收路由器 syslog ----------
@@ -213,6 +216,16 @@ whitelist:
   cidr:
     - 240.0.0.0/4
 EOF
+
+# ---------- 备选写法：base64 单行写入（推荐）----------
+# 从网页/聊天窗口复制 heredoc 经常丢掉行首空格，YAML 缩进一乱规则就失效。
+# 用 base64 单行写入最稳，和上面的 heredoc 二选一即可，内容完全一样。
+echo 'bmFtZTogb3BlbndydC9kcm9wYmVhci1sb2dzCmRlc2NyaXB0aW9uOiBQYXJzZSBPcGVuV3J0IG5vbi1QQU0gZHJvcGJlYXIgbG9ncwpmaWx0ZXI6IGV2dC5QYXJzZWQucHJvZ3JhbSA9PSAnZHJvcGJlYXInCm9uc3VjY2VzczogbmV4dF9zdGFnZQpub2RlczoKICAtIGdyb2s6CiAgICAgIHBhdHRlcm46ICJCYWQgcGFzc3dvcmQgYXR0ZW1wdCBmb3IgJz8le0RBVEE6dXNlcm5hbWV9Jz8gZnJvbSAle0lQOnNvdXJjZV9pcH06JXtJTlQ6c291cmNlX3BvcnR9IgogICAgICBhcHBseV9vbjogbWVzc2FnZQogICAgc3RhdGljczoKICAgICAgLSBtZXRhOiBsb2dfdHlwZQogICAgICAgIHZhbHVlOiBzc2hfZmFpbGVkLWF1dGgKICAtIGdyb2s6CiAgICAgIHBhdHRlcm46ICJMb2dpbiBhdHRlbXB0IGZvciBub25leGlzdGVudCB1c2VyICV7R1JFRURZREFUQTp1c2VybmFtZX0gZnJvbSAle0lQOnNvdXJjZV9pcH06JXtJTlQ6c291cmNlX3BvcnR9IgogICAgICBhcHBseV9vbjogbWVzc2FnZQogICAgc3RhdGljczoKICAgICAgLSBtZXRhOiBsb2dfdHlwZQogICAgICAgIHZhbHVlOiBzc2hfZmFpbGVkLWF1dGgKICAtIGdyb2s6CiAgICAgIHBhdHRlcm46ICJFeGl0IGJlZm9yZSBhdXRoIGZyb20gPCV7SVA6c291cmNlX2lwfTole0lOVDpzb3VyY2VfcG9ydH0+IgogICAgICBhcHBseV9vbjogbWVzc2FnZQogICAgc3RhdGljczoKICAgICAgLSBtZXRhOiBsb2dfdHlwZQogICAgICAgIHZhbHVlOiBzc2hfZmFpbGVkLWF1dGgKICAtIGdyb2s6CiAgICAgIHBhdHRlcm46ICJQYXNzd29yZCBhdXRoIHN1Y2NlZWRlZCBmb3IgJz8le0RBVEE6dXNlcm5hbWV9Jz8gZnJvbSAle0lQOnNvdXJjZV9pcH06JXtJTlQ6c291cmNlX3BvcnR9IgogICAgICBhcHBseV9vbjogbWVzc2FnZQogICAgc3RhdGljczoKICAgICAgLSBtZXRhOiBsb2dfdHlwZQogICAgICAgIHZhbHVlOiBzc2hfYXV0aF9zdWNjZXNzCiAgLSBncm9rOgogICAgICBwYXR0ZXJuOiAiUHVia2V5IGF1dGggc3VjY2VlZGVkIGZvciAnPyV7REFUQTp1c2VybmFtZX0nPyB3aXRoIGtleSAle0RBVEE6a2V5X3R5cGV9IGZyb20gJXtJUDpzb3VyY2VfaXB9OiV7SU5UOnNvdXJjZV9wb3J0fSIKICAgICAgYXBwbHlfb246IG1lc3NhZ2UKICAgIHN0YXRpY3M6CiAgICAgIC0gbWV0YTogbG9nX3R5cGUKICAgICAgICB2YWx1ZTogc3NoX2F1dGhfc3VjY2VzcwpzdGF0aWNzOgogIC0gbWV0YTogc2VydmljZQogICAgdmFsdWU6IHNzaAogIC0gbWV0YTogc291cmNlX2lwCiAgICBleHByZXNzaW9uOiBldnQuUGFyc2VkLnNvdXJjZV9pcAogIC0gbWV0YTogdXNlcm5hbWUKICAgIGV4cHJlc3Npb246IGV2dC5QYXJzZWQudXNlcm5hbWUK' | base64 -d > /etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml
+
+echo 'IyDkvZznlKjvvJpzMDItZW5yaWNoIOmYtuauteeahOiHquWumuS5ieeZveWQjeWNleino+aekOWZqOOAggojIOWmguaenOS9oOOAjOS4jemcgOimgeS7u+S9leeZveWQjeWNleOAje+8jOS/neaMgeS4i+mdoui/meS4quWNoOS9jeWGmeazleWNs+WPr++8iDEyNy4wLjAuMSDmmK/mnKzmnLrlm57njq/vvIwKIyDmsLjov5zkuI3kvJrmiJDkuLrml6Xlv5fph4znmoQgc291cmNlX2lw77yM562J5LqO5LiA5p2h5LiN55Sf5pWI55qE6KeE5YiZ77yJ77yM5LiN6KaB5YaZ5oiQ56m65YiX6KGo5oiW5Yig5o6JCiMgaXAvY2lkciDlrZfmrrXigJTigJRDcm93ZFNlYyDliqDovb3ml7blr7nlrZfmrrXnvLrlpLHnmoTlrrnlv43luqbkuI3lpoLljaDkvY3lgLznqLPjgIIKIwojIOaDs+W9u+W6leWOu+aOiei/meS4quaWh+S7tu+8muebtOaOpeWIoOmZpOWug+WNs+WPr++8jGJvb3RzdHJhcCDohJrmnKzlt7LlgZrlrZjlnKjmgKfliKTmlq3vvIzkuI3kvJrmiqXplJnjgIIKbmFtZTogb3BlbndydC9teS13aGl0ZWxpc3QKZGVzY3JpcHRpb246ICdObyB3aGl0ZWxpc3QgY29uZmlndXJlZCAtIHBsYWNlaG9sZGVyIG9ubHknCndoaXRlbGlzdDoKICByZWFzb246IHBsYWNlaG9sZGVyLCBub3RoaW5nIGlzIHdoaXRlbGlzdGVkCiAgaXA6CiAgICAtIDEyNy4wLjAuMQogIGNpZHI6CiAgICAtIDI0MC4wLjAuMC80Cg==' | base64 -d > /etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml
+
+# 验证：必须输出 3，少一条说明文件写坏了（缩进丢了或复制截断）
+grep -c 'value: ssh_failed-auth' /etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml
 ```
 
 ```sh
@@ -227,7 +240,7 @@ systemctl restart crowdsec
 
 ```sh
 # 路由# ---------- 日志指向容器 ----------
-uci set system.@system[0].log_ip='10.0.0.233'
+uci set system.@system[0].log_ip='10.0.0.10'
 uci set system.@system[0].log_port='514'
 uci set system.@system[0].log_proto='udp'
 uci commit system
@@ -242,7 +255,7 @@ cscli bouncers add openwrt-fw -o raw
 # 注意：OpenWrt 的 bouncer 段是匿名段，必须用 @bouncer[n]，不能写 crowdsec.bouncer.xxx
 SEC=$(uci show crowdsec | grep '=bouncer$' | head -n1 | cut -d= -f1)
 uci set "$SEC.enabled=1"
-uci set "$SEC.api_url=http://10.0.0.233:8080/"
+uci set "$SEC.api_url=http://10.0.0.10:8080/"
 uci set "$SEC.api_key=这里粘贴上一步生成的key"
 uci set "$SEC.ipv4=1"
 uci set "$SEC.ipv6=0"
@@ -274,7 +287,7 @@ uci show crowdsec               # 确认 api_url / api_key 已写入
 **端到端测试**：找一台**不在白名单**的电脑，连输错密码 12 次以上：
 
 ```sh
-ssh -o PubkeyAuthentication=no root@192.168.3.201
+ssh -o PubkeyAuthentication=no root@10.1.1.201
 ```
 
 然后容器里 `cscli alerts list` 应出现 `crowdsecurity/ssh-bf`，`cscli decisions list` 出现 ban 记录。
@@ -306,7 +319,7 @@ lxc-attach -P /srv/lxc -n ubuntu
 
 # 容器#
 cscli decisions list                      # 看当前封禁
-cscli decisions delete --ip 192.168.3.41  # 解封某个 IP（误封自己时用这条）
+cscli decisions delete --ip 10.1.1.41  # 解封某个 IP（误封自己时用这条）
 cscli alerts list
 cscli parsers list                        # 看解析器是否加载
 cscli scenarios list                      # 确认 ssh-bf 场景存在
@@ -328,6 +341,6 @@ service crowdsec-firewall-bouncer restart
 | `cscli explain` 结果正确但就是不告警 | daemon 跑着旧配置 → `systemctl restart crowdsec` |
 | poured to bucket 一直是 0 | hub 的 `crowdsecurity/whitelists` 没移除（私网全被加白） |
 | bouncer 不起 / LuCI 显示已配置但不生效 | uci 段名写错，要用 `crowdsec.@bouncer[0]` |
-| 容器出不了网 | SNAT 的 `src` 写成了 `lan`，应为 `lxc` |
+| 容器出不了网 | SNAT 的 `src` 要填**出接口侧** `lan`（新写法），写成 `lxc` 才不通；`snat_ip` 填路由器自身 LAN IP |
 | 告警有了但没真封 | 看 `nft list table ip crowdsec` 有没有集合；bouncer 是否 `filter_input=1` |
 | 路由器上 `cscli: not found` | 正常，cscli 只在容器里，先进容器 |

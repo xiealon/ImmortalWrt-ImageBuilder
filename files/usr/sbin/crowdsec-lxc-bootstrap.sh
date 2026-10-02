@@ -28,7 +28,14 @@ CSCLI=/usr/bin/cscli
 MAX_WAIT="${MAX_WAIT:-60}"     # 每个等待阶段最多重试 60 次 × 5s = 5 分钟
 SLEEP=5
 
+# 版本标记：每次运行都写进日志。
+# 排错时最怕的情况是「以为刷进去了、其实路由器上跑的还是旧脚本」——
+# 有了这行，看一眼日志就知道路由器上是哪一版，不用去比对文件内容。
+SCRIPT_VER="2026-10-03.2"
+
 log() { echo "[$(date '+%F %T')] $*"; }
+
+log "===== crowdsec-lxc-bootstrap 版本 $SCRIPT_VER 开始执行 ====="
 
 # 在容器里执行一条命令
 ct() { lxc-attach -P "$LXC_PATH" -n "$LXC_NAME" -- "$@"; }
@@ -55,18 +62,27 @@ fi
 ct_running || log "容器未在运行，尝试拉起"
 
 # ---------- 1. 解压 rootfs ----------
+FRESH=0
 if [ ! -f "$ROOTFS/etc/crowdsec/config.yaml" ]; then
     [ -f "$TARBALL" ] || { log "!! 缺少 $TARBALL，放弃引导"; exit 1; }
     log "解压容器 rootfs（约 1-2 分钟）..."
     mkdir -p "$ROOTFS"
     tar -xzf "$TARBALL" -C "$ROOTFS" || { log "!! 解压失败"; exit 1; }
     log "解压完成"
+    FRESH=1
 fi
 
 # ---------- 2. 容器 config ----------
 CFG="$LXC_PATH/$LXC_NAME/config"
 mkdir -p "$LXC_PATH/$LXC_NAME"
-if [ ! -f "$CFG" ]; then
+
+# 已知可用的最小 config，抽成函数：
+#   - 首次生成时调用
+#   - 下面自愈彻底失败时，用它兜底重写（旧文件先备份）
+# 注意：这里故意不写 lxc.kmsg。OpenWrt 的 lxc 是裁剪编译的，
+# 很多可选键没编进 confile.c（实测 lxc.kmsg 就不支持），一旦 config 里出现
+# 不支持的键，整个文件解析失败，所有 lxc-* 命令都会 "Failed to load config"。
+write_cfg() {
 cat > "$CFG" <<EOF
 lxc.start.auto = 1
 lxc.start.order = 10
@@ -82,10 +98,15 @@ lxc.net.0.hwaddr = 10:66:6A:7C:05:9A
 lxc.tty.max = 4
 lxc.pty.max = 1024
 EOF
-# 注意：这里故意不写 lxc.kmsg。OpenWrt 的 lxc 是裁剪编译的，
-# 很多可选键没编进 confile.c（实测 lxc.kmsg 就不支持），一旦 config 里出现
-# 不支持的键，整个文件解析失败，所有 lxc-* 命令都会 "Failed to load config"。
-log "已写入容器 config"
+}
+
+if [ ! -f "$CFG" ]; then
+    write_cfg
+    log "已写入容器 config"
+else
+    # 关键：老固件（或手工搭的容器）留下的 config 可能在，但内容带不支持的键。
+    # 这里只提示不处理，下面的自愈会负责修。
+    log "容器 config 已存在，先做兼容性校验"
 fi
 
 # ---------- 2.1 配置键兼容性自愈 ----------
@@ -113,10 +134,22 @@ while [ $_trim -lt 20 ]; do
     rm -f "$CFG.tmp"
     _trim=$((_trim+1))
 done
+
+# 二次兜底：抠行只能处理「报错里带了出错行」的情况。
+# 如果 LXC 换了报错格式、或者 config 被别的东西改坏到抠不出来，
+# 上面的循环会原地打转然后退出。这里直接把 config 换成已知可用的模板重写——
+# 反正这份 config 是脚本自己生成的，没有任何用户手改内容需要保护（先备份）。
 if ! lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; then
-    log "!! 容器 config 仍无法解析，放弃引导"
+    log "!! 自愈未能修好 config，改用已知模板重写（旧文件已备份为 $CFG.bak）"
+    cp -f "$CFG" "$CFG.bak" 2>/dev/null
+    write_cfg
+fi
+
+if ! lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; then
+    log "!! 容器 config 仍无法解析，放弃引导（现场排查：lxc-info -P $LXC_PATH -n $LXC_NAME）"
     exit 1
 fi
+log "容器 config 校验通过"
 
 # ---------- 3. 确保容器在跑 ----------
 # 先等 lxcbr0 出现（99-custom.sh 只是写了 uci，网桥要等 network 服务起来才有）
@@ -151,6 +184,16 @@ until ct $CSCLI bouncers list >/dev/null 2>&1; do
     sleep $SLEEP
 done
 log "CrowdSec LAPI 已就绪"
+
+# 若本次是全新解压的 rootfs，容器里的 CrowdSec 是干净的（/var/lib/crowdsec 为空，
+# 没有任何已注册的 bouncer），uci 里残留的旧 key 必然已失效。
+# 此时绝不能因为 HAS_KEY=1 就跳过注册——否则 bouncer 会拿着失效 key 永久连不上。
+# 强制按首次引导重新注册，下面 4.3 会把新 key 覆盖写回同一个 uci 段。
+# （正常重启不会走到这：rootfs 在 overlay 持久层，不会被重新解压。）
+if [ "$FRESH" = 1 ] && [ "$HAS_KEY" = 1 ]; then
+    log "检测到全新 rootfs，uci 里的旧 bouncer key 已失效，重新注册"
+    HAS_KEY=0
+fi
 
 # ---------- 4. 首次才会走到这里：注册 bouncer ----------
 if [ "$HAS_KEY" = 0 ]; then

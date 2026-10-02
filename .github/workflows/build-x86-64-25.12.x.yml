@@ -14,8 +14,11 @@ on:
         description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
         required: true
         default: "192.168.100.1"
+      custom_router_netmask:
+        description: "子网掩码，留空默认 255.255.255.0。非 /24 时必须在下面显式填网关"
+        required: false
       custom_router_gateway:
-        description: "网关地址，留空则自动取管理地址同网段的首个地址(如 192.168.100.1)"
+        description: "网关地址，留空则自动取管理地址同网段的首个地址(如 192.168.100.1)。非 /24 网段请务必手填"
         required: false
       custom_router_dns:
         description: "DNS 地址，留空则跟随网关"
@@ -70,18 +73,21 @@ jobs:
         run: |
           # 整个 custom/ 目录会被下一步 docker run 挂成固件里的 /etc/config/，
           # 所以文件名必须和 99-custom.sh 里读的一字不差：
-          #   custom_router_ip.txt / custom_router_gateway.txt / custom_router_dns.txt
+          #   custom_router_ip.txt / custom_router_netmask.txt
+          #   custom_router_gateway.txt / custom_router_dns.txt
           CUSTOM="${{ github.workspace }}/custom"
           mkdir -p "$CUSTOM"
 
           echo "${{ github.event.inputs.custom_router_ip      }}" > "$CUSTOM/custom_router_ip.txt"
+          echo "${{ github.event.inputs.custom_router_netmask  }}" > "$CUSTOM/custom_router_netmask.txt"
           echo "${{ github.event.inputs.custom_router_gateway  }}" > "$CUSTOM/custom_router_gateway.txt"
           echo "${{ github.event.inputs.custom_router_dns      }}" > "$CUSTOM/custom_router_dns.txt"
 
-          # 网关 / DNS 允许留空，99-custom.sh 会自动推导：
-          #   网关 = 管理 IP 的前三段 + .1   DNS = 跟随网关
-          # echo 空字符串会留下一个只有换行符的文件，99-custom.sh 侧 tr -d 后视为空，安全。
+          # 掩码留空 → 99-custom.sh 用 255.255.255.0
+          # 网关留空 → 自动推导「IP 前三段 + .1」（仅 /24 有效，非 /24 时必须手填）
+          # DNS  留空 → 跟随网关
           echo "已写入: IP=$(cat "$CUSTOM/custom_router_ip.txt")"
+          echo "        掩码=[$(tr -d '\r\n' < "$CUSTOM/custom_router_netmask.txt")]"
           echo "        网关=[$(tr -d '\r\n' < "$CUSTOM/custom_router_gateway.txt")]"
           echo "        DNS=[$(tr -d '\r\n' < "$CUSTOM/custom_router_dns.txt")]"
 

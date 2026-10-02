@@ -1,0 +1,36 @@
+#!/bin/sh
+# /etc/rc.local
+# 开机末尾由 /etc/init.d/done (START=95) 执行。此时网络、lxcbr0、dnsmasq 都已就绪。
+#
+# 这里只负责一件事：后台拉起 /usr/sbin/crowdsec-lxc-bootstrap.sh。
+# 容器自启、取 LAPI key、写回 bouncer 全部由那个脚本负责（它内部幂等）。
+#
+# ⚠️ 不要在这里再手动 lxc-start：99-custom.sh 装的 /etc/init.d/lxc-autostart
+#    也是开机自启服务，两处同时拉同一个容器会互相抢，日志会刷 "already running"，
+#    偶发竞态还会让容器状态卡住。容器自启统一交给 bootstrap 内部的 ensure 逻辑。
+
+# ⚠️ /var 在 OpenWrt 里是 /tmp 的符号链接，而 /tmp 是 tmpfs —— 重启即丢。
+#    引导日志必须写在持久路径，否则首次开机失败后一重启就查不到原因了。
+LOG=/root/crowdsec-lxc-bootstrap.log
+BOOT=/usr/sbin/crowdsec-lxc-bootstrap.sh
+# 锁特意放 /tmp 而不是持久路径：tmpfs 每次开机都是空的，
+# 万一上次引导异常退出没清锁，也不会把这台机器永久锁死。
+LOCK=/tmp/.crowdsec-lxc-bootstrap.lock
+
+# 本固件没带 CrowdSec（既没有 rootfs 包，也没有已存在的容器）就安静走人
+[ -x "$BOOT" ] || exit 0
+{ [ -f /opt/lxc-ubuntu.tar.gz ] || [ -d /srv/lxc/ubuntu/rootfs ]; } || exit 0
+
+echo "[$(date '+%F %T')] rc.local: 准备引导 CrowdSec 容器" >>"$LOG"
+
+# 用 mkdir 的原子性做互斥，防止上一次引导还没跑完又被拉起一份
+if ! mkdir "$LOCK" 2>/dev/null; then
+    echo "[$(date '+%F %T')] rc.local: 上一次引导仍在执行，本次跳过" >>"$LOG"
+    exit 0
+fi
+
+# 后台跑：解压 rootfs + 起容器要 1-2 分钟，绝不能阻塞开机。
+# 跑完由子 shell 自己清锁。
+( "$BOOT" >>"$LOG" 2>&1; rmdir "$LOCK" 2>/dev/null ) &
+
+exit 0

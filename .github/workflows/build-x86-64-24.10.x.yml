@@ -17,14 +17,24 @@ on:
           - 24.10.5
           - 24.10.6
       custom_router_ip:
-        description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
+        description: "请设置路由器的管理地址,格式:192.168.x.1 或 10.x.x.1"
         required: true
-        default: "10.1.1.201"
+        default: "192.168.3.201"
+      custom_router_netmask:
+        description: "子网掩码，留空默认 255.255.255.0。非 /24 时必须在下面显式填网关"
+        required: false
+      custom_router_gateway:
+        description: "网关地址，留空则自动取管理地址同网段的首个地址(如 10.1.1.1)。非 /24 网段请务必手填"
+        required: false
+      custom_router_dns:
+        description: "DNS 地址，留空则跟随网关"
+        required: false
+        default: "192.168.3.201"
       profile:
         description: '选择软件包空间大小'
         required: true
         type: choice
-        default: '2G'
+        default: '3G'
         options:
           - '1G'
           - '2G'
@@ -46,21 +56,14 @@ on:
         options:
           - 'yes'
           - 'no'
-      enable_pppoe:
-        description: "是否配置PPPoE拨号信息?"
-        required: true
+      include_crowdsec:
+        description: "内置 CrowdSec 安全容器（Ubuntu LXC，开机自动建容器+对接 bouncer，需选 2G 以上空间）"
+        required: false
         default: 'no'
         type: choice
         options:
-        - 'yes'
-        - 'no'
-      pppoe_account:
-        description: "宽带账号 (若启用PPPoE)"
-        required: false
-      pppoe_password:
-        description: "宽带密码 (若启用PPPoE)"
-        required: false
-
+          - 'yes'
+          - 'no'
   workflow_call:
     inputs:
       luci_version:
@@ -69,7 +72,19 @@ on:
         type: string
       custom_router_ip:
         required: true
-        default: "10.1.1.201"
+        default: "192.168.3.201"
+        type: string
+      custom_router_netmask:
+        required: false
+        default: ""
+        type: string
+      custom_router_gateway:
+        required: false
+        default: ""
+        type: string
+      custom_router_dns:
+        required: false
+        default: ""
         type: string
       profile:
         required: true
@@ -83,8 +98,8 @@ on:
         required: true
         default: "yes"
         type: string
-      enable_pppoe:
-        required: true
+      include_crowdsec:
+        required: false
         default: "no"
         type: string
 
@@ -102,22 +117,29 @@ jobs:
       - name: Set executable permissions
         run: chmod +x ${{ github.workspace }}/x86-64/build24.sh
 
-      - name: Save Custom Router IP into OpenWrt files
+      - name: Save Router Network Config into OpenWrt files
         run: |
-          mkdir -p "${{ github.workspace }}/custom"
-          echo "${{ github.event.inputs.custom_router_ip }}" > "${{ github.workspace }}/custom/custom_router_ip.txt"
-          echo "您设置的路由器管理地址是:${{ github.event.inputs.custom_router_ip }}"
-          # 后续步骤会将该文件映射到路由器/etc/config/custom_router_ip.txt 以便用于开机脚本99-custom.sh读取用户设置的ip
-      
-      - name: Validate PPPoE Inputs
-        run: |
-          if [[ "${{ inputs.enable_pppoe }}" == "yes" ]]; then
-            if [[ -z "${{ inputs.pppoe_account }}" || -z "${{ inputs.pppoe_password }}" ]]; then
-              echo "Error: PPPoE account and password must be provided when PPPoE is enabled!"
-              exit 1
-            fi
-          fi
-      
+          # 整个 custom/ 目录会被下一步 docker run 挂成固件里的 /etc/config/，
+          # 所以文件名必须和 99-custom.sh 里读的一字不差：
+          #   custom_router_ip.txt / custom_router_netmask.txt
+          #   custom_router_gateway.txt / custom_router_dns.txt
+          # ⚠️ 此步骤与 25.12 的 build-x86-64-25.12.x.yml 保持一致，两边要改一起改。
+          CUSTOM="${{ github.workspace }}/custom"
+          mkdir -p "$CUSTOM"
+
+          echo "${{ github.event.inputs.custom_router_ip      }}" > "$CUSTOM/custom_router_ip.txt"
+          echo "${{ github.event.inputs.custom_router_netmask  }}" > "$CUSTOM/custom_router_netmask.txt"
+          echo "${{ github.event.inputs.custom_router_gateway  }}" > "$CUSTOM/custom_router_gateway.txt"
+          echo "${{ github.event.inputs.custom_router_dns      }}" > "$CUSTOM/custom_router_dns.txt"
+
+          # 掩码留空 → 99-custom.sh 用 255.255.255.0
+          # 网关留空 → 自动推导「IP 前三段 + .1」（仅 /24 有效，非 /24 时必须手填）
+          # DNS  留空 → 跟随网关
+          echo "已写入: IP=$(cat "$CUSTOM/custom_router_ip.txt")"
+          echo "        掩码=[$(tr -d '\r\n' < "$CUSTOM/custom_router_netmask.txt")]"
+          echo "        网关=[$(tr -d '\r\n' < "$CUSTOM/custom_router_gateway.txt")]"
+          echo "        DNS=[$(tr -d '\r\n' < "$CUSTOM/custom_router_dns.txt")]"
+
       - name: Enable Store integration
         run: |
           if [ "${{ github.event.inputs.enable_store }}" == "true" ]; then
@@ -126,6 +148,21 @@ jobs:
           else
             echo "❎ 未启用 luci-app-store"
           fi
+
+      - name: Prepare CrowdSec LXC rootfs
+        if: ${{ github.event.inputs.include_crowdsec == 'yes' }}
+        run: |
+          # 这一步在编译机（有网、可 sudo chroot）上把 Ubuntu rootfs + CrowdSec 预制好，
+          # 产物 files/opt/lxc-ubuntu.tar.gz 会随 FILES 一起打进固件。
+          # 容器固定 IP 10.0.0.10 / 网桥 10.0.0.1，必须和 files/etc/uci-defaults/99-custom.sh 一致。
+          # ⚠️ 此步骤与 25.12 的 build-x86-64-25.12.x.yml 完全一致（它跑在 runner 上，与固件版本无关），
+          #    两边要改一起改。
+          chmod +x shell/prepare-crowdsec-rootfs.sh
+          sudo env CONTAINER_IP=10.0.0.10 BRIDGE_IP=10.0.0.1 \
+               bash shell/prepare-crowdsec-rootfs.sh
+          echo "容器 rootfs 体积："
+          ls -lh files/opt/lxc-ubuntu.tar.gz
+          echo "⚠️ 若下一步 make image 报空间不足，请把 profile 调到 2G 或更大"
 
       - name: Build ImmortalWrt-x86-64-efi 24.10.x
         run: |
@@ -164,9 +201,6 @@ jobs:
             -v "${{ github.workspace }}/x86-64/build24.sh:/home/build/immortalwrt/build.sh" \
             -e PROFILE=$ROOTFS_SIZE \
             -e INCLUDE_DOCKER=$include_docker \
-            -e ENABLE_PPPOE=${{ inputs.enable_pppoe }} \
-            -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
-            -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
           immortalwrt/imagebuilder:x86-64-openwrt-${luci_version} /bin/bash /home/build/immortalwrt/build.sh
           
 

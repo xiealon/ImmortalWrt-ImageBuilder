@@ -10,18 +10,7 @@ echo "Building for profile: $PROFILE"
 # yml 传入的固件大小 ROOTFS_PARTSIZE
 echo "Building for ROOTFS_PARTSIZE: $ROOTFS_PARTSIZE"
 
-echo "Create pppoe-settings"
 mkdir -p  /home/build/immortalwrt/files/etc/config
-
-# 创建pppoe配置文件 yml传入环境变量ENABLE_PPPOE等 写入配置文件 供99-custom.sh读取
-cat << EOF > /home/build/immortalwrt/files/etc/config/pppoe-settings
-enable_pppoe=${ENABLE_PPPOE}
-pppoe_account=${PPPOE_ACCOUNT}
-pppoe_password=${PPPOE_PASSWORD}
-EOF
-
-echo "cat pppoe-settings"
-cat /home/build/immortalwrt/files/etc/config/pppoe-settings
 
 if [ -z "$CUSTOM_PACKAGES" ]; then
   echo "⚪️ 未选择 任何第三方软件包"
@@ -47,7 +36,6 @@ fi
 
 # 输出调试信息
 echo "$(date '+%Y-%m-%d %H:%M:%S') - 开始构建QEMU-arm64固件..."
-
 
 # 定义所需安装的包列表 下列插件你都可以自行删减
 PACKAGES=""
@@ -104,7 +92,6 @@ if echo "$PACKAGES" | grep -q "luci-app-ssr-plus"; then
 else
     echo "⚪️ 未选择 luci-app-ssr-plus"
 fi
-
 
 # 构建镜像
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Building image with the following packages:"

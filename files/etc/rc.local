@@ -1,0 +1,22 @@
+#!/bin/sh
+# /etc/rc.local
+# 开机末尾由 /etc/init.d/done (START=95) 执行。此时网络、lxcbr0、dnsmasq 都已就绪。
+#
+# 这里做两件事：
+#   1. 每次开机确保 CrowdSec 容器在跑（-d 必须加，否则前台阻塞开机流程）
+#   2. 后台拉起一次引导脚本：首次开机时取 LAPI key 并写回 bouncer
+
+LOG=/var/log/crowdsec-lxc-bootstrap.log
+
+# 1. 容器自启（rc.d 里也有一份 lxc-autostart，这里是首开机的兜底）
+if [ -d /srv/lxc/ubuntu/rootfs ]; then
+    lxc-ls -P /srv/lxc --running 2>/dev/null | grep -qw ubuntu \
+        || lxc-start -P /srv/lxc -n ubuntu -d >>"$LOG" 2>&1
+fi
+
+# 2. 后台引导：解压 rootfs / 取 key / 写 uci / 启 bouncer
+if [ -x /usr/sbin/crowdsec-lxc-bootstrap.sh ]; then
+    /usr/sbin/crowdsec-lxc-bootstrap.sh >>"$LOG" 2>&1 &
+fi
+
+exit 0

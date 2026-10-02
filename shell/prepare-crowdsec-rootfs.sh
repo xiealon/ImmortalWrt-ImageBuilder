@@ -110,7 +110,8 @@ if [ -f "$R/lib/systemd/system/crowdsec.service" ]; then
         "$R/etc/systemd/system/multi-user.target.wants/crowdsec.service"
 fi
 
-echo "nameserver ${BRIDGE_IP}" | sudo tee "$R/etc/resolv.conf" >/dev/null
+# resolv.conf 不在这里写 —— 统一放到第 6.2 步「打包前」处理，
+# 那里会先 rm -f 再 tee，确保它不是软链接而是 rootfs 内的实体文件。
 echo "crowdsec" | sudo tee "$R/etc/hostname" >/dev/null
 # 清空 machine-id，让每台路由器首次开机各自生成，避免多机同 ID
 : | sudo tee "$R/etc/machine-id" >/dev/null
@@ -209,8 +210,57 @@ echo "==> 解析器校验 ssh_failed-auth 条数 = ${N}（应为 3）"
 # ---------- 6. 打包 ----------
 # 注意：hub 的 crowdsecurity/whitelists 只能在容器跑起来后用 cscli 删除，
 #       放到开机引导脚本里做（这里 cscli 连不上 LAPI）。
-sudo tar -czf "$OUT_DIR/lxc-ubuntu.tar.gz" -C "$R" .
+
+# ---- 6.1 必须先卸载第 2 步的 bind mount ----
+# ⚠️ 这一步不能省。$R/proc $R/sys $R/dev 此刻还是**宿主机**（GitHub runner）的，
+#    直接打包会带来两个后果：
+#      1) 运行器是容器化环境，没有 CAP_SYS_ADMIN，一堆 /proc/sys 文件连 root 都读不了
+#         → tar 刷 "Permission denied" 并返回非零，set -e 直接判整个 job 失败
+#      2) 更糟的是它会真的去遍历宿主机的整个 procfs/sysfs（上百进程的伪文件），
+#         巨慢无比，表现就是「卡住十几分钟没输出」，最后产出一个垃圾包。
+echo "==> 卸载构建期挂载点"
+for m in "$R/dev/pts" "$R/dev" "$R/sys" "$R/proc"; do
+    sudo umount -l "$m" 2>/dev/null || true
+done
+# 复查一次真的卸干净了，没卸掉就要停下，别带着挂载点半成品往下走
+LEFT=""
+for d in dev/pts dev sys proc; do
+    mountpoint -q "$R/$d" 2>/dev/null && LEFT="$LEFT $d"
+done
+[ -z "$LEFT" ] || { echo "!! 以下挂载点仍未卸载:$LEFT"; exit 1; }
+echo "    已卸载干净"
+
+# ---- 6.2 resolv.conf 必须是普通文件 ----
+# 宿主机的 /etc/resolv.conf 有可能是个指向 /run/systemd/... 的软链接，
+# 那样 tee 会顺着链接写出去。这里先删掉再重建，确保它在 rootfs 内落地成实体文件。
+sudo rm -f "$R/etc/resolv.conf"
+echo "nameserver ${BRIDGE_IP}" | sudo tee "$R/etc/resolv.conf" >/dev/null
+[ -f "$R/etc/resolv.conf" ] || { echo "!! resolv.conf 写入失败"; exit 1; }
+
+# ---- 6.3 打包 ----
+# 排除虚拟/临时文件系统：**内容**不要，但**目录本身**要保留
+# （只写 './proc' 会把目录也排掉；'./proc/*' 才是留空目录的建议写法，
+#  容器启动时 systemd 需要这些空目录作为挂载点）
+echo "==> 打包 rootfs"
+sudo tar -czf "$OUT_DIR/lxc-ubuntu.tar.gz" -C "$R" . \
+    --exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' \
+    --exclude='./run/*'  --exclude='./tmp/*' || {
+        echo "!! tar 打包失败（退出码 $?）"; exit 1; }
 sudo chown "$(id -u):$(id -g)" "$OUT_DIR/lxc-ubuntu.tar.gz"
+
+# ---- 6.4 打包结果校验 ----
+# 包里如果还残留 proc/sys/dev 下的具体内容，说明上面某一道防线失效了，不能往下走
+if tar -tzf "$OUT_DIR/lxc-ubuntu.tar.gz" | grep -qE '^\./(proc|sys|dev)/.'; then
+    echo "!! 包里仍混有虚拟文件系统的内容，丢弃"
+    exit 1
+fi
+[ -f "$OUT_DIR/lxc-ubuntu.tar.gz" ] || { echo "!! 产物不存在"; exit 1; }
+SIZE=$(stat -c %s "$OUT_DIR/lxc-ubuntu.tar.gz")
+# 正常范围 150MB ~ 600MB；小到几十 MB 说明 CrowdSec 根本没装进去
+if [ "$SIZE" -lt 104857600 ]; then
+    echo "!! 产物仅 ${SIZE} 字节（<100MB），明显不完整"
+    exit 1
+fi
 
 echo "==> 完成：$OUT_DIR/lxc-ubuntu.tar.gz"
 ls -lh "$OUT_DIR/lxc-ubuntu.tar.gz"

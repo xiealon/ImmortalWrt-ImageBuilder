@@ -258,30 +258,46 @@ uci -q set system.@system[0].cronloglevel='5'
 uci commit system
 echo "系统日志外发至 ${CS_CT_IP}:514" >>$LOGFILE
 
-# ---------- 1.5 cgroup 兜底挂载（替代 cgroupfs-mount / cgroup-tools 两个包） ----------
-# 25.12 的 apk 源里没有 cgroupfs-mount，而 kernel 6.12 本来就是 cgroup v2，
-# 这里直接确认挂载即可，不需要装任何包。
-if ! mountpoint -q /sys/fs/cgroup 2>/dev/null; then
-    mkdir -p /sys/fs/cgroup
-    mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null && \
-        echo "已挂载 cgroup2 到 /sys/fs/cgroup" >>$LOGFILE || \
-        echo "cgroup2 挂载失败（可能已由内核挂载）" >>$LOGFILE
-else
-    echo "cgroup 已挂载" >>$LOGFILE
-fi
-
-# ---------- 2. 容器开机自启（第二次开机起由它负责拉起容器） ----------
+# ---------- 2. 容器开机自启（兜底） ----------
+# ⚠️ START 必须是 99 而不是 95：容器正常情况下由 rc.local(S95) 拉起的
+#    bootstrap 脚本负责启；这里只作兜底，跑在它之后。
+#    两处同优先级会同时 lxc-start 同一个容器，日志刷 "already running"，
+#    偶发竞态还会让容器状态卡住。
+# start() 里三重判空也很重要：首次开机时 rootfs 还没解压，
+# 直接 lxc-start 会因为容器目录不存在而报错。
 if [ -d /srv/lxc/ubuntu/rootfs ] || [ -f /opt/lxc-ubuntu.tar.gz ]; then
 cat > /etc/init.d/lxc-autostart <<'EOF'
 #!/bin/sh /etc/rc.common
-START=95
+START=99
 STOP=10
-start() { lxc-start -P /srv/lxc -n ubuntu -d; }
-stop()  { lxc-stop  -P /srv/lxc -n ubuntu; }
+CT_NAME=ubuntu
+CT_PATH=/srv/lxc
+
+_running() { lxc-ls -P "$CT_PATH" --running 2>/dev/null | grep -qw "$CT_NAME"; }
+
+start() {
+    # 已经跑着就别重复拉
+    if _running; then
+        logger -t lxc-autostart "容器 $CT_NAME 已在运行，跳过"
+        return 0
+    fi
+    # 容器还没由 bootstrap 解压出来时，悄悄跳过，不刷报错
+    if [ ! -d "$CT_PATH/$CT_NAME/rootfs" ]; then
+        logger -t lxc-autostart "rootfs 尚未就绪，跳过（等待 bootstrap 解压）"
+        return 0
+    fi
+    logger -t lxc-autostart "拉起容器 $CT_NAME"
+    lxc-start -P "$CT_PATH" -n "$CT_NAME" -d
+}
+
+stop() {
+    _running && lxc-stop -P "$CT_PATH" -n "$CT_NAME"
+    return 0
+}
 EOF
     chmod +x /etc/init.d/lxc-autostart
     /etc/init.d/lxc-autostart enable
-    echo "已安装 lxc-autostart" >>$LOGFILE
+    echo "已安装 lxc-autostart (START=99)" >>$LOGFILE
 fi
 
 # ---------- 3. 预填 bouncer 配置（api_key 留空，由引导脚本补上） ----------

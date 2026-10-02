@@ -9,14 +9,6 @@ uci add dhcp domain
 uci set "dhcp.@domain[-1].name=time.android.com"
 uci set "dhcp.@domain[-1].ip=203.107.6.88"
 
-# 检查配置文件是否存在
-SETTINGS_FILE="/etc/config/pppoe-settings"
-if [ ! -f "$SETTINGS_FILE" ]; then
-    echo "PPPoE settings file not found. Skipping." >> $LOGFILE
-else
-   # 读取pppoe信息(由build.sh写入)
-   . "$SETTINGS_FILE"
-fi
 # 设置子网掩码 
 uci set network.lan.netmask='255.255.255.0'
 # 设置路由器管理后台地址
@@ -29,20 +21,6 @@ if [ -f "$IP_VALUE_FILE" ]; then
 fi
 
 
-# 判断是否启用 PPPoE
-echo "print enable_pppoe value=== $enable_pppoe" >> $LOGFILE
-if [ "$enable_pppoe" = "yes" ]; then
-    echo "PPPoE is enabled at $(date)" >> $LOGFILE
-    # 设置拨号信息
-    uci set network.wan.proto='pppoe'                
-    uci set network.wan.username=$pppoe_account     
-    uci set network.wan.password=$pppoe_password     
-    uci set network.wan.peerdns='1'                  
-    uci set network.wan.auto='1' 
-    echo "PPPoE configuration completed successfully." >> $LOGFILE
-else
-    echo "PPPoE is not enabled. Skipping configuration." >> $LOGFILE
-fi
 
 # 若安装了dockerd 则设置docker的防火墙规则
 # 扩大docker涵盖的子网范围 '172.16.0.0/12'

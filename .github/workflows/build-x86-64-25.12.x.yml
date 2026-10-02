@@ -13,7 +13,13 @@ on:
       custom_router_ip:
         description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
         required: true
-        default: "192.168.3.201"
+        default: "192.168.100.1"
+      custom_router_gateway:
+        description: "网关地址，留空则自动取管理地址同网段的首个地址(如 192.168.100.1)"
+        required: false
+      custom_router_dns:
+        description: "DNS 地址，留空则跟随网关"
+        required: false
       profile:
         description: '选择软件包空间大小'
         required: true
@@ -46,21 +52,6 @@ on:
         options:
           - 'yes'
           - 'no'
-      enable_pppoe:
-        description: "是否配置PPPoE拨号信息?"
-        required: true
-        default: 'no'
-        type: choice
-        options:
-        - 'yes'
-        - 'no'
-      pppoe_account:
-        description: "宽带账号 (若启用PPPoE)"
-        required: false
-      pppoe_password:
-        description: "宽带密码 (若启用PPPoE)"
-        required: false
-
 permissions:
   contents: write
 
@@ -75,22 +66,25 @@ jobs:
       - name: Set executable permissions
         run: chmod +x ${{ github.workspace }}/x86-64/build25.sh
 
-      - name: Save Custom Router IP into OpenWrt files
+      - name: Save Router Network Config into OpenWrt files
         run: |
-          mkdir -p "${{ github.workspace }}/custom"
-          echo "${{ github.event.inputs.custom_router_ip }}" > "${{ github.workspace }}/custom/custom_router_ip.txt"
-          echo "您设置的路由器管理地址是:${{ github.event.inputs.custom_router_ip }}"
-          # 后续步骤会将该文件映射到路由器/etc/config/custom_router_ip.txt 以便用于开机脚本99-custom.sh读取用户设置的ip
-      
-      - name: Validate PPPoE Inputs
-        run: |
-          if [[ "${{ inputs.enable_pppoe }}" == "yes" ]]; then
-            if [[ -z "${{ inputs.pppoe_account }}" || -z "${{ inputs.pppoe_password }}" ]]; then
-              echo "Error: PPPoE account and password must be provided when PPPoE is enabled!"
-              exit 1
-            fi
-          fi
-      
+          # 整个 custom/ 目录会被下一步 docker run 挂成固件里的 /etc/config/，
+          # 所以文件名必须和 99-custom.sh 里读的一字不差：
+          #   custom_router_ip.txt / custom_router_gateway.txt / custom_router_dns.txt
+          CUSTOM="${{ github.workspace }}/custom"
+          mkdir -p "$CUSTOM"
+
+          echo "${{ github.event.inputs.custom_router_ip      }}" > "$CUSTOM/custom_router_ip.txt"
+          echo "${{ github.event.inputs.custom_router_gateway  }}" > "$CUSTOM/custom_router_gateway.txt"
+          echo "${{ github.event.inputs.custom_router_dns      }}" > "$CUSTOM/custom_router_dns.txt"
+
+          # 网关 / DNS 允许留空，99-custom.sh 会自动推导：
+          #   网关 = 管理 IP 的前三段 + .1   DNS = 跟随网关
+          # echo 空字符串会留下一个只有换行符的文件，99-custom.sh 侧 tr -d 后视为空，安全。
+          echo "已写入: IP=$(cat "$CUSTOM/custom_router_ip.txt")"
+          echo "        网关=[$(tr -d '\r\n' < "$CUSTOM/custom_router_gateway.txt")]"
+          echo "        DNS=[$(tr -d '\r\n' < "$CUSTOM/custom_router_dns.txt")]"
+
       - name: Enable Store integration
         run: |
           if [ "${{ github.event.inputs.enable_store }}" == "true" ]; then
@@ -144,9 +138,6 @@ jobs:
             -v "${{ github.workspace }}/x86-64/build25.sh:/home/build/immortalwrt/build.sh" \
             -e PROFILE=$ROOTFS_SIZE \
             -e INCLUDE_DOCKER=$include_docker \
-            -e ENABLE_PPPOE=${{ inputs.enable_pppoe }} \
-            -e PPPOE_ACCOUNT=${{ inputs.pppoe_account }} \
-            -e PPPOE_PASSWORD=${{ inputs.pppoe_password }} \
           immortalwrt/imagebuilder:x86-64-openwrt-${luci_version} /bin/bash /home/build/immortalwrt/build.sh
           
 

@@ -17,9 +17,9 @@ on:
           - 24.10.5
           - 24.10.6
       custom_router_ip:
-        description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
+        description: "请设置路由器的管理地址,格式:192.168.x.1 或 10.x.x.1"
         required: true
-        default: "10.1.1.200"
+        default: "192.168.3.201"
       custom_router_netmask:
         description: "子网掩码，留空默认 255.255.255.0。非 /24 时必须在下面显式填网关"
         required: false
@@ -29,11 +29,12 @@ on:
       custom_router_dns:
         description: "DNS 地址，留空则跟随网关"
         required: false
+        default: "192.168.3.201"
       profile:
         description: '选择软件包空间大小'
         required: true
         type: choice
-        default: '2G'
+        default: '3G'
         options:
           - '1G'
           - '2G'
@@ -71,7 +72,7 @@ on:
         type: string
       custom_router_ip:
         required: true
-        default: "10.1.1.200"
+        default: "192.168.3.201"
         type: string
       custom_router_netmask:
         required: false

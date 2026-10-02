@@ -48,15 +48,29 @@ _read_netconf() {   # $1=文件名 -> stdout 首行，去空白；文件不存�
     head -n1 "/etc/config/$1" | tr -d ' \t\r\n'
 }
 
+# ---- 0. 子网掩码（选填，默认 /24）----
+#      下面 1 的网关自动推导只对 /24 成立，掩码不是 24 位时脚本会拒绝推导，
+#      要求你在 workflow 里显式填 custom_router_gateway。
+NETMASK="$(_read_netconf custom_router_netmask.txt)"
+[ -n "$NETMASK" ] || NETMASK='255.255.255.0'
+
 # ---- 1. 管理 IP（必填，workflow 里 required: true）----
 # 不覆盖的话 SNAT 的 snat_ip 会和实际 LAN IP 不一致，容器就出不了网（CrowdSec 拉不到 CAPI）
 _UIP=$(_read_netconf custom_router_ip.txt)
 if [ -n "$_UIP" ]; then
     BPS_IP="$_UIP"
-    # 默认网关：IP 所在网段的首个地址
-    BPS_GW="$(echo "$BPS_IP" | awk -F. '{print $1"."$2"."$3".1"}')"
-    BPS_DN="$BPS_GW"
-    echo "使用自定义管理地址 ${BPS_IP}" >>$LOGFILE
+    if [ "$NETMASK" = "255.255.255.0" ]; then
+        # 默认网关：/24 网段的首个地址
+        BPS_GW="$(echo "$BPS_IP" | awk -F. '{print $1"."$2"."$3".1"}')"
+        BPS_DN="$BPS_GW"
+        echo "使用自定义管理地址 ${BPS_IP}（网关按 /24 推导）" >>$LOGFILE
+    else
+        # 非 /24 时「前三段 + .1」不再成立（比如 /22 的网关可能在别的三段里），
+        # 硬推只会得到一个不存在的地址，导致旁路由自己都上不了网且毫无报错。
+        echo "!! 掩码为 ${NETMASK}（非 /24），跳过网关自动推导" >>$LOGFILE
+        echo "   请在 Actions 的 custom_router_gateway 里显式填写网关" >>$LOGFILE
+        echo "使用自定义管理地址 ${BPS_IP}（网关待填）" >>$LOGFILE
+    fi
 else
     echo "未传入 custom_router_ip.txt，使用默认 ${BPS_IP}" >>$LOGFILE
 fi
@@ -67,13 +81,14 @@ if [ -n "$_UGW" ]; then
     BPS_GW="$_UGW"
     # 没单独填 DNS 时，DNS 默认跟网关走（大多数家用网关本身就是 DNS 转发器）
     [ -n "$(_read_netconf custom_router_dns.txt)" ] || BPS_DN="$_UGW"
+    echo "使用自定义网关 ${BPS_GW}" >>$LOGFILE
 fi
 
 # ---- 3. DNS（选填；优先级最高，单独覆盖）----
 _UDN=$(_read_netconf custom_router_dns.txt)
 [ -n "$_UDN" ] && BPS_DN="$_UDN"
 
-echo "最终网络配置: IP=${BPS_IP} 网关=${BPS_GW} DNS=${BPS_DN}" >>$LOGFILE
+echo "最终网络配置: IP=${BPS_IP}/${NETMASK} 网关=${BPS_GW} DNS=${BPS_DN}" >>$LOGFILE
 
 
 # 禁用WAN口
@@ -155,7 +170,7 @@ done
 uci set network.lan.device='br-lan'
 uci set network.lan.proto='static'
 uci set network.lan.ipaddr="${BPS_IP}"
-uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.netmask="${NETMASK}"      # 由 custom_router_netmask.txt 传入，默认 /24
 uci set network.lan.gateway="${BPS_GW}"
 uci set network.lan.dns="${BPS_DN}"
 

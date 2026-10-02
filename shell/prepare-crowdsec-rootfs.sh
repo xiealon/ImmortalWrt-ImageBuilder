@@ -54,13 +54,34 @@ sudo chroot "$R" /bin/bash -eu -c '
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C
 apt-get update -qq
-apt-get install -y --no-install-recommends \
-    systemd systemd-sysv systemd-networkd dbus \
-    curl ca-certificates gnupg iproute2 iputils-ping
+
+# ⚠️ 这里不要写 systemd-networkd：它是 Debian 12(bookworm) 才拆出来的独立包，
+#    Ubuntu 22.04 / 24.04 里 networkd 的二进制和 service 都由 systemd 包提供。
+#    写上会直接 "E: Unable to locate package systemd-networkd" 中断整个流水线。
+PKGS="systemd systemd-sysv dbus curl ca-certificates gnupg iproute2 iputils-ping"
+
+# 逐个校验包名：一次性 apt-get install 时，只要有一个包不存在，
+# apt 会整批失败并只返回一个笼统的 exit 100，排查起来很费劲。
+MISS=""
+for p in $PKGS; do
+    apt-cache show "$p" >/dev/null 2>&1 || MISS="$MISS $p"
+done
+if [ -n "$MISS" ]; then
+    echo "!! 以下包在当前源里不存在，请检查包名或 base 版本:$MISS"
+    exit 1
+fi
+
+apt-get install -y --no-install-recommends $PKGS
 
 # CrowdSec 官方仓库
 curl -fsSL https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
 apt-get install -y --no-install-recommends crowdsec
+
+# networkd 二进制必须落地：后面第 4 步要靠它配静态 IP，缺了容器就上不了网
+if [ ! -e /lib/systemd/systemd-networkd ] && ! command -v systemd-networkd >/dev/null 2>&1; then
+    echo "!! systemd-networkd 二进制缺失，容器将无法配置静态 IP"
+    exit 1
+fi
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*

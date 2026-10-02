@@ -88,7 +88,7 @@ on:
         type: string
       profile:
         required: true
-        default: "20G"
+        default: "10G"
         type: string
       enable_store:
         required: false

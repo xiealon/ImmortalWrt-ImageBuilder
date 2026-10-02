@@ -189,3 +189,67 @@
 #CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-wifischedule-zh-cn"
 #CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-xinetd-zh-cn"
 #CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-xlnetacc-zh-cn"
+
+# ===================== CrowdSec + LXC 一体化（开机自动对接） =====================
+# 版本归属（重要）：
+#   24.x  (opkg) → 走 shell/custom-packages.sh，由 build24.sh / build23.sh 等 source
+#   25.12 (apk)  → 走本文件，由 build25.sh source
+#   两个文件互不干扰，本文件里绝不能出现只在 24.x 第三方 opkg 源里才有的包
+#   （典型如 cgroupfs-mount / cgroup-tools —— 已确认不在 apk 源里，会导致构建失败）。
+#
+# 以下包名取自 24.10 已验证通过的清单。25.12 的 apk 仓库若有包名差异，
+# make image 会报 "package not found"，按报错逐行删掉即可。
+#
+# 路由器侧只装 bouncer，不要装 crowdsec 主包（主程序跑在容器里，路由器上没有 cscli）
+
+# bouncer：拉封禁名单写进 nftables
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec-firewall-bouncer"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-crowdsec-firewall-bouncer"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"
+
+# LXC 依赖工具（tar 用于开机解压 rootfs，必装）
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES xz tar liblzma gnupg getopt"
+# ip-full：引导脚本用 `ip link show lxcbr0` 等网桥就绪，busybox 的 ip-tiny 功能不全
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES ip-full"
+
+# ---- cgroup 相关：25.12 不建议再装，已在系统层面替代 ----
+# 原来 24.10 能装上 cgroupfs-mount / cgroup-tools，靠的是加挂的 opkg 第三方源；
+# 25.12 换成 apk 后那些源失效，这两个包会直接让 make image 失败。
+# 实测结论：它们都可以不装，理由和替代做法如下——
+#
+#   cgroupfs-mount  → 作用是挂载 cgroup v1 各子系统。
+#                     25.12 用的是 kernel 6.12，默认就是 cgroup v2 unified hierarchy，
+#                     procd 开机已把 cgroup2 挂到 /sys/fs/cgroup，不需要这个包。
+#   cgroup-tools    → 只是 cgcreate/cgexec/lssubsys 之类的**用户态管理命令**，
+#                     LXC 拉起容器走的是 liblxc 直接操作 cgroupfs，压根不调用它。
+#
+# 替代：已在 files/etc/uci-defaults/99-custom.sh 里加了 cgroup2 挂载兜底（三行，零依赖）。
+# 如果你确实想装回来（比如要手工 cgcreate 调资源限额），就取消下面注释，
+# 并同时在 shell/extra-apk-repos.conf 里配好能提供这两个包的 apk 源。
+#CUSTOM_PACKAGES="$CUSTOM_PACKAGES cgroupfs-mount cgroup-tools"
+
+# 内核模块（veth 必须有，否则容器起不来）
+# kmod-veth 已在 immortalwrt 主仓库 netsupport.mk 中确认存在：KernelPackage/veth
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-veth"
+# kmod-ikconfig 仅供 lxc-checkconfig 诊断用，缺失不影响容器运行，25.12 源里未确认到
+#CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-ikconfig"
+# LXC 核心
+# 已核对 immortalwrt/packages 的 utils/lxc/Makefile（PKG_VERSION 7.0.0）：
+#   - lxc 主包的 install 是 `true`，本身不装任何文件，真正的命令都在 lxc-* 子包里
+#   - lxc-common  提供 /etc/lxc/default.conf、/etc/lxc/lxc.conf、/srv/lxc 目录
+#   - lxc-configs 提供 /usr/share/lxc/config/common.conf —— 容器 config 里
+#                 `lxc.include = /usr/share/lxc/config/common.conf` 依赖它，必装
+#   - 下面这些 lxc-* 全部由 Makefile 的 GenPlugin 模板生成，确实存在：
+#     attach autostart cgroup copy config console create destroy device execute
+#     freeze info monitor snapshot start stop unfreeze unshare usernsexec wait
+#     top ls monitord user-nic checkconfig
+# 排错时若必须瘦身，最小集是：liblxc lxc lxc-common lxc-configs lxc-attach
+#   lxc-start lxc-stop lxc-ls（我们的引导脚本只用到这几个命令）
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES liblxc lxc lxc-common lxc-templates"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-attach lxc-auto lxc-autostart lxc-cgroup lxc-checkconfig"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-config lxc-configs lxc-console lxc-copy lxc-create lxc-destroy"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-device lxc-execute lxc-freeze lxc-hooks lxc-info lxc-init"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-ls lxc-monitor lxc-monitord lxc-snapshot lxc-start lxc-stop"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-top lxc-unfreeze lxc-unprivileged lxc-unshare lxc-user-nic lxc-usernsexec lxc-wait"
+# LuCI 网页管理（服务 → LXC 容器）
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-lxc rpcd-mod-lxc luci-i18n-lxc-zh-cn"

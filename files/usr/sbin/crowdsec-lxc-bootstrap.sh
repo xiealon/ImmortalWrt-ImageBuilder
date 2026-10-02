@@ -64,9 +64,10 @@ if [ ! -f "$ROOTFS/etc/crowdsec/config.yaml" ]; then
 fi
 
 # ---------- 2. 容器 config ----------
+CFG="$LXC_PATH/$LXC_NAME/config"
 mkdir -p "$LXC_PATH/$LXC_NAME"
-if [ ! -f "$LXC_PATH/$LXC_NAME/config" ]; then
-cat > "$LXC_PATH/$LXC_NAME/config" <<EOF
+if [ ! -f "$CFG" ]; then
+cat > "$CFG" <<EOF
 lxc.start.auto = 1
 lxc.start.order = 10
 lxc.arch = amd64
@@ -74,7 +75,6 @@ lxc.include = /usr/share/lxc/config/common.conf
 lxc.rootfs.path = dir:$ROOTFS
 lxc.init.cmd = /sbin/init
 lxc.autodev = 1
-lxc.kmsg = 0
 lxc.net.0.type = veth
 lxc.net.0.link = lxcbr0
 lxc.net.0.flags = up
@@ -82,7 +82,40 @@ lxc.net.0.hwaddr = 10:66:6A:7C:05:9A
 lxc.tty.max = 4
 lxc.pty.max = 1024
 EOF
+# 注意：这里故意不写 lxc.kmsg。OpenWrt 的 lxc 是裁剪编译的，
+# 很多可选键没编进 confile.c（实测 lxc.kmsg 就不支持），一旦 config 里出现
+# 不支持的键，整个文件解析失败，所有 lxc-* 命令都会 "Failed to load config"。
 log "已写入容器 config"
+fi
+
+# ---------- 2.1 配置键兼容性自愈 ----------
+# common.conf 由 lxc-configs 包提供。它没装上的话，include 这行本身就会让解析失败，
+# 而且报错形式不是"某行不认识"，上面抠行号的办法抓不到，所以单独判一次。
+if [ ! -f /usr/share/lxc/config/common.conf ]; then
+    log "!! 缺少 /usr/share/lxc/config/common.conf（lxc-configs 包没装上），剔除 include 行"
+    grep -v '^[[:space:]]*lxc.include' "$CFG" > "$CFG.tmp" 2>/dev/null && mv "$CFG.tmp" "$CFG"
+    rm -f "$CFG.tmp"
+fi
+
+# 光靠"我写的时候避开已知不支持的键"不够——不同版本/不同机型裁掉的键不一样。
+# 这里拿 lxc-info 当探测器：它会解析 config，解析失败就把出错的那一行抠出来删掉，再重试。
+# 这样无论 LXC 编译时裁掉了哪个键，脚本都能自己收敛到一个能用的 config。
+_trim=0
+while [ $_trim -lt 20 ]; do
+    if _err=$(lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>&1); then
+        break
+    fi
+    # 报错形如：... Failed to parse config file "..." at line "lxc.kmsg = 0"
+    _bad=$(printf '%s\n' "$_err" | sed -n 's/.*at line "\([^"]*\)".*/\1/p' | head -n1)
+    [ -n "$_bad" ] || { log "!! config 解析失败但取不到出错行，原文：$_err"; break; }
+    log "剔除本机 LXC 不支持的配置键: $_bad"
+    grep -v -F "$_bad" "$CFG" > "$CFG.tmp" 2>/dev/null && mv "$CFG.tmp" "$CFG"
+    rm -f "$CFG.tmp"
+    _trim=$((_trim+1))
+done
+if ! lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; then
+    log "!! 容器 config 仍无法解析，放弃引导"
+    exit 1
 fi
 
 # ---------- 3. 确保容器在跑 ----------

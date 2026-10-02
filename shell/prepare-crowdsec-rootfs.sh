@@ -242,9 +242,15 @@ echo "nameserver ${BRIDGE_IP}" | sudo tee "$R/etc/resolv.conf" >/dev/null
 # （只写 './proc' 会把目录也排掉；'./proc/*' 才是留空目录的建议写法，
 #  容器启动时 systemd 需要这些空目录作为挂载点）
 echo "==> 打包 rootfs"
-sudo tar -czf "$OUT_DIR/lxc-ubuntu.tar.gz" -C "$R" . \
+# ⚠️ tar 的选项必须放在文件列表（那个 "."）之前。
+#    写在 "-C dir ." 之后时，--exclude 只对"后续参数"生效，而后面已经没有参数了，
+#    tar 会刷 "has no effect" 警告并返回退出码 2 —— 上一次构建就是这么挂的。
+# 同时加 --one-file-system：不跨越文件系统边界，即使忘了 umount，
+# bind mount 的 /proc /sys /dev 也会被自动跳过（它们和 $R 分属不同 fs）。
+sudo tar --one-file-system \
     --exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' \
-    --exclude='./run/*'  --exclude='./tmp/*' || {
+    --exclude='./run/*'  --exclude='./tmp/*' \
+    -czf "$OUT_DIR/lxc-ubuntu.tar.gz" -C "$R" . || {
         echo "!! tar 打包失败（退出码 $?）"; exit 1; }
 sudo chown "$(id -u):$(id -g)" "$OUT_DIR/lxc-ubuntu.tar.gz"
 

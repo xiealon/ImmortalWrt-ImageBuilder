@@ -30,6 +30,18 @@ BPS_DN='10.1.1.1'      #DNS/LAN
 LXC_IP='10.0.0.1'      #LXC地址
 LSC_IP='10.0.0.0/24'   #LXC NAT转发IP
 
+# 若工作流传入了自定义管理地址则覆盖默认值
+# 不覆盖的话 SNAT 的 snat_ip 会和实际 LAN IP 不一致，容器就出不了网（CrowdSec 拉不到 CAPI）
+if [ -f /etc/config/custom_router_ip.txt ]; then
+    _UIP=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n')
+    if [ -n "$_UIP" ]; then
+        BPS_IP="$_UIP"
+        BPS_GW="$(echo "$BPS_IP" | awk -F. '{print $1"."$2"."$3".1"}')"
+        BPS_DN="$BPS_GW"
+        echo "使用自定义管理地址 ${BPS_IP},网关 ${BPS_GW}" >>$LOGFILE
+    fi
+fi
+
 
 # 禁用WAN口
 uci set network.wan.disabled='1'
@@ -212,5 +224,94 @@ EOF
 else
     echo "未检测到 Docker，跳过防火墙配置。"
 fi
+
+# =============================================================================
+# CrowdSec + LXC 容器：开机自动对接
+# 说明：本脚本处在 first boot 的早期（uci-defaults），此时网络还没起来，
+#       所以这里只做「零网络依赖」的配置；真正拉容器、装软件、取 key 的事
+#       交给 /etc/rc.local 后台调用的 /usr/sbin/crowdsec-lxc-bootstrap.sh。
+# =============================================================================
+CS_CT_IP='10.0.0.10'    # 容器固定 IP（编译期已写进容器的 systemd-networkd）
+CS_LAPI_PORT='8080'
+
+# ---------- 0. cgroup2 挂载兜底（替代 cgroupfs-mount / cgroup-tools 两个包） ----------
+# 25.12(apk) 的源里没有这两个包（它们只在 24.x 的第三方 opkg 源里），而 kernel 6.12
+# 本身默认就是 cgroup v2 unified hierarchy，这里显式确认一次即可，不需要额外装包。
+# 顺带把 cgroup 的 controllers 打开，容器里的 systemd 才能正常管进程。
+if ! mountpoint -q /sys/fs/cgroup 2>/dev/null; then
+    mkdir -p /sys/fs/cgroup
+    if mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null; then
+        echo "cgroup2 已挂载到 /sys/fs/cgroup" >>$LOGFILE
+    else
+        echo "cgroup2 挂载失败（可能内核已挂载或不支持）" >>$LOGFILE
+    fi
+else
+    echo "cgroup 已挂载，跳过" >>$LOGFILE
+fi
+
+# ---------- 1. 路由器把系统日志外发到容器：整条检测链路的数据源头 ----------
+uci set system.@system[0].log_ip="${CS_CT_IP}"
+uci set system.@system[0].log_port='514'
+uci set system.@system[0].log_proto='udp'
+uci -q set system.@system[0].log_remote='1'
+uci -q set system.@system[0].cronloglevel='5'
+uci commit system
+echo "系统日志外发至 ${CS_CT_IP}:514" >>$LOGFILE
+
+# ---------- 1.5 cgroup 兜底挂载（替代 cgroupfs-mount / cgroup-tools 两个包） ----------
+# 25.12 的 apk 源里没有 cgroupfs-mount，而 kernel 6.12 本来就是 cgroup v2，
+# 这里直接确认挂载即可，不需要装任何包。
+if ! mountpoint -q /sys/fs/cgroup 2>/dev/null; then
+    mkdir -p /sys/fs/cgroup
+    mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null && \
+        echo "已挂载 cgroup2 到 /sys/fs/cgroup" >>$LOGFILE || \
+        echo "cgroup2 挂载失败（可能已由内核挂载）" >>$LOGFILE
+else
+    echo "cgroup 已挂载" >>$LOGFILE
+fi
+
+# ---------- 2. 容器开机自启（第二次开机起由它负责拉起容器） ----------
+if [ -d /srv/lxc/ubuntu/rootfs ] || [ -f /opt/lxc-ubuntu.tar.gz ]; then
+cat > /etc/init.d/lxc-autostart <<'EOF'
+#!/bin/sh /etc/rc.common
+START=95
+STOP=10
+start() { lxc-start -P /srv/lxc -n ubuntu -d; }
+stop()  { lxc-stop  -P /srv/lxc -n ubuntu; }
+EOF
+    chmod +x /etc/init.d/lxc-autostart
+    /etc/init.d/lxc-autostart enable
+    echo "已安装 lxc-autostart" >>$LOGFILE
+fi
+
+# ---------- 3. 预填 bouncer 配置（api_key 留空，由引导脚本补上） ----------
+#       bouncer 是匿名段，必须用 @bouncer[n]，不能写 crowdsec.bouncer.xxx
+if [ -f /etc/config/crowdsec ]; then
+    CS_SEC=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    if [ -z "$CS_SEC" ]; then
+        uci add crowdsec bouncer >/dev/null 2>&1
+        CS_SEC=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    fi
+    if [ -n "$CS_SEC" ]; then
+        uci set "$CS_SEC.enabled=1"
+        uci set "$CS_SEC.api_url=http://${CS_CT_IP}:${CS_LAPI_PORT}/"
+        uci set "$CS_SEC.ipv4=1"
+        uci set "$CS_SEC.ipv6=0"
+        uci set "$CS_SEC.deny_action=drop"
+        uci set "$CS_SEC.filter_input=1"
+        uci set "$CS_SEC.filter_forward=1"
+        uci -q del "$CS_SEC.interface"
+        uci add_list "$CS_SEC.interface=br-lan"
+        uci commit crowdsec
+        echo "已预填 bouncer 段: $CS_SEC" >>$LOGFILE
+    fi
+else
+    echo "未发现 /etc/config/crowdsec：bouncer 包没打进固件，跳过预填" >>$LOGFILE
+fi
+
+# ---------- 4. 引导脚本兜底授权 ----------
+chmod +x /usr/sbin/crowdsec-lxc-bootstrap.sh 2>/dev/null
+chmod +x /etc/rc.local 2>/dev/null
+echo "CrowdSec 引导已就绪" >>$LOGFILE
 
 exit 0

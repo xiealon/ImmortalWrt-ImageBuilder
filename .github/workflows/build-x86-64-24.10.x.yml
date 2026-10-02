@@ -19,7 +19,7 @@ on:
       custom_router_ip:
         description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
         required: true
-        default: "10.1.1.200"
+        default: "10.1.1.201"
       profile:
         description: '选择软件包空间大小'
         required: true

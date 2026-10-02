@@ -350,7 +350,11 @@ fi
 
 # ---------- 3. 预填 bouncer 配置（api_key 留空，由引导脚本补上） ----------
 #       bouncer 是匿名段，必须用 @bouncer[n]，不能写 crowdsec.bouncer.xxx
-if [ -f /etc/config/crowdsec ]; then
+# ⚠️ 仅当本固件真的带了容器（tarball 或已解压的 rootfs）才预填并启用。
+#    crowdsec/LXC 软件包是无条件打进固件的，但不勾 include_crowdsec 时并没有容器
+#    提供 LAPI——若无条件 enabled=1，bouncer 会拿着空 key 去连一个不存在的
+#    10.0.0.10:8080，反复重连刷错误日志。守卫条件和 rc.local / 上面的 lxc-autostart 一致。
+if { [ -f /opt/lxc-ubuntu.tar.gz ] || [ -d /srv/lxc/ubuntu/rootfs ]; } && [ -f /etc/config/crowdsec ]; then
     CS_SEC=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
     if [ -z "$CS_SEC" ]; then
         uci add crowdsec bouncer >/dev/null 2>&1
@@ -370,7 +374,7 @@ if [ -f /etc/config/crowdsec ]; then
         echo "已预填 bouncer 段: $CS_SEC" >>$LOGFILE
     fi
 else
-    echo "未发现 /etc/config/crowdsec：bouncer 包没打进固件，跳过预填" >>$LOGFILE
+    echo "跳过 bouncer 预填（无容器 tarball/rootfs，或无 /etc/config/crowdsec）" >>$LOGFILE
 fi
 
 # ---------- 4. 引导脚本兜底授权 ----------

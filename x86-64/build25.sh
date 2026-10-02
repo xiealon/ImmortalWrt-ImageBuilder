@@ -106,6 +106,31 @@ else
     echo "⚪️ 未选择 luci-app-ssr-plus"
 fi
 
+# ============ 可选：加挂第三方 apk 源（25.12 起从 opkg 换成 apk，加源方式变了） ============
+# opkg 时代是在 .config 里写 src/gz xxx URL；apk 时代的源清单就是 imagebuilder 根目录的
+# repositories.conf，格式是「每行一个 URL」，没有 src/gz 前缀。
+#
+# 用法（两步，缺一不可，否则 apk 会以 UNTRUSTED signature 拒绝安装）：
+#   1) 把第三方源的 URL 通过环境变量 EXTRA_APK_REPOS 传进来（多个用换行分隔）
+#   2) 把该源的签名公钥 *.rsa.pub / *.pub 放进仓库的 shell/apk-keys/ 目录，
+#      下面会自动拷到 imagebuilder 的 keys/ 去（没有公钥 apk 不认这个源）
+REPOS_CONF="/home/build/immortalwrt/repositories.conf"
+if [ -n "$EXTRA_APK_REPOS" ] && [ -f "$REPOS_CONF" ]; then
+    echo "🔗 加挂第三方 apk 源:"
+    echo "$EXTRA_APK_REPOS"
+    printf '%s\n' "$EXTRA_APK_REPOS" >> "$REPOS_CONF"
+    echo "--- 当前 repositories.conf ---"
+    cat "$REPOS_CONF"
+else
+    echo "⚪️ 未加挂第三方 apk 源"
+fi
+
+if [ -d /home/build/immortalwrt/shell/apk-keys ]; then
+    mkdir -p /home/build/immortalwrt/keys
+    cp -v /home/build/immortalwrt/shell/apk-keys/*.pub /home/build/immortalwrt/keys/ 2>/dev/null
+    cp -v /home/build/immortalwrt/shell/apk-keys/*.rsa.pub /home/build/immortalwrt/keys/ 2>/dev/null
+fi
+
 # 构建镜像
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Building image with the following packages:"
 echo "$PACKAGES"

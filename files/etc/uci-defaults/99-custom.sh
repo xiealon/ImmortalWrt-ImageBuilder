@@ -14,33 +14,66 @@ uci add dhcp domain
 uci set "dhcp.@domain[-1].name=time.android.com"
 uci set "dhcp.@domain[-1].ip=203.107.6.88"
 
-# 检查配置文件pppoe-settings是否存在 该文件由build.sh动态生成
-SETTINGS_FILE="/etc/config/pppoe-settings"
-if [ ! -f "$SETTINGS_FILE" ]; then
-    echo "PPPoE settings file not found. Skipping." >>$LOGFILE
-else
-    # 读取pppoe信息($enable_pppoe、$pppoe_account、$pppoe_password)
-    . "$SETTINGS_FILE"
-fi
+# 说明：原来这里有一段读取 /etc/config/pppoe-settings 的代码，
+#       但全文再无任何地方引用 $enable_pppoe —— 属于只读不用的死代码，已移除。
+#       如果你哪天真要做拨号，在下面 IP 段之后加逻辑即可（记住：uci-defaults 阶段网络还没起，
+#       只能写 uci 配置，不能在这里测试拨号是否成功）。
 
 # IP/网关/DNS设置（附带LXC）
-BPS_IP='192.168.3.201'    #IP地址/LAN
-BPS_GW='192.168.3.1'      #网关/LAN
-BPS_DN='192.168.3.1'      #DNS/LAN
+BPS_IP='10.1.1.201'    #IP地址/LAN
+BPS_GW='10.1.1.1'      #网关/LAN
+BPS_DN='10.1.1.1'      #DNS/LAN
 LXC_IP='10.0.0.1'      #LXC地址
 LSC_IP='10.0.0.0/24'   #LXC NAT转发IP
 
-# 若工作流传入了自定义管理地址则覆盖默认值
+# ============================================================================
+# 读取 GitHub Actions 界面里填的网络参数
+#
+# 数据链路是这样走的（以 x86-64/25.12 为例，24.10 同理）：
+#   1.  Actions UI 填 custom_router_ip / custom_router_gateway / custom_router_dns
+#   2.  workflow 把它们各自 echo 成 ${{ github.workspace }}/custom/*.txt
+#   3.  运行 done 时 -v $PWD/custom:/home/build/immortalwrt/files/etc/config
+#       把整个 custom/ 目录挂成固件里的 /etc/config/
+#   4.  于是固化到固件里就是 /etc/config/custom_router_ip.txt 等等
+#   5.  本脚本（uci-defaults，首开机早期）在这里 cat 出来用
+#
+# 注意第 3 步是挂载「整个目录」到 /etc/config，所以文件名不能改，
+# 且 uci 自己的 /etc/config 目录在 overlayfs 里仍然存在（挂的是临时 binding）。
+#
+# 网关 / DNS 留空时不强求：会自动按「IP 的前三段 + .1」推导，
+# 99% 的家宽场景（192.168.x.1 / 10.x.x.1）都对。
+# ============================================================================
+_read_netconf() {   # $1=文件名 -> stdout 首行，去空白；文件不存在就输出空
+    [ -f "/etc/config/$1" ] || return 0
+    head -n1 "/etc/config/$1" | tr -d ' \t\r\n'
+}
+
+# ---- 1. 管理 IP（必填，workflow 里 required: true）----
 # 不覆盖的话 SNAT 的 snat_ip 会和实际 LAN IP 不一致，容器就出不了网（CrowdSec 拉不到 CAPI）
-if [ -f /etc/config/custom_router_ip.txt ]; then
-    _UIP=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n')
-    if [ -n "$_UIP" ]; then
-        BPS_IP="$_UIP"
-        BPS_GW="$(echo "$BPS_IP" | awk -F. '{print $1"."$2"."$3".1"}')"
-        BPS_DN="$BPS_GW"
-        echo "使用自定义管理地址 ${BPS_IP},网关 ${BPS_GW}" >>$LOGFILE
-    fi
+_UIP=$(_read_netconf custom_router_ip.txt)
+if [ -n "$_UIP" ]; then
+    BPS_IP="$_UIP"
+    # 默认网关：IP 所在网段的首个地址
+    BPS_GW="$(echo "$BPS_IP" | awk -F. '{print $1"."$2"."$3".1"}')"
+    BPS_DN="$BPS_GW"
+    echo "使用自定义管理地址 ${BPS_IP}" >>$LOGFILE
+else
+    echo "未传入 custom_router_ip.txt，使用默认 ${BPS_IP}" >>$LOGFILE
 fi
+
+# ---- 2. 网关（选填；不填就用上面自动推导的那个）----
+_UGW=$(_read_netconf custom_router_gateway.txt)
+if [ -n "$_UGW" ]; then
+    BPS_GW="$_UGW"
+    # 没单独填 DNS 时，DNS 默认跟网关走（大多数家用网关本身就是 DNS 转发器）
+    [ -n "$(_read_netconf custom_router_dns.txt)" ] || BPS_DN="$_UGW"
+fi
+
+# ---- 3. DNS（选填；优先级最高，单独覆盖）----
+_UDN=$(_read_netconf custom_router_dns.txt)
+[ -n "$_UDN" ] && BPS_DN="$_UDN"
+
+echo "最终网络配置: IP=${BPS_IP} 网关=${BPS_GW} DNS=${BPS_DN}" >>$LOGFILE
 
 
 # 禁用WAN口

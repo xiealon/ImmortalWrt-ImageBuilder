@@ -46,6 +46,14 @@ on:
         options:
           - 'yes'
           - 'no'
+      include_crowdsec:
+        description: "内置 CrowdSec 安全容器（Ubuntu LXC，开机自动建容器+对接 bouncer，需选 2G 以上空间）"
+        required: false
+        default: 'no'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
       enable_pppoe:
         description: "是否配置PPPoE拨号信息?"
         required: true
@@ -82,6 +90,10 @@ on:
       include_docker:
         required: true
         default: "yes"
+        type: string
+      include_crowdsec:
+        required: false
+        default: "no"
         type: string
       enable_pppoe:
         required: true
@@ -126,6 +138,21 @@ jobs:
           else
             echo "❎ 未启用 luci-app-store"
           fi
+
+      - name: Prepare CrowdSec LXC rootfs
+        if: ${{ github.event.inputs.include_crowdsec == 'yes' }}
+        run: |
+          # 这一步在编译机（有网、可 sudo chroot）上把 Ubuntu rootfs + CrowdSec 预制好，
+          # 产物 files/opt/lxc-ubuntu.tar.gz 会随 FILES 一起打进固件。
+          # 容器固定 IP 10.0.0.10 / 网桥 10.0.0.1，必须和 files/etc/uci-defaults/99-custom.sh 一致。
+          # ⚠️ 此步骤与 25.12 的 build-x86-64-25.12.x.yml 完全一致（它跑在 runner 上，与固件版本无关），
+          #    两边要改一起改。
+          chmod +x shell/prepare-crowdsec-rootfs.sh
+          sudo env CONTAINER_IP=10.0.0.10 BRIDGE_IP=10.0.0.1 \
+               bash shell/prepare-crowdsec-rootfs.sh
+          echo "容器 rootfs 体积："
+          ls -lh files/opt/lxc-ubuntu.tar.gz
+          echo "⚠️ 若下一步 make image 报空间不足，请把 profile 调到 2G 或更大"
 
       - name: Build ImmortalWrt-x86-64-efi 24.10.x
         run: |

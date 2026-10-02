@@ -19,28 +19,14 @@ else
   ls -lah /home/build/immortalwrt/packages/
 fi
 
-
-
 # yml 传入的路由器型号 PROFILE
 echo "Building for profile: $PROFILE"
 
 echo "Include Docker: $INCLUDE_DOCKER"
-echo "Create pppoe-settings"
 mkdir -p  /home/build/immortalwrt/files/etc/config
-
-# 创建pppoe配置文件 yml传入pppoe变量————>pppoe-settings文件
-cat << EOF > /home/build/immortalwrt/files/etc/config/pppoe-settings
-enable_pppoe=${ENABLE_PPPOE}
-pppoe_account=${PPPOE_ACCOUNT}
-pppoe_password=${PPPOE_PASSWORD}
-EOF
-
-echo "cat pppoe-settings"
-cat /home/build/immortalwrt/files/etc/config/pppoe-settings
 
 # 输出调试信息
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting build process..."
-
 
 # 定义所需安装的包列表 下列插件你都可以自行删减
 PACKAGES=""
@@ -56,11 +42,9 @@ PACKAGES="$PACKAGES openssh-sftp-server"
 # 文件管理器
 PACKAGES="$PACKAGES luci-i18n-filemanager-zh-cn"
 
-
 # 第三方软件包 合并
 # ======== shell/apk-custom-packages.sh =======
 PACKAGES="$PACKAGES $CUSTOM_PACKAGES"
-
 
 # 判断是否需要编译 Docker 插件
 if [ "$INCLUDE_DOCKER" = "yes" ]; then
@@ -89,7 +73,6 @@ if echo "$PACKAGES" | grep -q "luci-app-openclash"; then
 else
     echo "⚪️ 未选择 luci-app-openclash"
 fi
-
 
 # 构建镜像
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Building image with the following packages:"

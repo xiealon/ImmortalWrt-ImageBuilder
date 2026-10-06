@@ -9,7 +9,27 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES easytier luci-app-easytier"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview xray-core sing-box hysteria kmod-nft-socket kmod-nft-tproxy luci-app-passwall2 luci-i18n-passwall2-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-compat kmod-tun kmod-inet-diag bash curl lua unzip"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard"
+# ---- strongSwan / IPsec（swanctl 后端，24.10 / opkg）----
+# 注意：luci-app-strongswan-swanctl 只声明了 +strongswan-swanctl +swanmon，
+# 而 strongswan 主包里**不含 charon 守护进程**，必须显式装 strongswan-charon
+# （或直接用元包 strongswan-default），否则编译能过、LuCI 页面能开，但 swanctl 跑不起来
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-strongswan-swanctl"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-swanctl strongswan-mod-vici strongswan-charon"
+# strongswan 核心插件集（名单与 strongswan-default 的 29 个 mod 完全一致）
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-aes strongswan-mod-attr strongswan-mod-connmark strongswan-mod-constraints strongswan-mod-des strongswan-mod-dnskey"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-fips-prf strongswan-mod-gmp strongswan-mod-hmac strongswan-mod-openssl strongswan-mod-kernel-netlink strongswan-mod-md5"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-mgf1 strongswan-mod-pem strongswan-mod-pgp strongswan-mod-pkcs1 strongswan-mod-pubkey strongswan-mod-random"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-rc2 strongswan-mod-resolve strongswan-mod-revocation strongswan-mod-sha1 strongswan-mod-sha2 strongswan-mod-socket-default"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-sshkey strongswan-mod-updown strongswan-mod-x509 strongswan-mod-xauth-generic strongswan-mod-xcbc"
+# LuCI 页面状态源：swanmon 把 charon 的 vici 输出转成 JSON 喂给前端
+# 缺了它页面能开但一片空白；swanmon 依赖 davici + libjson-c（24.10 还额外依赖 glib2）
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES swanmon davici libjson-c glib2"
+# 内核：XFRM / IPsec 转发
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-ipsec kmod-ipsec4 kmod-ipsec6"
+# 24.10 的 strongswan 主包还要这 5 个 kmod-crypto + 2 个 kmod-lib-zlib（25.12 已不需要，别往 apk 那份搬）
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-crypto-manager kmod-crypto-aead kmod-crypto-authenc kmod-crypto-cbc kmod-crypto-des kmod-crypto-echainiv"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-crypto-hmac kmod-crypto-md5 kmod-crypto-sha1 kmod-lib-zlib-inflate kmod-lib-zlib-deflate"
+# tailscale
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn"
 # 新增 clashoo by kenzok8 注意若集成clashoo 则不能集成nikki 目前它们俩配置冲突
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn"
@@ -24,6 +44,7 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-bandix luci-i18n-bandix-zh-cn"
 # IPTV 流媒体转发服务器 - rtp2httpd by stackia
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-rtp2httpd luci-i18n-rtp2httpd-zh-cn"
 # 静态文件服务器dufs
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES dufs"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-dufs-zh-cn"
 
 #===========================以下imm仓库内的软件==============================↓
@@ -59,7 +80,7 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-top lxc-unfreeze lxc-unprivileged lxc-unsh
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-lxc rpcd-mod-lxc luci-i18n-lxc-zh-cn"
 #
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-acl-zh-cn"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES ca-certificates luci-i18n-acme-zh-cn"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES ca-certificates acme luci-app-acme luci-i18n-acme-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-adblock-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-aria2-zh-cn"
 #

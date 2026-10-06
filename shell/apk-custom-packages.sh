@@ -65,3 +65,7 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-ls lxc-info lxc-monitor lxc-top lxc-snapsh
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-attach lxc-console lxc-execute lxc-device lxc-copy lxc-cgroup"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-unshare lxc-usernsexec lxc-wait"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-lxc rpcd-mod-lxc luci-i18n-lxc-zh-cn"
+# stronswan (暂时不能用，没有主包)
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES glib2 crconf davici swanmon kmod-crypto-chacha20poly1305"
+# CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-strongswan-swanctl luci-i18n-strongswan-swanctl-zh-cn"
+# CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-swanctl"

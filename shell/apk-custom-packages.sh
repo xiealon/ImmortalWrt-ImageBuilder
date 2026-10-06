@@ -201,31 +201,45 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-lxc rpcd-mod-lxc luci-i18n-lxc-zh-cn"
 
 
 # ============================================================================
-# 四、strongSwan / IPsec（swanctl 后端）—— 已逐包核对，可以启用
+# 四、⛔ strongSwan / IPsec —— 实测不可用，整段停用，勿打开
 # ============================================================================
-# 核对结论（都对着 immortalwrt/packages 的 net/strongswan/Makefile 查过）：
-#   · strongswan-charon / strongswan-swanctl / strongswan-mod-vici   ✅
-#   · 下面 29 个 strongswan-mod-* 与 strongswan-full 的名单完全一致，逐个确认存在 ✅
-#   · swanmon（utils/swanmon）、davici（libs/davici）、glib2（libs/glib2）✅
-#   · luci-app-strongswan-swanctl：immortalwrt/luci 的
-#     applications/luci-app-strongswan-swanctl/Makefile ✅
-#   · libjson-c 位于 ImmortalWrt 主仓库（基础库），官方 base 源必带 ✅
+# 【实测结论】25.12.1 的官方 apk 源里**根本没有发布 strongswan 系列包**。
+# 已拿实际源目录核对过：
+#   · https://downloads.immortalwrt.org/releases/25.12.1/packages/x86_64/packages/
+#     里搜不到任何 strongswan-*.apk（25.12.0 同样没有）
+#   · 真机 make image 报错如下（2026-10-06 实测）：
+#       ERROR: unable to select packages:
+#         strongswan-charon (no such package)
+#         strongswan-mod-aes (no such package)
+#         ... 共 33 个 strongswan-* 全部 no such package
 #
-# ⚠️ 注意：strongswan 主包里**不含 charon 守护进程**，必须显式装 strongswan-charon
-#    （或直接用元包 strongswan-default），否则编译能过、LuCI 页面能开，但 swanctl 跑不起来
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-strongswan-swanctl"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-swanctl strongswan-mod-vici strongswan-charon"
-# strongswan 核心插件集（名单与 strongswan-default 一致，共 29 个 mod）
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-aes strongswan-mod-attr strongswan-mod-connmark strongswan-mod-constraints strongswan-mod-des strongswan-mod-dnskey"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-fips-prf strongswan-mod-gmp strongswan-mod-hmac strongswan-mod-openssl strongswan-mod-kernel-netlink strongswan-mod-md5"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-mgf1 strongswan-mod-pem strongswan-mod-pgp strongswan-mod-pkcs1 strongswan-mod-pubkey strongswan-mod-random"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-rc2 strongswan-mod-resolve strongswan-mod-revocation strongswan-mod-sha1 strongswan-mod-sha2 strongswan-mod-socket-default"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-sshkey strongswan-mod-updown strongswan-mod-x509 strongswan-mod-xauth-generic strongswan-mod-xcbc"
-# LuCI 页面状态源：swanmon 把 charon 的 vici 输出转成 JSON 喂给前端
-# 缺了它页面能开但一片空白；swanmon 依赖 davici + libjson-c（24.10 还额外依赖 glib2）
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES swanmon davici libjson-c glib2"
-# 内核：XFRM / IPsec 转发
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-ipsec kmod-ipsec4 kmod-ipsec6"
+# 【为什么之前判断错了】net/strongswan/Makefile 确实存在于 immortalwrt/packages
+# 仓库的源码里，我据此认为包一定能装。但源码存在 ≠ 官方源编译发布了该包：
+# 25.12 的构建系统没有把 strongswan 编进 packages feed，所以源里一个都没有。
+# 这条教训也适用于其他包：**以源目录里的实际 .apk 为准，不以仓库源码为准**。
+#
+# 【有意思的对照】同一份报错里 luci-app-strongswan-swanctl-26.236.50544~cb5d434
+# 是被成功解析到的（luci feed 里有它），缺的只是 strongswan 本体。
+# 这也解释了为什么报错只列 strongswan 一项——其余 114 个包都通过了依赖解析。
+#
+# 【想要 IPsec 怎么办】
+#   1) 加挂第三方 apk 源：把能提供方 strongswan 的源 URL 通过 EXTRA_APK_REPOS 传入，
+#      并把该源签名公钥放进 shell/apk-keys/（缺公钥会 UNTRUSTED signature 拒绝安装）
+#   2) 或者等官方源重新编译 strongswan 后再启用
+#   启用前先用这条命令确认源里到底有没有：
+#      apk update && apk list 2>/dev/null | grep -i strongswan
+#CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-strongswan-swanctl"
+#CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-swanctl strongswan-mod-vici strongswan-charon"
+# strongswan 核心插件集（29 个 mod，源里同样没有，一并停用）
+#CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-aes strongswan-mod-attr strongswan-mod-connmark strongswan-mod-constraints strongswan-mod-des strongswan-mod-dnskey"
+#CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-fips-prf strongswan-mod-gmp strongswan-mod-hmac strongswan-mod-openssl strongswan-mod-kernel-netlink strongswan-mod-md5"
+#CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-mgf1 strongswan-mod-pem strongswan-mod-pgp strongswan-mod-pkcs1 strongswan-mod-pubkey strongswan-mod-random"
+#CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-rc2 strongswan-mod-resolve strongswan-mod-revocation strongswan-mod-sha1 strongswan-mod-sha2 strongswan-mod-socket-default"
+#CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-sshkey strongswan-mod-updown strongswan-mod-x509 strongswan-mod-xauth-generic strongswan-mod-xcbc"
+# swanmon / davici / libjson-c / glib2：没有 strongswan 就没有意义，一并停用
+#CUSTOM_PACKAGES="$CUSTOM_PACKAGES swanmon davici libjson-c glib2"
+# 内核 XFRM / IPsec 转发：同上
+#CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-ipsec kmod-ipsec4 kmod-ipsec6"
 # ⛔ 下面这 7 个 24.10 装了，但 24.10 的原注释已写明「25.12 已不需要，别往 apk 那份搬」
 #    照办，不搬。
 #CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-crypto-manager kmod-crypto-aead kmod-crypto-authenc kmod-crypto-cbc kmod-crypto-des kmod-crypto-echainiv"

@@ -10,8 +10,8 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview xray-core sing-box hysteria kmod-nft-s
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-openclash luci-compat kmod-tun kmod-inet-diag bash curl lua unzip"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn"
-# nikki 集成nikki不能再集成clashoo
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-nikki-zh-cn"
+# 新增 clashoo by kenzok8 注意若集成clashoo 则不能集成nikki （nikki不好用））
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn"
 # 分区扩容 by sirpdboy 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-partexp luci-i18n-partexp-zh-cn"
 # Lucky大吉 

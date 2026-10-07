@@ -1,7 +1,9 @@
 # 这是什么
 在悟空大佬【https://github.com/wukongdaily】
 
-项目【https://github.com/wukongdaily/ImmortalWrt-ImageBuilder】下进行修改的全自动化的immortalwrt的自动编译项目
+项目【https://github.com/wukongdaily/ImmortalWrt-ImageBuilder】
+
+下进行修改的全自动化的immortalwrt的自动编译项目
 
 ## 能做到什么
 通过原生集成功能，去除了原项目能去除的部分平台的pppoe地址输入换为集成LXC原生自带crowdsec的容器【ban ip √】

@@ -1,7 +1,7 @@
 # 这是什么
-在悟空大佬【https://github.com/wukongdaily】
+在悟空大佬https://github.com/wukongdaily
 
-项目【https://github.com/wukongdaily/ImmortalWrt-ImageBuilder】
+项目https://github.com/wukongdaily/ImmortalWrt-ImageBuilder
 
 下进行修改的全自动化的immortalwrt的自动编译项目
 

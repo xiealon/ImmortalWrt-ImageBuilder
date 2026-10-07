@@ -3,11 +3,11 @@
 {https://github.com/wukongdaily/ImmortalWrt-ImageBuilder}下进行修改的全自动化的immortalwrt的自动编译项目
 
 ## 能做到什么
-通过原生集成功能，去除了原项目能去除的部分平台的pppoe地址输入换为集成LXC原生自带crowdsec的容器{ban ip也勾选了}
+通过原生集成功能，去除了原项目能去除的部分平台的pppoe地址输入换为集成LXC原生自带crowdsec的容器【ban ip √】
 
-优化crowdsec的使用，也修复了LXC容器因为网络无法启动的问题{原项目虽然有了lxc但是没有建立lxc接口也没有将lxc接口移到br-lan}
+优化crowdsec的使用，也修复了LXC容器因为网络无法启动的问题【原项目虽然有了lxc但是没有建立lxc接口也没有将lxc接口移到br-lan】
 
-本项目使用的是额外的接口LXC与VETH设备{全自动建立，无需自行设置一次，仅需要首次安装后先重启设备一次获取到所有的接口即可}
+本项目使用的是额外的接口LXC与VETH设备【全自动建立，无需自行设置一次，仅需要首次安装后先重启设备一次获取到所有的接口即可】
 
 ### 关于crowdsec
 通过编译过程全自动填写获取的API，自动填入到bouncer界面，到手即用无需敲击一行代码。

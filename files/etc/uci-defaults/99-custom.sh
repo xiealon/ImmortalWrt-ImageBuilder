@@ -383,36 +383,49 @@ chmod +x /etc/rc.local 2>/dev/null
 echo "CrowdSec 引导已就绪" >>$LOGFILE
 
 # =============================================================================
-# aria2 下载目录（编译期已固化，这里只做兜底）
-#   目录 /aria2 和配置 /etc/config/aria2 都由 x86-64/build24.sh、build25.sh
-#   在编译期写进镜像了，刷完机即存在、属主正确、服务已启用。
-#   这里唯一还要做的是「用真实 uid 修正一次属主」：编译期是按 aria2 包的
-#   USERID(6800) 写死的，万一上游哪天改了 uid，目录属主就错了，
-#   而 uci-defaults 跑的时候 id -u aria2 一定拿得到真实值，改回来即可。
+# aria2 下载目录 + 设置（首启用显式 uci 写死，作为权威来源）
+#   编译期 build24.sh / build25.sh 已在镜像里建好 /aria2 并固化了
+#   /etc/config/aria2（enabled=1）。这里再做一次，保证开机即生效：
+#     1) 先默认 /aria2 兜底（编译期已建好，这里再 mkdir 保底一定存在）；
+#     2) 再检测 /mnt 下已挂载的数据盘，有盘就把下载目录指到 <盘>/aria2，
+#        避免下载把根分区写爆；没盘就继续用 /aria2；
+#     3) 显式 uci set 写死 dir / config_dir / 限速等设置。
 # =============================================================================
-if [ -f /etc/config/aria2 ] && [ -d /aria2 ]; then
+if [ -f /etc/config/aria2 ]; then
+    # —— 1. 先默认 /aria2 兜底（编译期已建好，这里再保底一次）——
+    ARIA_DIR='/aria2'
+    mkdir -p "$ARIA_DIR" "$ARIA_DIR/.aria2"
+
+    # —— 2. 再检测挂载盘：/mnt 下任意已挂载点，有就改用它 ——
+    while read -r _dev _mp _fstype _rest; do
+        case "$_mp" in /mnt/*)
+            ARIA_DIR="$_mp/aria2"
+            mkdir -p "$ARIA_DIR" "$ARIA_DIR/.aria2"
+            break
+        ;; esac
+    done < /proc/mounts
+
+    # —— 3. 修正属主（盘路径首启现建；/aria2 编译期已建好，这里顺手 chown）——
     if id -u aria2 >/dev/null 2>&1; then
-        chown -R aria2:aria2 /aria2 2>/dev/null
-        chmod 775 /aria2
-        [ -d /aria2/.aria2 ] && chmod 700 /aria2/.aria2
+        chown -R aria2:aria2 "$ARIA_DIR" 2>/dev/null
+        chmod 775 "$ARIA_DIR"
+        chmod 700 "$ARIA_DIR/.aria2"
+    else
+        chmod 777 "$ARIA_DIR" "$ARIA_DIR/.aria2"
     fi
-    # 兜底 2：配置万一没随镜像进来（比如你本地 make 时没跑 build 脚本），补一次
-    #   enabled='1' / user='aria2' 与编译期 files/etc/config/aria2 保持一致，
-    #   避免走兜底路径时 aria2 默认不自启。
-    if ! uci -q get aria2.main.dir >/dev/null 2>&1; then
-        uci set aria2.main.enabled='1'
-        uci set aria2.main.user='aria2'
-        uci set aria2.main.dir='/aria2'
-        uci set aria2.main.config_dir='/aria2/.aria2'
-        uci set aria2.main.seed_time='0'
-        uci set aria2.main.max_overall_upload_limit='50k'
-        uci set aria2.main.max_upload_limit='50k'
-        uci commit aria2
-        echo "aria2 配置缺失，已按默认补写" >>$LOGFILE
-    fi
-    echo "aria2 下载目录 /aria2 就绪" >>$LOGFILE
+
+    # —— 4. 显式 uci 写死（开机修改下载路径 + 设置）——
+    uci set aria2.main.enabled='1'
+    uci set aria2.main.user='aria2'
+    uci set aria2.main.dir="$ARIA_DIR"
+    uci set aria2.main.config_dir="$ARIA_DIR/.aria2"
+    uci set aria2.main.seed_time='0'
+    uci set aria2.main.max_overall_upload_limit='50k'
+    uci set aria2.main.max_upload_limit='50k'
+    uci commit aria2
+    echo "aria2 下载目录已设为 $ARIA_DIR" >>$LOGFILE
 else
-    echo "跳过 aria2：缺 /etc/config/aria2 或缺 /aria2 目录（aria2 未随固件编译）" >>$LOGFILE
+    echo "跳过 aria2：未检测到 /etc/config/aria2（aria2 未随固件编译）" >>$LOGFILE
 fi
 
 exit 0

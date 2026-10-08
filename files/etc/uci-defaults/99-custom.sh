@@ -382,14 +382,34 @@ chmod +x /usr/sbin/crowdsec-lxc-bootstrap.sh 2>/dev/null
 chmod +x /etc/rc.local 2>/dev/null
 echo "CrowdSec 引导已就绪" >>$LOGFILE
 
-# 创建aria2临时存储位置
-mkdir -p /aria2
-chmod 777 /aria2
-uci set aria2.main.dir='/aria2'
-# 限制时间与上传速率
-uci set aria2.main.seed_time='0'
-uci set aria2.main.max_overall_upload_limit='50k'
-uci set aria2.main.max_upload_limit='50k'
-uci commit
+# =============================================================================
+# aria2 下载目录（编译期已固化，这里只做兜底）
+#   目录 /aria2 和配置 /etc/config/aria2 都由 x86-64/build24.sh、build25.sh
+#   在编译期写进镜像了，刷完机即存在、属主正确、服务已启用。
+#   这里唯一还要做的是「用真实 uid 修正一次属主」：编译期是按 aria2 包的
+#   USERID(6800) 写死的，万一上游哪天改了 uid，目录属主就错了，
+#   而 uci-defaults 跑的时候 id -u aria2 一定拿得到真实值，改回来即可。
+# =============================================================================
+if [ -f /etc/config/aria2 ] && [ -d /aria2 ]; then
+    if id -u aria2 >/dev/null 2>&1; then
+        chown -R aria2:aria2 /aria2 2>/dev/null
+        chmod 775 /aria2
+        [ -d /aria2/.aria2 ] && chmod 700 /aria2/.aria2
+    fi
+    # 兜底 2：配置万一没随镜像进来（比如你本地 make 时没跑 build 脚本），补一次
+    if ! uci -q get aria2.main.dir >/dev/null 2>&1; then
+        uci set aria2.main.dir='/aria2'
+        uci set aria2.main.config_dir='/aria2/.aria2'
+        uci set aria2.main.seed_time='0'
+        uci set aria2.main.max_overall_upload_limit='50k'
+        uci set aria2.main.max_upload_limit='50k'
+        uci commit aria2
+        echo "aria2 配置缺失，已按默认补写" >>$LOGFILE
+    fi
+    echo "aria2 下载目录 /aria2 就绪" >>$LOGFILE
+else
+    echo "跳过 aria2：缺 /etc/config/aria2 或缺 /aria2 目录（aria2 未随固件编译）" >>$LOGFILE
+fi
+
 
 exit 0

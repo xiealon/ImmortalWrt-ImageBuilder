@@ -121,30 +121,19 @@ if [ -d /home/build/immortalwrt/shell/apk-keys ]; then
     cp -v /home/build/immortalwrt/shell/apk-keys/*.pub /home/build/immortalwrt/keys/ 2>/dev/null
     cp -v /home/build/immortalwrt/shell/apk-keys/*.rsa.pub /home/build/immortalwrt/keys/ 2>/dev/null
 fi
-
-# ============ aria2 下载目录：编译期就固化进镜像 ============
-# 目标：刷完机 /aria2 直接存在、属主正确、服务已启用，不依赖首次开机脚本成功执行。
-#
-# 机制（都核对过上游源码）：
-#   ImageBuilder 用 `cp -fpR files/. <rootfs>/` 把 FILES 拷进镜像（rules.mk: CP:=cp -fpR）
-#     - 空目录会一起拷进去 → 所以 /aria2 会存在
-#     - -p 会保留权限和属主 → 所以这里 chown 的 6800:6800 能被带进镜像
-#     - git 不追踪空目录 → 不能只靠仓库里放一个 files/aria2，必须在编译期现建
-#   6800 = aria2 包的 USERID（net/aria2/Makefile: USERID:=aria2=6800:aria2=6800）。
-#   99-custom.sh 里还留了一次兜底 chown，万一上游改 uid 也不会翻车。
-mkdir -p files/aria2/.aria2
-chown 6800:6800 files/aria2 files/aria2/.aria2
-chmod 775 files/aria2
-chmod 700 files/aria2/.aria2
-
-# 顺带把 aria2 的 uci 配置也固化下来（enabled 默认是 0，想要开机就跑就得写 1）。
-# ⚠️ 必须写 files/etc/config/，不要在仓库里提交 files/etc/config/aria2：
-#    workflow 把宿主机的 custom/ 挂到了 files/etc/config/，仓库里那个目录
-#    在容器内是被盖住看不见的（后挂的子路径覆盖先挂的父路径）。
-#    反过来，容器内往 files/etc/config/ 写文件 = 写进宿主机 custom/，
-#    最终就会成为固件里的 /etc/config/。
-mkdir -p files/etc/config
-cat > files/etc/config/aria2 <<'EOF'
+# ============ aria2 下载目录：仅当固件包含 aria2 才固化进镜像 ============
+# 判定：PACKAGES 里出现 aria2（含 luci-i18n-aria2* / luci-app-aria2 / aria2）即视为装了。
+# 不满足就跳过，避免往镜像里塞一个没有对应二进制的假配置。
+# 机制（核对过上游源码）：ImageBuilder 用 cp -fpR 把 files/ 拷进 rootfs，
+#   -p 保留属主 → 这里 chown 的 6800:6800（aria2 包 USERID）会带进镜像。
+case " $PACKAGES " in
+    *" aria2 "*|*" luci-i18n-aria2"*|*" luci-app-aria2"*)
+        mkdir -p files/aria2/.aria2
+        chown 6800:6800 files/aria2 files/aria2/.aria2
+        chmod 775 files/aria2
+        chmod 700 files/aria2/.aria2
+        mkdir -p files/etc/config
+        cat > files/etc/config/aria2 <<'EOF'
 config aria2 'main'
 	option enabled '1'
 	option user 'aria2'
@@ -158,13 +147,17 @@ config aria2 'main'
 	option seed_time '0'
 	option max_overall_upload_limit '50k'
 	option max_upload_limit '50k'
-
 	list header ''
 	list bt_tracker ''
 	list extra_settings ''
 EOF
-echo "✅ aria2 下载目录 + 配置已写入 files/"
-ls -ld files/aria2 files/aria2/.aria2 files/etc/config/aria2
+        echo "✅ aria2 下载目录 + 配置已写入 files/"
+        ls -ld files/aria2 files/aria2/.aria2 files/etc/config/aria2
+        ;;
+    *)
+        echo "⚪️ 未选择 aria2，跳过下载目录固化"
+        ;;
+esac
 
 # 构建镜像
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Building image with the following packages:"

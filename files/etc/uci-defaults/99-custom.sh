@@ -397,7 +397,11 @@ if [ -f /etc/config/aria2 ] && [ -d /aria2 ]; then
         [ -d /aria2/.aria2 ] && chmod 700 /aria2/.aria2
     fi
     # 兜底 2：配置万一没随镜像进来（比如你本地 make 时没跑 build 脚本），补一次
+    #   enabled='1' / user='aria2' 与编译期 files/etc/config/aria2 保持一致，
+    #   避免走兜底路径时 aria2 默认不自启。
     if ! uci -q get aria2.main.dir >/dev/null 2>&1; then
+        uci set aria2.main.enabled='1'
+        uci set aria2.main.user='aria2'
         uci set aria2.main.dir='/aria2'
         uci set aria2.main.config_dir='/aria2/.aria2'
         uci set aria2.main.seed_time='0'
@@ -410,6 +414,5 @@ if [ -f /etc/config/aria2 ] && [ -d /aria2 ]; then
 else
     echo "跳过 aria2：缺 /etc/config/aria2 或缺 /aria2 目录（aria2 未随固件编译）" >>$LOGFILE
 fi
-
 
 exit 0

@@ -383,38 +383,19 @@ chmod +x /etc/rc.local 2>/dev/null
 echo "CrowdSec 引导已就绪" >>$LOGFILE
 
 # =============================================================================
-# aria2 下载目录 + 设置（首启用显式 uci 写死，作为权威来源）
-#   编译期 build24.sh / build25.sh 已在镜像里建好 /aria2 并固化了
-#   /etc/config/aria2（enabled=1）。这里再做一次，保证开机即生效：
-#     - 下载目录先用 /aria2（根分区，编译期已建好、到手即用）；
-#     - 想换到数据盘：刷完机在 LuCI 的 aria2 页面，或 uci 里把 dir 改成
-#       /mnt/sda1/aria2 并保存即可（本脚本不自动检测盘，避免误用
-#       UEFI 启动盘/系统盘等）。
+# aria2 下载目录（首启：仅当 /aria2 目录存在，把下载地址改到 /aria2）
+#   编译期 build 脚本会在装了 aria2 时建好 /aria2；这里只「改下载路径 +
+#   应用用户设置的时间/上传限速」，其余配置项保持 aria2 包默认值不动。
 # =============================================================================
-if command -v aria2c >/dev/null 2>&1 || [ -f /etc/config/aria2 ]; then
-    # —— 1. 确保 /aria2 存在并修正属主（编译期已建好，这里保底一次）——
-    ARIA_DIR='/aria2'
-    mkdir -p "$ARIA_DIR" "$ARIA_DIR/.aria2"
-    if id -u aria2 >/dev/null 2>&1; then
-        chown -R aria2:aria2 "$ARIA_DIR" 2>/dev/null
-        chmod 775 "$ARIA_DIR"
-        chmod 700 "$ARIA_DIR/.aria2"
-    else
-        chmod 777 "$ARIA_DIR" "$ARIA_DIR/.aria2"
-    fi
-
-    # —— 2. 显式 uci 写死（开机修改下载路径 + 设置）——
-    uci set aria2.main.enabled='1'
-    uci set aria2.main.user='aria2'
-    uci set aria2.main.dir="$ARIA_DIR"
-    uci set aria2.main.config_dir="$ARIA_DIR/.aria2"
+if [ -d /aria2 ] && [ -f /etc/config/aria2 ]; then
+    uci set aria2.main.dir='/aria2'
     uci set aria2.main.seed_time='0'
     uci set aria2.main.max_overall_upload_limit='50k'
     uci set aria2.main.max_upload_limit='50k'
     uci commit aria2
-    echo "aria2 下载目录已设为 $ARIA_DIR" >>$LOGFILE
+    echo "aria2 下载目录已设为 /aria2" >>$LOGFILE
 else
-    echo "跳过 aria2：未安装 aria2，跳过下载目录与设置" >>$LOGFILE
+    echo "跳过 aria2：未检测到 /aria2 目录或 aria2 未安装" >>$LOGFILE
 fi
 
 exit 0

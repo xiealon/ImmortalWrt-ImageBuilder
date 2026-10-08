@@ -390,5 +390,6 @@ uci set aria2.main.dir='/aria2'
 uci set aria2.main.seed_time='0'
 uci set aria2.main.max_overall_upload_limit='50k'
 uci set aria2.main.max_upload_limit='50k'
+uci commit
 
 exit 0

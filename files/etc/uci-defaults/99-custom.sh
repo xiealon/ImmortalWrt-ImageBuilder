@@ -386,26 +386,15 @@ echo "CrowdSec 引导已就绪" >>$LOGFILE
 # aria2 下载目录 + 设置（首启用显式 uci 写死，作为权威来源）
 #   编译期 build24.sh / build25.sh 已在镜像里建好 /aria2 并固化了
 #   /etc/config/aria2（enabled=1）。这里再做一次，保证开机即生效：
-#     1) 先默认 /aria2 兜底（编译期已建好，这里再 mkdir 保底一定存在）；
-#     2) 再检测 /mnt 下已挂载的数据盘，有盘就把下载目录指到 <盘>/aria2，
-#        避免下载把根分区写爆；没盘就继续用 /aria2；
-#     3) 显式 uci set 写死 dir / config_dir / 限速等设置。
+#     - 下载目录先用 /aria2（根分区，编译期已建好、到手即用）；
+#     - 想换到数据盘：刷完机在 LuCI 的 aria2 页面，或 uci 里把 dir 改成
+#       /mnt/sda1/aria2 并保存即可（本脚本不自动检测盘，避免误用
+#       UEFI 启动盘/系统盘等）。
 # =============================================================================
-if [ -f /etc/config/aria2 ]; then
-    # —— 1. 先默认 /aria2 兜底（编译期已建好，这里再保底一次）——
+if command -v aria2c >/dev/null 2>&1 || [ -f /etc/config/aria2 ]; then
+    # —— 1. 确保 /aria2 存在并修正属主（编译期已建好，这里保底一次）——
     ARIA_DIR='/aria2'
     mkdir -p "$ARIA_DIR" "$ARIA_DIR/.aria2"
-
-    # —— 2. 再检测挂载盘：/mnt 下任意已挂载点，有就改用它 ——
-    while read -r _dev _mp _fstype _rest; do
-        case "$_mp" in /mnt/*)
-            ARIA_DIR="$_mp/aria2"
-            mkdir -p "$ARIA_DIR" "$ARIA_DIR/.aria2"
-            break
-        ;; esac
-    done < /proc/mounts
-
-    # —— 3. 修正属主（盘路径首启现建；/aria2 编译期已建好，这里顺手 chown）——
     if id -u aria2 >/dev/null 2>&1; then
         chown -R aria2:aria2 "$ARIA_DIR" 2>/dev/null
         chmod 775 "$ARIA_DIR"
@@ -414,7 +403,7 @@ if [ -f /etc/config/aria2 ]; then
         chmod 777 "$ARIA_DIR" "$ARIA_DIR/.aria2"
     fi
 
-    # —— 4. 显式 uci 写死（开机修改下载路径 + 设置）——
+    # —— 2. 显式 uci 写死（开机修改下载路径 + 设置）——
     uci set aria2.main.enabled='1'
     uci set aria2.main.user='aria2'
     uci set aria2.main.dir="$ARIA_DIR"
@@ -425,7 +414,7 @@ if [ -f /etc/config/aria2 ]; then
     uci commit aria2
     echo "aria2 下载目录已设为 $ARIA_DIR" >>$LOGFILE
 else
-    echo "跳过 aria2：未检测到 /etc/config/aria2（aria2 未随固件编译）" >>$LOGFILE
+    echo "跳过 aria2：未安装 aria2，跳过下载目录与设置" >>$LOGFILE
 fi
 
 exit 0

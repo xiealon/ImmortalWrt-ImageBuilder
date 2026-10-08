@@ -96,41 +96,18 @@ else
     echo "⚪️ 未选择 luci-app-ssr-plus"
 fi
 
-# ============ aria2 下载目录：仅当固件包含 aria2 才固化进镜像 ============
-# 判定：PACKAGES 里出现 aria2（含 luci-i18n-aria2* / luci-app-aria2 / aria2）即视为装了。
-# 不满足就跳过，避免往镜像里塞一个没有对应二进制的假配置。
-# 机制（核对过上游源码）：ImageBuilder 用 cp -fpR 把 files/ 拷进 rootfs，
-#   -p 保留属主 → 这里 chown 的 6800:6800（aria2 包 USERID）会带进镜像。
+# ============ aria2 下载目录：仅当固件含 luci-i18n-aria2-zh-cn 才在编译期建 /aria2 ============
+# PACKAGES 含 luci-i18n-aria2-zh-cn（会拉入 aria2）时，编译期建好 /aria2 目录；不装则跳过。
+# 目录属主按 aria2 包 USERID(6800) 写死，ImageBuilder 用 cp -fpR -p 把权限/属主带进镜像。
 case " $PACKAGES " in
-    *" aria2 "*|*" luci-i18n-aria2"*|*" luci-app-aria2"*)
-        mkdir -p files/aria2/.aria2
-        chown 6800:6800 files/aria2 files/aria2/.aria2
+    *" luci-i18n-aria2"*)
+        mkdir -p files/aria2
+        chown 6800:6800 files/aria2
         chmod 775 files/aria2
-        chmod 700 files/aria2/.aria2
-        mkdir -p files/etc/config
-        cat > files/etc/config/aria2 <<'EOF'
-config aria2 'main'
-	option enabled '1'
-	option user 'aria2'
-	option dir '/aria2'
-	option config_dir '/aria2/.aria2'
-	option bt_enable_lpd 'true'
-	option enable_dht 'true'
-	option follow_torrent 'true'
-	option file_allocation 'none'
-	option save_session_interval '30'
-	option seed_time '0'
-	option max_overall_upload_limit '50k'
-	option max_upload_limit '50k'
-	list header ''
-	list bt_tracker ''
-	list extra_settings ''
-EOF
-        echo "✅ aria2 下载目录 + 配置已写入 files/"
-        ls -ld files/aria2 files/aria2/.aria2 files/etc/config/aria2
+        echo "✅ aria2 下载目录 /aria2 已建（编译期）"
         ;;
     *)
-        echo "⚪️ 未选择 aria2，跳过下载目录固化"
+        echo "⚪️ 未选择 aria2，跳过 /aria2 目录创建"
         ;;
 esac
 

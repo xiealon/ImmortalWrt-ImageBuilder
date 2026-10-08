@@ -382,10 +382,11 @@ chmod +x /usr/sbin/crowdsec-lxc-bootstrap.sh 2>/dev/null
 chmod +x /etc/rc.local 2>/dev/null
 echo "CrowdSec 引导已就绪" >>$LOGFILE
 
-# 创建aria2临时存储位置，限制做种时间与上传速率
+# 创建aria2临时存储位置
 mkdir -p /aria2
 chmod 777 /aria2
 uci set aria2.main.dir='/aria2'
+# 限制做种时间与上传速率
 uci set aria2.main.seed_time='0'
 uci set aria2.main.max_overall_upload_limit='50k'
 uci set aria2.main.max_upload_limit='50k'

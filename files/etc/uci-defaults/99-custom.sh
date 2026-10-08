@@ -392,7 +392,10 @@ if [ -d /aria2 ] && [ -f /etc/config/aria2 ]; then
     uci set aria2.main.seed_time='0'
     uci set aria2.main.max_overall_upload_limit='50k'
     uci set aria2.main.max_upload_limit='50k'
-    uci commit aria2
+    uci set aria2.main.enabled='1'
+    uci commit
+    uci set aria2.main.enabled='0'
+    uci commit
     echo "aria2 下载目录已设为 /aria2" >>$LOGFILE
 else
     echo "跳过 aria2：未检测到 /aria2 目录或 aria2 未安装" >>$LOGFILE

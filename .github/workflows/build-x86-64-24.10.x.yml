@@ -272,7 +272,7 @@ jobs:
 
       - name: 同步 img-installer 项目 准备制作ISO
         run: |
-          git clone https://github.com/wukongdaily/img-installer.git
+          git clone https://github.com/xiealon/img-installer.git
           cd img-installer
 
       - name: Set executable permissions for scripts

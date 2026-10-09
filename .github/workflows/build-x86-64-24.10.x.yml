@@ -64,6 +64,14 @@ on:
         options:
           - 'yes'
           - 'no'
+      include_iso:
+        description: "额外生成 ISO 安装器（复用 build-iso 流程，会联网 clone wukongdaily/img-installer 多花时间）"
+        required: false
+        default: 'no'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
   workflow_call:
     inputs:
       luci_version:
@@ -99,6 +107,10 @@ on:
         default: "yes"
         type: string
       include_crowdsec:
+        required: false
+        default: "no"
+        type: string
+      include_iso:
         required: false
         default: "no"
         type: string
@@ -202,7 +214,7 @@ jobs:
             -e PROFILE=$ROOTFS_SIZE \
             -e INCLUDE_DOCKER=$include_docker \
           immortalwrt/imagebuilder:x86-64-openwrt-${luci_version} /bin/bash /home/build/immortalwrt/build.sh
-          
+
 
       - name: Create info
         run: |
@@ -211,7 +223,7 @@ jobs:
           <a href="https://wkdaily.cpolar.cn/archives/1">
            <img src="https://img.shields.io/badge/若下载慢可套用国内加速站下载-FC7C0D?logo=github&logoColor=fff&labelColor=000&style=for-the-badge"/>
           </a>
-          
+
           - 🏠 **后台地址**: ${{ github.event.inputs.custom_router_ip }}
           - 👤 **用户名**: root
           - 🔑 **密码**: 无
@@ -235,3 +247,54 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ===== 以下为「额外产出 ISO 安装器」步骤（复用 build-iso 工作流的流程）=====
+      # 唯一的总开关在下面的 build_installer_iso job 上（if 提到 job 级），
+      # 这里两步默认都会执行（cp + 上传 artifact 开销极小），由 job 级 if 决定是否进 ISO 制作。
+      - name: 复制固件到根目录
+        run: |
+          cp ${{ github.workspace }}/bin/targets/x86/64/*squashfs-combined-efi.img.gz ${{ github.workspace }}
+
+      - name: 上传固件到 artifact (for ISO generation)
+        uses: actions/upload-artifact@v6
+        with:
+          name: firmware-img
+          path: |
+            *.img.gz
+
+  build_installer_iso:
+    runs-on: ubuntu-22.04
+    needs: build
+    # 总开关提到 job 级（唯一一处 if）。dispatch 与 workflow_call 两种触发都能正确取值。
+    if: ${{ (github.event.inputs.include_iso || inputs.include_iso || 'no') == 'yes' }}
+
+    steps:
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: firmware-img
+
+      - name: 同步 img-installer 项目 准备制作ISO
+        run: |
+          git clone https://github.com/wukongdaily/img-installer.git
+          cd img-installer
+
+      - name: Set executable permissions for scripts
+        run: |
+          chmod +x "${{ github.workspace }}/img-installer/custom.sh"
+          chmod +x "${{ github.workspace }}/img-installer/supportFiles/custom/build.sh"
+
+      - name: 制作 24.10.x ISO
+        run: |
+          firmware_file=$(ls *squashfs-combined-efi.img.gz)
+          cd img-installer
+          bash autobuild/autobuild.sh "../$firmware_file"
+
+      - name: 上传 ISO 到 Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: "Custom-Installer-x86_64-ISO"
+          body_path: "${{ github.workspace }}/img-installer/autobuild/info.md"
+          files: |
+            img-installer/output/custom-installer-x86_64.iso
+          token: "${{ secrets.GITHUB_TOKEN }}"

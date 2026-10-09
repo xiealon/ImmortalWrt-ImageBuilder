@@ -38,7 +38,7 @@ on:
         description: "集成 store 商店"
         required: false
         type: boolean
-        default: false
+        default: true
       include_docker:
         description: |
           是否编译 Docker 插件
@@ -51,7 +51,7 @@ on:
       include_crowdsec:
         description: "内置 CrowdSec 安全容器（Ubuntu LXC，开机自动建容器+对接 bouncer，需选 2G 以上空间）"
         required: false
-        default: 'no'
+        default: 'yes'
         type: choice
         options:
           - 'yes'
@@ -59,7 +59,7 @@ on:
       include_iso:
         description: "额外生成 ISO 安装器（复用 build-iso 流程，会联网 clone wukongdaily/img-installer 多花时间）"
         required: false
-        default: 'no'
+        default: 'yes'
         type: choice
         options:
           - 'yes'

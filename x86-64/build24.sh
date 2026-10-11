@@ -83,6 +83,21 @@ if echo "$PACKAGES" | grep -q "luci-app-openclash"; then
 else
     echo "⚪️ 未选择 luci-app-openclash"
 fi
+
+if echo "$PACKAGES" | grep -q "luci-app-ssr-plus"; then
+    echo "✅ 已选择 luci-app-ssr-plus，添加 mihomo core"
+    mkdir -p files/usr/bin
+    # Download mihomo
+    MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/v1.19.24/mihomo-linux-amd64-compatible-v1.19.24.gz"
+    mkdir -p files/usr/bin
+    wget -qO- "$MIHOMO_URL" | gzip -dc > files/usr/bin/mihomo
+    chmod +x files/usr/bin/mihomo
+    echo "✅ 已下载 mihomo core"
+    ls -lah files/usr/bin
+else
+    echo "⚪️ 未选择 luci-app-ssr-plus"
+fi
+
 # ============ aria2 下载目录：仅当固件含 luci-i18n-aria2-zh-cn 才在编译期建 /aria2 ============
 # PACKAGES 含 luci-i18n-aria2-zh-cn（会拉入 aria2）时，编译期建好 /aria2 目录；不装则跳过。
 # 目录属主按 aria2 包 USERID(6800) 写死，ImageBuilder 用 cp -fpR -p 把权限/属主带进镜像。

@@ -59,7 +59,7 @@ on:
       include_iso:
         description: "额外生成 ISO 安装器（复用 build-iso 流程，会联网 clone wukongdaily/img-installer 多花时间）"
         required: false
-        default: 'yes'
+        default: 'no'
         type: choice
         options:
           - 'yes'

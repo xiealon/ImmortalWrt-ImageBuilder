@@ -206,6 +206,13 @@ jobs:
     needs: build
     # 总开关提到 job 级（唯一一处 if）。dispatch 与 workflow_call 两种触发都能正确取值。
     if: ${{ (github.event.inputs.include_iso || inputs.include_iso || 'no') == 'yes' }}
+    env:
+      # 复用「固件版本选择」下拉框(luci_version)作为 ISO 文件名后缀，
+      # 让 24.10 与 25.12 的 ISO 落在同一 tag 时因文件名不同而共存、互不覆盖。
+      # 该值会经 autobuild.sh → docker -e ISO_VER → build.sh 透传；
+      # 若 fork(xiealon/img-installer) 已应用版本化命名则直接产出带版本文件，
+      # 否则由下方「制作 ISO」步骤的 mv 兜底重命名。
+      ISO_VER: "${{ github.event.inputs.luci_version || inputs.luci_version }}"
 
     steps:
       - name: Download firmware artifact
@@ -228,6 +235,11 @@ jobs:
           firmware_file=$(ls *squashfs-combined-efi.img.gz)
           cd img-installer
           bash autobuild/autobuild.sh "../$firmware_file"
+          # 兜底重命名：若 fork 未应用版本化命名，这里把固定名改成带版本后缀，
+          # 保证无论 fork 是否改动，上传步骤都能找到 custom-installer-x86_64-${ISO_VER}.iso
+          if [ ! -f "output/custom-installer-x86_64-${ISO_VER}.iso" ]; then
+            mv output/custom-installer-x86_64.iso "output/custom-installer-x86_64-${ISO_VER}.iso"
+          fi
 
       - name: 上传 ISO 到 Release
         uses: softprops/action-gh-release@v3
@@ -235,5 +247,5 @@ jobs:
           tag_name: "Custom-Installer-x86_64-ISO"
           body_path: "${{ github.workspace }}/img-installer/autobuild/info.md"
           files: |
-            img-installer/output/custom-installer-x86_64.iso
+            img-installer/output/custom-installer-x86_64-${{ env.ISO_VER }}.iso
           token: "${{ secrets.GITHUB_TOKEN }}"

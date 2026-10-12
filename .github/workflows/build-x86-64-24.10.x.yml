@@ -292,5 +292,5 @@ jobs:
           tag_name: "Custom-Installer-x86_64-ISO"
           body_path: "${{ github.workspace }}/img-installer/autobuild/info.md"
           files: |
-            img-installer/output/custom-installer-x86_64-24.10.iso
+            img-installer/output/custom-installer-x86_64.iso
           token: "${{ secrets.GITHUB_TOKEN }}"

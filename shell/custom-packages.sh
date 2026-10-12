@@ -11,7 +11,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn"
 # ssrp-plus＆nekobox
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-nft-tproxy kmod-nft-socket xray-core naiveproxy luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-nekobox"
 # geoview sing-box hysteria 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box hysteria"
 # 流量监控 by timsaya

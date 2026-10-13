@@ -23,7 +23,7 @@ CSCLI=/usr/bin/cscli
 MAX_WAIT="${MAX_WAIT:-60}"
 SLEEP=5
 
-SCRIPT_VER="2026-10-13.5"
+SCRIPT_VER="2026-10-13.10"
 log() { echo "[$(date '+%F %T')] $*"; }
 log "===== crowdsec-lxc-bootstrap 版本 $SCRIPT_VER 开始执行 ====="
 
@@ -205,25 +205,117 @@ if [ -z "$SEC" ] || [ -z "$(uci -q get "$SEC.api_key" 2>/dev/null)" ]; then
 fi
 
 # ---------- 步骤2：控制台绑定 enroll（远程 API，联网）----------
-# 前置：远程 api（.enrolled 标记）存在则跳过，否则建立
-if [ -n "$ENROLL_KEY" ] && [ ! -f "$ENROLL_FLAG" ]; then
-    log "进入步骤2：enroll"
-    if ct $CSCLI console enroll "$ENROLL_KEY" >/dev/null 2>&1; then
-        ct /usr/bin/systemctl restart crowdsec >/dev/null 2>&1 || true
-        ct $CSCLI console enable --all >/dev/null 2>&1 || true
-        mkdir -p "$ROOTFS/var/lib/crowdsec"
-        : > "$ENROLL_FLAG"
-        log "控制台绑定完成 —— 记得回 app.crowdsec.net 点 Accept"
+# 有效性分级（修复"网页端删了 API、设备内不删 → 重启不重连"）：
+#   老逻辑只看 .enrolled 标记文件，而网页端删除 API 不会动设备内任何文件，
+#   于是重启永远走"已绑定，跳过 enroll"，本地凭据变成服务端不认识的孤儿，
+#   crowdsec 推送 signals 一直 401，控制台再也不刷新。
+#   现在先探容器外网，再按 console status 的实际结果分四态：
+#     0 = 凭据在且有效
+#     1 = 本地无凭据（首次 enroll）
+#     2 = 凭据被服务端拒绝（console status 出现 not enrolled / 401/403/unauthorized/invalid/revoked → 需重连）
+#     3 = 外网不通，本次不判（凭据原样不动，留给下次开机再判）
+#   只有 2 才清理凭据+标记后重连。探测放在容器内跑（不是路由器侧）：
+#   容器走 NAT 出网，必须测 cscli 真正会走的那条路径（SNAT 配错时路由器通、容器不通）。
+remote_enroll_state() {
+    ct sh -c '
+        [ -s /etc/crowdsec/online_api_credentials.yaml ] || exit 1
+        # 外网双探测：任一 DNS 通即算在线；全不通 → exit 3，整个检查跳过
+        # （ICMP 被运营商封很常见，ping 不通只等于"这次不判"，绝不动凭据）
+        if command -v ping >/dev/null 2>&1; then
+            ping -c1 -W3 233.5.5.5 >/dev/null 2>&1 || ping -c1 -W3 119.29.29.29 >/dev/null 2>&1 || exit 3
+        else
+            # 容器没装 ping：退化成 curl 探 console API，收到任何 HTTP 响应即算通
+            curl -s -m 8 -o /dev/null https://api.crowdsec.net 2>/dev/null || exit 3
+        fi
+        _out=$(cscli console status 2>&1)
+        # 失效措辞各版本不同：401/unauthorized/invalid/revoked（多数版本）
+        # 或 "not enrolled"（console status 的 Enroll API 段打 ✗ 时，实测输出）
+        printf "%s\n" "$_out" | grep -qiE "unauthorized|forbidden|not authorized|invalid|revoked|401|403|not enrolled" && exit 2
+        exit 0
+    ' 2>/dev/null
+}
+
+if [ -n "$ENROLL_KEY" ]; then
+    remote_enroll_state; _re=$?
+    _CRED_BAK=""
+    if [ "$_re" -eq 3 ]; then
+        log "外网不通，跳过远程 api 健康检查（凭据不动，下次开机再判）"
+    elif [ "$_re" -eq 0 ]; then
+        log "远程 api 已绑定且有效，跳过 enroll"
     else
-        log "!! enroll 失败（检查密钥是否正确 / 容器是否能联网）"
+        if [ "$_re" -eq 2 ]; then
+            log "远程 api 已失效（网页端删除/密钥被撤），备份旧凭据后重连"
+            # 备份而非直接删：凭据文件缺失会让 require.LAPI 加载失败，
+            # 连 cscli bouncers list 都用不了（实测报错）。enroll 失败必须能回滚。
+            _CRED_BAK="$ROOTFS/etc/crowdsec/online_api_credentials.yaml.bak"
+            mv -f "$ROOTFS/etc/crowdsec/online_api_credentials.yaml" "$_CRED_BAK" 2>/dev/null || true
+            rm -f "$ENROLL_FLAG"
+            ct /usr/bin/systemctl restart crowdsec >/dev/null 2>&1 || true
+        else
+            log "本地无 enroll 凭据，进入 enroll"
+        fi
+        if ct $CSCLI console enroll "$ENROLL_KEY" >/dev/null 2>&1; then
+            ct /usr/bin/systemctl restart crowdsec >/dev/null 2>&1 || true
+            ct $CSCLI console enable --all >/dev/null 2>&1 || true
+            mkdir -p "$ROOTFS/var/lib/crowdsec"
+            : > "$ENROLL_FLAG"
+            [ -n "$_CRED_BAK" ] && rm -f "$_CRED_BAK"
+            log "控制台绑定完成 —— 记得回 app.crowdsec.net 点 Accept"
+        else
+            if [ -n "$_CRED_BAK" ] && [ -f "$_CRED_BAK" ]; then
+                mv -f "$_CRED_BAK" "$ROOTFS/etc/crowdsec/online_api_credentials.yaml"
+                log "已回滚旧凭据（cscli bouncers 等本地功能不受影响）"
+            fi
+            log "!! enroll 失败（enroll key 为一次性；去 app.crowdsec.net 重新生成，更新 /etc/config/crowdsec_enroll_key.txt）"
+        fi
     fi
-elif [ -n "$ENROLL_KEY" ]; then
-    log "远程 api 已绑定，跳过 enroll"
 else
     log "未提供 enroll 密钥，跳过"
 fi
 
-# ---------- 收尾 ----------
+# ---------- 收尾：本地 LAPI 链路体检（bouncer ↔ 容器 LAPI）----------
+# 与远程 console status 判定对称：不只看静态字段，看动态心跳。
+# 判据是 cscli bouncers inspect 的 last_pull —— LAPI 每次收到 bouncer 的
+# pull 请求就自动刷新这个墙钟时间（RFC3339）。它新鲜 ⇒ 路由器→容器网络 +
+# api_key 认证 + LAPI 服务三者全通。name/valid/type/auth_type 只是静态佐证。
+# bouncer 默认约 10s 拉一次；开机后首次 pull 需要一点时间，这里只对
+# "从未 pull"继续等（最多 60 秒），其他失败立即出结论，避免无谓空等。
+local_lapi_state() {
+    # $1 = bouncer 名。返回：0 健康 / 1 从未 pull / 2 pull 过久(>5min) / 3 已吊销 / 10 查不到
+    ct sh -c '
+        _bn="$1"
+        _out=$(cscli bouncers inspect "$_bn" -o json 2>/dev/null) || exit 10
+        _rv=$(printf "%s\n" "$_out" | sed -n "s/.*\"revoked\"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p")
+        _lp=$(printf "%s\n" "$_out" | sed -n "s/.*\"last_pull\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+        [ "$_rv" = "true" ] && exit 3
+        [ -z "$_lp" ] && exit 1
+        _now=$(date +%s)
+        _ts=$(date -d "$_lp" +%s 2>/dev/null || echo 0)
+        [ $((_now - _ts)) -gt 300 ] && exit 2
+        exit 0
+    ' _ "$1"
+}
+
+# 仅当固件真的带了容器（rootfs 已解压）且 bouncer 段存在时才体检，
+# 没勾 include_crowdsec 的固件不刷噪声日志
+if [ -f "$ROOTFS/etc/crowdsec/config.yaml" ] && [ -n "$SEC" ]; then
+    _i=0
+    while :; do
+        local_lapi_state "$BOUNCER_NAME"; _rc=$?
+        [ "$_rc" -eq 0 ] && break
+        [ "$_rc" -ne 1 ] && break
+        [ "$_i" -ge 12 ] && break
+        _i=$((_i+1)); sleep 5
+    done
+    case "$_rc" in
+        0)  log "✅ 本地链路健康：bouncer '$BOUNCER_NAME' 正在拉取 decisions（last_pull 5 分钟内）" ;;
+        1)  log "⚠️ bouncer '$BOUNCER_NAME' 从未成功 pull（查 api_url / api_key / 容器网络）" ;;
+        2)  log "⚠️ bouncer '$BOUNCER_NAME' 超过 5 分钟没 pull，本地链路异常" ;;
+        3)  log "⚠️ bouncer '$BOUNCER_NAME' 已被吊销（revoked），api_key 失效" ;;
+        *)  log "⚠️ 查不到 bouncer '$BOUNCER_NAME'（cscli inspect 失败，查容器/LAPI 状态）" ;;
+    esac
+fi
+
 sleep 3
 if nft list table ip crowdsec >/dev/null 2>&1; then
     log "✅ nftables crowdsec 表已建立，链路打通"

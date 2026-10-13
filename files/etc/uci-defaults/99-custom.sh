@@ -23,8 +23,6 @@ uci set "dhcp.@domain[-1].ip=203.107.6.88"
 BPS_IP='10.1.1.201'    #IP地址/LAN
 BPS_GW='10.1.1.1'      #网关/LAN
 BPS_DN='10.1.1.1'      #DNS/LAN
-LXC_IP='10.0.0.1'      #LXC地址
-LSC_IP='10.0.0.0/24'   #LXC NAT转发IP
 
 # ============================================================================
 # 读取 GitHub Actions 界面里填的网络参数
@@ -90,6 +88,18 @@ _UDN=$(_read_netconf custom_router_dns.txt)
 
 echo "最终网络配置: IP=${BPS_IP}/${NETMASK} 网关=${BPS_GW} DNS=${BPS_DN}" >>$LOGFILE
 
+# ---- 4. 容器网络（LXC）：容器 IP + 网桥 IP（网关/DNS 合并成网桥 IP），掩码固定 /24 ----
+#      默认 10.0.0.10 / 10.0.0.1；要改在 Actions UI 填 custom_container_ip / custom_bridge_ip，
+#      编译期（prepare → 容器 systemd-networkd）与运行期（bootstrap）同源读这两个文件，
+#      workflow 的 Validate 步骤已做格式/同网段校验并回退默认，这里只做读取+兜底。
+CS_CT_IP="$(_read_netconf custom_container_ip.txt)"
+[ -n "$CS_CT_IP" ] || CS_CT_IP='10.0.0.10'
+CS_BRIDGE_IP="$(_read_netconf custom_bridge_ip.txt)"
+[ -n "$CS_BRIDGE_IP" ] || CS_BRIDGE_IP='10.0.0.1'
+# 容器网段（SNAT 源网段）：由容器 IP 前三段推导，固定 /24
+LSC_IP="$(echo "$CS_CT_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')"
+echo "容器网络: IP=${CS_CT_IP} 网关/DNS=${CS_BRIDGE_IP} 掩码=255.255.255.0 NAT=${LSC_IP}" >>$LOGFILE
+
 
 # 禁用WAN口
 uci set network.wan.disabled='1'
@@ -115,7 +125,7 @@ uci set network.lxcbr0.bridge_empty='1'
 uci set network.lxc=interface
 uci set network.lxc.device='lxcbr0'
 uci set network.lxc.proto='static'
-uci set network.lxc.ipaddr="${LXC_IP}"
+uci set network.lxc.ipaddr="${CS_BRIDGE_IP}"
 uci set network.lxc.netmask='255.255.255.0'
 #----------DHCP：容器网段发 IP----------
 uci set dhcp.lxc=dhcp
@@ -285,8 +295,7 @@ fi
 #       所以这里只做「零网络依赖」的配置；真正拉容器、装软件、取 key 的事
 #       交给 /etc/rc.local 后台调用的 /usr/sbin/crowdsec-lxc-bootstrap.sh。
 # =============================================================================
-CS_CT_IP='10.0.0.10'    # 容器固定 IP（编译期已写进容器的 systemd-networkd）
-CS_LAPI_PORT='8080'
+CS_LAPI_PORT='8080'    # 容器 CS_CT_IP 已在上面第 4 段从 custom_container_ip.txt 读取（默认 10.0.0.10）
 
 # ---------- 0. cgroup2 挂载兜底（替代 cgroupfs-mount / cgroup-tools 两个包） ----------
 # 25.12(apk) 的源里没有这两个包（它们只在 24.x 的第三方 opkg 源里），而 kernel 6.12

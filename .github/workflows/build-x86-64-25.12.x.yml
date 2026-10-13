@@ -64,6 +64,11 @@ on:
         options:
           - 'yes'
           - 'no'
+      crowdsec_enroll_key:
+        description: "CrowdSec 控制台注册密钥（app.crowdsec.net 的 enrollment key）；留空则不开通账号绑定。仅 include_crowdsec=yes 时生效"
+        required: false
+        default: ''
+        type: password
 permissions:
   contents: write
 
@@ -99,6 +104,15 @@ jobs:
           echo "        掩码=[$(tr -d '\r\n' < "$CUSTOM/custom_router_netmask.txt")]"
           echo "        网关=[$(tr -d '\r\n' < "$CUSTOM/custom_router_gateway.txt")]"
           echo "        DNS=[$(tr -d '\r\n' < "$CUSTOM/custom_router_dns.txt")]"
+
+          # CrowdSec 控制台注册密钥：仅 include_crowdsec=yes 且填写了密钥时才写进固件，
+          # 由首次开机时的 crowdsec-lxc-bootstrap.sh 读出来执行 cscli console enroll（受 LXC 守卫限制）。
+          if [ "${{ github.event.inputs.include_crowdsec }}" = "yes" ] && [ -n "${{ github.event.inputs.crowdsec_enroll_key }}" ]; then
+            echo "${{ github.event.inputs.crowdsec_enroll_key }}" > "$CUSTOM/crowdsec_enroll_key.txt"
+            echo "已写入 CrowdSec 控制台注册密钥"
+          else
+            echo "未提供 CrowdSec 注册密钥，跳过账号绑定"
+          fi
 
       - name: Enable Store integration
         run: |

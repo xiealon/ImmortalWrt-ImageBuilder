@@ -188,6 +188,12 @@ uci del dhcp.lan.ndp
 # 关闭dhcp页面的强制dhcp客户端（唯一客户端））
 uci -q del dhcp.@dnsmasq[0].authoritative
 
+# 开启mosdns功能
+uci set mosdns.config.enabled='1'
+uci set mosdns.config.redirect='1'
+uci set mosdns.config.local_dns_redirect='1'
+uci set mosdns.config.geo_auto_update='1'
+
 # 提交
 uci commit
 

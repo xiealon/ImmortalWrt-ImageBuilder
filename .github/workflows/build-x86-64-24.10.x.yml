@@ -100,7 +100,7 @@ on:
         type: string
       profile:
         required: true
-        default: "3G"
+        default: "4G"
         type: string
       enable_store:
         required: false

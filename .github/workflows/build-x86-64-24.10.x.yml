@@ -137,6 +137,60 @@ jobs:
       - name: Set executable permissions
         run: chmod +x ${{ github.workspace }}/x86-64/build24.sh
 
+      - name: Validate CrowdSec build parameters
+        env:
+          # 把 workflow inputs 统一"导入"为环境变量：shell 里只读变量，
+          # 不把 ${{ }} 直接插值进脚本——crowdsec_enroll_key 是 password 型输入，
+          # 若含引号/反引号/$ 等字符，直接插值会破坏 shell 语法甚至注入。
+          # inputs.* 在本 workflow 的 inputs 定义里直接取值即可
+          #（workflow_dispatch 与 workflow_call 两种触发均可用，无需
+          #  github.event.inputs.X || inputs.X 双重兜底）。
+          CS_INCLUDE_IN: ${{ inputs.include_crowdsec }}
+          CS_KEY: ${{ inputs.crowdsec_enroll_key }}
+          CS_PROFILE: ${{ inputs.profile }}
+        run: |
+          # ===== CrowdSec 构建参数前置校验（防空跑）=====
+          # 所有 CrowdSec 相关产物（注册密钥文件 / LXC rootfs）统一以本步骤写入
+          # $GITHUB_ENV 的 CS_INCLUDE / CS_ENROLL 为准；后续步骤只读 env、不再各自散落判定。
+          # ⚠️ 此步骤与 25.12 的 build-x86-64-25.12.x.yml 保持一致，两边要改一起改。
+          CS_INCLUDE=no
+          CS_ENROLL=no
+
+          if [ "$CS_INCLUDE_IN" != "yes" ]; then
+            echo "❎ include_crowdsec=no，本轮不构建 CrowdSec 容器"
+            if [ -n "$CS_KEY" ]; then
+              echo "::warning::已填写 crowdsec_enroll_key 但 include_crowdsec=no，密钥不会写入固件、账号绑定不生效"
+            fi
+          else
+            case "$CS_PROFILE" in
+              2G|3G|4G|10G)
+                CS_INCLUDE=yes
+                if [ -n "$CS_KEY" ]; then
+                  CS_ENROLL=yes
+                  echo "✅ include_crowdsec=yes，已提供注册密钥，将开通控制台账号绑定"
+                else
+                  echo "✅ include_crowdsec=yes，未提供注册密钥，跳过账号绑定（本地 bouncer/LAPI 功能不受影响）"
+                fi
+                ;;
+              *)
+                echo "::error::include_crowdsec=yes 但 profile=$CS_PROFILE 空间不足（CrowdSec 容器需 2G 以上 rootfs），已自动跳过 CrowdSec 容器构建，其余部分照常"
+                ;;
+            esac
+          fi
+
+          if [ "$CS_ENROLL" = "yes" ]; then
+            # 注册密钥落盘只此一处：custom/ 会被下一步 docker run 挂成固件 /etc/config/，
+            # 文件名必须和 99-custom.sh / crowdsec-lxc-bootstrap.sh 读的一字不差。
+            CUSTOM="${{ github.workspace }}/custom"
+            mkdir -p "$CUSTOM"
+            printf '%s\n' "$CS_KEY" > "$CUSTOM/crowdsec_enroll_key.txt"
+            echo "已写入注册密钥 → custom/crowdsec_enroll_key.txt"
+          fi
+
+          echo "CS_INCLUDE=$CS_INCLUDE" >> $GITHUB_ENV
+          echo "CS_ENROLL=$CS_ENROLL" >> $GITHUB_ENV
+          echo "校验结果: CS_INCLUDE=$CS_INCLUDE CS_ENROLL=$CS_ENROLL"
+
       - name: Save Router Network Config into OpenWrt files
         run: |
           # 整个 custom/ 目录会被下一步 docker run 挂成固件里的 /etc/config/，
@@ -160,14 +214,8 @@ jobs:
           echo "        网关=[$(tr -d '\r\n' < "$CUSTOM/custom_router_gateway.txt")]"
           echo "        DNS=[$(tr -d '\r\n' < "$CUSTOM/custom_router_dns.txt")]"
 
-          # CrowdSec 控制台注册密钥：仅 include_crowdsec=yes 且填写了密钥时才写进固件，
-          # 由首次开机时的 crowdsec-lxc-bootstrap.sh 读出来执行 cscli console enroll（受 LXC 守卫限制）。
-          if [ "${{ github.event.inputs.include_crowdsec }}" = "yes" ] && [ -n "${{ github.event.inputs.crowdsec_enroll_key }}" ]; then
-            echo "${{ github.event.inputs.crowdsec_enroll_key }}" > "$CUSTOM/crowdsec_enroll_key.txt"
-            echo "已写入 CrowdSec 控制台注册密钥"
-          else
-            echo "未提供 CrowdSec 注册密钥，跳过账号绑定"
-          fi
+          # CrowdSec 注册密钥（custom/crowdsec_enroll_key.txt）已由前面的
+          # 「Validate CrowdSec build parameters」步骤统一校验并按需写入，此处不再重复判定。
 
       - name: Enable Store integration
         run: |
@@ -179,7 +227,9 @@ jobs:
           fi
 
       - name: Prepare CrowdSec LXC rootfs
-        if: ${{ github.event.inputs.include_crowdsec == 'yes' }}
+        # 由前面的「Validate CrowdSec build parameters」步骤统一校验并写入
+        # $GITHUB_ENV 的 CS_INCLUDE；未启用时本步骤直接跳过，杜绝空跑。
+        if: env.CS_INCLUDE == 'yes'
         run: |
           # 这一步在编译机（有网、可 sudo chroot）上把 Ubuntu rootfs + CrowdSec 预制好，
           # 产物 files/opt/lxc-ubuntu.tar.gz 会随 FILES 一起打进固件。

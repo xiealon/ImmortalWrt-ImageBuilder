@@ -185,6 +185,40 @@ until ct $CSCLI bouncers list >/dev/null 2>&1; do
 done
 log "CrowdSec LAPI 已就绪"
 
+# ---------- 3.3 控制台账号绑定（cscli console enroll）----------
+# ⚠️ 本步骤天然受「LXC 容器已就绪」约束：脚本能跑到这里，
+#    前提是 rc.local 已确认 [ -f /opt/lxc-ubuntu.tar.gz ] || [ -d /srv/lxc/ubuntu/rootfs ]，
+#    且上面已经等容器在跑、CrowdSec LAPI 就绪。没有容器就不会到这里 ——
+#    这正好满足「只有在容器内(装了) LXC 才进行这一步」的要求。
+#    密钥来源：构建期把 workflow 里的 crowdsec_enroll_key 写进固件的
+#    /etc/config/crowdsec_enroll_key.txt（和 custom_router_*.txt 同一套机制）。
+ENROLL_KEY_FILE="/etc/config/crowdsec_enroll_key.txt"
+ENROLL_KEY=""
+if [ -f "$ENROLL_KEY_FILE" ]; then
+    ENROLL_KEY="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
+fi
+if [ -n "$ENROLL_KEY" ]; then
+    # 幂等标记放在 rootfs 内（持久层），避免每次开机重复注册
+    ENROLL_FLAG="$ROOTFS/var/lib/crowdsec/.enrolled"
+    if [ -f "$ENROLL_FLAG" ]; then
+        log "已检测到控制台绑定标记，跳过 enroll"
+    else
+        log "执行 cscli console enroll（绑定 app.crowdsec.net 账号）..."
+        if ct $CSCLI console enroll "$ENROLL_KEY" >/dev/null 2>&1; then
+            ct /usr/bin/systemctl restart crowdsec >/dev/null 2>&1 || true
+            # 开启社区共享黑名单（白嫖全网确认的攻击 IP 预阻断）
+            ct $CSCLI console enable --all   >/dev/null 2>&1 || true
+            mkdir -p "$ROOTFS/var/lib/crowdsec"
+            : > "$ENROLL_FLAG"
+            log "控制台绑定完成 —— 记得回 app.crowdsec.net 点 Accept"
+        else
+            log "!! cscli console enroll 失败（检查密钥是否正确 / 容器是否能联网）"
+        fi
+    fi
+else
+    log "未提供 CrowdSec 注册密钥，跳过控制台绑定（bouncer 本地封禁不受影响）"
+fi
+
 # 若本次是全新解压的 rootfs，容器里的 CrowdSec 是干净的（/var/lib/crowdsec 为空，
 # 没有任何已注册的 bouncer），uci 里残留的旧 key 必然已失效。
 # 此时绝不能因为 HAS_KEY=1 就跳过注册——否则 bouncer 会拿着失效 key 永久连不上。

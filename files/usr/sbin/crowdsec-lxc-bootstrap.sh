@@ -45,17 +45,31 @@ ct_running() {
     lxc-ls -P "$LXC_PATH" --running 2>/dev/null | grep -qw "$LXC_NAME"
 }
 
-# ---------- 0. 状态探测 ----------
+# ---------- 0. 状态探测（仅 bouncer）----------
 SEC=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
 HAS_KEY=0
 if [ -n "$SEC" ] && [ -n "$(uci -q get "$SEC.api_key" 2>/dev/null)" ]; then
     HAS_KEY=1
 fi
 
-# 常规路径：容器在跑 + key 已有 → 什么都不用做，直接走人。
+# ---------- 0.1 控制台绑定需求探测（独立一步，不与上面的 bouncer 探测混在一起）----------
+# 仅判断「是否还需要做 enroll」：有密钥且幂等标记(.enrolled)尚未写入 = 待绑定。
+# 这一步单独放，是为了让下面的快进判定据此决定是否跳过 ——
+# 否则首次开机若因断网 enroll 失败，本地 bouncer 仍会注册成功（HAS_KEY=1），
+# 下次开机脚本在 §3.3 之前就提前 exit，enroll 永远没机会重试。
+ENROLL_KEY_FILE="/etc/config/crowdsec_enroll_key.txt"
+ENROLL_KEY=""
+[ -f "$ENROLL_KEY_FILE" ] && ENROLL_KEY="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
+ENROLL_FLAG="$ROOTFS/var/lib/crowdsec/.enrolled"
+ENROLL_PENDING=0
+if [ -n "$ENROLL_KEY" ] && [ ! -f "$ENROLL_FLAG" ]; then
+    ENROLL_PENDING=1   # 有密钥但尚未绑定 → 必须走完整流程以重试
+fi
+
+# 常规路径：bouncer 已注册 + 控制台绑定已完成（或本就不需要）+ 容器在跑 → 直接走人。
 # 这条必须在最前面，否则下面那些最长 5 分钟的等待会把每次开机都拖慢。
-if [ "$HAS_KEY" = 1 ] && ct_running; then
-    log "容器在跑且 bouncer key 已存在，无需引导"
+if [ "$HAS_KEY" = 1 ] && [ "$ENROLL_PENDING" = 0 ] && ct_running; then
+    log "容器在跑、bouncer 已注册且控制台绑定已完成，无需引导"
     exit 0
 fi
 [ "$HAS_KEY" = 1 ] || log "尚未注册 bouncer，执行首次引导"
@@ -192,14 +206,9 @@ log "CrowdSec LAPI 已就绪"
 #    这正好满足「只有在容器内(装了) LXC 才进行这一步」的要求。
 #    密钥来源：构建期把 workflow 里的 crowdsec_enroll_key 写进固件的
 #    /etc/config/crowdsec_enroll_key.txt（和 custom_router_*.txt 同一套机制）。
-ENROLL_KEY_FILE="/etc/config/crowdsec_enroll_key.txt"
-ENROLL_KEY=""
-if [ -f "$ENROLL_KEY_FILE" ]; then
-    ENROLL_KEY="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
-fi
+# ENROLL_KEY / ENROLL_FLAG 已在脚本顶部「0.1 控制台绑定需求探测」算好，这里直接复用
 if [ -n "$ENROLL_KEY" ]; then
     # 幂等标记放在 rootfs 内（持久层），避免每次开机重复注册
-    ENROLL_FLAG="$ROOTFS/var/lib/crowdsec/.enrolled"
     if [ -f "$ENROLL_FLAG" ]; then
         log "已检测到控制台绑定标记，跳过 enroll"
     else

@@ -75,7 +75,7 @@ on:
         description: "CrowdSec 控制台注册密钥（app.crowdsec.net 的 enrollment key）；留空则不开通账号绑定。仅 include_crowdsec=yes 时生效"
         required: false
         default: ''
-        type: password
+        type: string
   workflow_call:
     inputs:
       luci_version:
@@ -217,15 +217,8 @@ jobs:
           fi
 
       - name: Prepare CrowdSec LXC rootfs
-        # 由前面的「Validate CrowdSec build parameters」步骤统一校验并写入
-        # $GITHUB_ENV 的 CS_INCLUDE；未启用时本步骤直接跳过，杜绝空跑。
         if: env.CS_INCLUDE == 'yes'
         run: |
-          # 这一步在编译机（有网、可 sudo chroot）上把 Ubuntu rootfs + CrowdSec 预制好，
-          # 产物 files/opt/lxc-ubuntu.tar.gz 会随 FILES 一起打进固件。
-          # 容器固定 IP 10.0.0.10 / 网桥 10.0.0.1，必须和 files/etc/uci-defaults/99-custom.sh 一致。
-          # ⚠️ 此步骤与 25.12 的 build-x86-64-25.12.x.yml 完全一致（它跑在 runner 上，与固件版本无关），
-          #    两边要改一起改。
           chmod +x shell/prepare-crowdsec-rootfs.sh
           sudo env CONTAINER_IP=10.0.0.10 BRIDGE_IP=10.0.0.1 \
                bash shell/prepare-crowdsec-rootfs.sh

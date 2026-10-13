@@ -30,6 +30,14 @@ on:
         description: "DNS 地址，留空则跟随网关"
         required: false
         default: ""
+      custom_container_ip:
+        description: "CrowdSec 容器固定 IP，留空默认 10.0.0.10（须与网桥 IP 同 /24 网段）"
+        required: false
+        default: "10.0.0.10"
+      custom_bridge_ip:
+        description: "lxcbr0 网桥 IP，留空默认 10.0.0.1；同时作为容器的网关和 DNS（掩码固定 255.255.255.0）"
+        required: false
+        default: "10.0.0.1"
       profile:
         description: '选择软件包空间大小'
         required: true
@@ -98,6 +106,14 @@ on:
         required: false
         default: ""
         type: string
+      custom_container_ip:
+        required: false
+        default: "10.0.0.10"
+        type: string
+      custom_bridge_ip:
+        required: false
+        default: "10.0.0.1"
+        type: string
       profile:
         required: true
         default: "4G"
@@ -148,6 +164,8 @@ jobs:
           CS_INCLUDE_IN: ${{ inputs.include_crowdsec }}
           CS_KEY: ${{ inputs.crowdsec_enroll_key }}
           CS_PROFILE: ${{ inputs.profile }}
+          CS_CT_IP_IN: ${{ inputs.custom_container_ip }}
+          CS_BRIDGE_IP_IN: ${{ inputs.custom_bridge_ip }}
         run: |
           # ===== CrowdSec 构建参数前置校验（防空跑）=====
           # 所有 CrowdSec 相关产物（注册密钥文件 / LXC rootfs）统一以本步骤写入
@@ -187,6 +205,47 @@ jobs:
             echo "已写入注册密钥 → custom/crowdsec_enroll_key.txt"
           fi
 
+          # ===== 容器网络参数（与 CrowdSec 开关无关，lxcbr0 网桥常驻）=====
+          # 两个 input：容器 IP + 网桥 IP（容器的网关和 DNS 合并成网桥 IP 一个值），
+          # 掩码固定 /24，不提供掩码/DNS 输入。归一化后：
+          #   ① 写 custom/*.txt → 固件 /etc/config/（99-custom.sh、bootstrap 同源读）
+          #   ② 写 $GITHUB_ENV  → Prepare 步骤 sudo env 传给编译期 prepare 脚本
+          # 任何非法输入都 ::error:: 并回退默认 10 段，绝不带病进固件。
+          CUSTOM="${{ github.workspace }}/custom"
+          mkdir -p "$CUSTOM"
+          _cs_valid_ip() {   # 合法 IPv4（四段 0-255）→ 0
+              printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+              for _o in $(printf '%s' "$1" | tr '.' ' '); do
+                  [ "$_o" -ge 0 ] 2>/dev/null && [ "$_o" -le 255 ] 2>/dev/null || return 1
+              done
+              return 0
+          }
+          _cs_net24() { echo "$1" | awk -F. '{print $1"."$2"."$3}'; }
+          [ -n "$CS_CT_IP_IN" ]     || CS_CT_IP_IN='10.0.0.10'
+          [ -n "$CS_BRIDGE_IP_IN" ] || CS_BRIDGE_IP_IN='10.0.0.1'
+          if ! _cs_valid_ip "$CS_CT_IP_IN"; then
+              echo "::error::custom_container_ip=$CS_CT_IP_IN 不是合法 IPv4，已回退默认 10.0.0.10"
+              CS_CT_IP_IN='10.0.0.10'
+          fi
+          if ! _cs_valid_ip "$CS_BRIDGE_IP_IN"; then
+              echo "::error::custom_bridge_ip=$CS_BRIDGE_IP_IN 不是合法 IPv4，已回退默认 10.0.0.1"
+              CS_BRIDGE_IP_IN='10.0.0.1'
+          fi
+          # 掩码固定 /24：容器与网桥必须同段，否则容器网关不可达（编译期写进 networkd，无报错）
+          if [ "$(_cs_net24 "$CS_CT_IP_IN")" != "$(_cs_net24 "$CS_BRIDGE_IP_IN")" ]; then
+              echo "::error::容器 IP($CS_CT_IP_IN) 与网桥 IP($CS_BRIDGE_IP_IN) 不在同一 /24 网段（掩码固定 24 位），已回退默认 10.0.0.10 / 10.0.0.1"
+              CS_CT_IP_IN='10.0.0.10'; CS_BRIDGE_IP_IN='10.0.0.1'
+          fi
+          if [ "$CS_CT_IP_IN" = "$CS_BRIDGE_IP_IN" ]; then
+              echo "::error::容器 IP 不能与网桥 IP 相同($CS_CT_IP_IN)，已回退默认 10.0.0.10 / 10.0.0.1"
+              CS_CT_IP_IN='10.0.0.10'; CS_BRIDGE_IP_IN='10.0.0.1'
+          fi
+          printf '%s\n' "$CS_CT_IP_IN"     > "$CUSTOM/custom_container_ip.txt"
+          printf '%s\n' "$CS_BRIDGE_IP_IN" > "$CUSTOM/custom_bridge_ip.txt"
+          echo "CS_CT_IP=$CS_CT_IP_IN"       >> $GITHUB_ENV
+          echo "CS_BRIDGE_IP=$CS_BRIDGE_IP_IN" >> $GITHUB_ENV
+          echo "容器网络: IP=$CS_CT_IP_IN 网关/DNS=$CS_BRIDGE_IP_IN 掩码=255.255.255.0（已写 custom/*.txt）"
+
           echo "CS_INCLUDE=$CS_INCLUDE" >> $GITHUB_ENV
           echo "CS_ENROLL=$CS_ENROLL" >> $GITHUB_ENV
           echo "校验结果: CS_INCLUDE=$CS_INCLUDE CS_ENROLL=$CS_ENROLL"
@@ -197,6 +256,8 @@ jobs:
           # 所以文件名必须和 99-custom.sh 里读的一字不差：
           #   custom_router_ip.txt / custom_router_netmask.txt
           #   custom_router_gateway.txt / custom_router_dns.txt
+          # 容器网络两个文件（custom_container_ip.txt / custom_bridge_ip.txt）由前面的
+          # 「Validate CrowdSec build parameters」步骤校验归一化后写入，此处不再重复。
           # ⚠️ 此步骤与 25.12 的 build-x86-64-25.12.x.yml 保持一致，两边要改一起改。
           CUSTOM="${{ github.workspace }}/custom"
           mkdir -p "$CUSTOM"
@@ -233,11 +294,12 @@ jobs:
         run: |
           # 这一步在编译机（有网、可 sudo chroot）上把 Ubuntu rootfs + CrowdSec 预制好，
           # 产物 files/opt/lxc-ubuntu.tar.gz 会随 FILES 一起打进固件。
-          # 容器固定 IP 10.0.0.10 / 网桥 10.0.0.1，必须和 files/etc/uci-defaults/99-custom.sh 一致。
+          # 容器 IP / 网桥 IP 由前面 Validate 步骤归一化后写入 $GITHUB_ENV（CS_CT_IP/CS_BRIDGE_IP，
+          # 默认 10.0.0.10 / 10.0.0.1），此处透传；99-custom.sh 与 bootstrap 读同源 txt，三处一致。
           # ⚠️ 此步骤与 25.12 的 build-x86-64-25.12.x.yml 完全一致（它跑在 runner 上，与固件版本无关），
           #    两边要改一起改。
           chmod +x shell/prepare-crowdsec-rootfs.sh
-          sudo env CONTAINER_IP=10.0.0.10 BRIDGE_IP=10.0.0.1 \
+          sudo env CONTAINER_IP="${CS_CT_IP:-10.0.0.10}" BRIDGE_IP="${CS_BRIDGE_IP:-10.0.0.1}" \
                bash shell/prepare-crowdsec-rootfs.sh
           echo "容器 rootfs 体积："
           ls -lh files/opt/lxc-ubuntu.tar.gz

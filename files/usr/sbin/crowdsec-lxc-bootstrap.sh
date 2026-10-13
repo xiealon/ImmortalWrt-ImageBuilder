@@ -4,7 +4,7 @@
 # 由 /etc/rc.local 后台拉起，每次开机跑一遍，幂等安全。
 #
 # 步骤（每步各自包在 if 内，仅验证自己的前置条件，不做全局验证）：
-#   前置  每次开机统一 reconcile 容器 config（cmp 比对 + 抠不支持键 + 强制 lxc.start.auto）
+#   前置  容器 config 校验（缺失或与模板不一致才 reconcile + 抠不支持键 + 强制 lxc.start.auto）
 #   步骤1 创建 LXC 容器 + 注册 bouncer —— 本地，不联网
 #         前置：本地 api（路由器侧 bouncer 配置）不存在才运行，存在则跳过
 #   步骤2 控制台绑定 enroll            —— 远程 api，联网，必须等步骤1 完成
@@ -66,43 +66,45 @@ ENROLL_KEY=""
 [ -f "$ENROLL_KEY_FILE" ] && ENROLL_KEY="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
 ENROLL_FLAG="$ROOTFS/var/lib/crowdsec/.enrolled"
 
-# ---------- 容器 config 一致性校验 + 兼容性自愈（每次开机都跑，不受步骤1 跳过影响）----------
-# 每次开机用 write_cfg 模板 cmp 比对 config：不一致就重写（模板含 lxc.start.auto = 1，
+# ---------- 容器 config 校验 + 兼容性自愈（缺失或不一致才运行，受 if 守卫）----------
+# 用 write_cfg 模板 cmp 比对 config：缺失或不同才重写（模板含 lxc.start.auto = 1，
 # 等于强制开机自启），并抠掉本机 LXC 不支持的键，保证 config 一定能被解析通过。
-# 只写入本脚本自己生成的键，不碰任何用户手改内容（旧文件先备份）。
+# 只写入本脚本自己生成的键，不碰任何用户手改内容（不一致直接覆盖，不备份）。
 CFG="$LXC_PATH/$LXC_NAME/config"
 mkdir -p "$LXC_PATH/$LXC_NAME"
 _TMPL="$CFG.tmpl"
 write_cfg "$_TMPL"
-if [ ! -f "$CFG" ]; then
-    mv "$_TMPL" "$CFG"; log "已写入容器 config"
-elif ! cmp -s "$_TMPL" "$CFG"; then
-    cp -f "$CFG" "$CFG.bak" 2>/dev/null; mv "$_TMPL" "$CFG"
-    log "config 不一致，已备份旧配置并重写"
-else
-    rm -f "$_TMPL"
-fi
-if [ -f "$CFG" ] && ! lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; then
-    # 缺 common.conf 时剔除 include 行
-    if [ ! -f /usr/share/lxc/config/common.conf ]; then
-        grep -v '^[[:space:]]*lxc.include' "$CFG" > "$CFG.tmp" 2>/dev/null && mv "$CFG.tmp" "$CFG"
-        rm -f "$CFG.tmp"
+# 仅当 config 缺失或与模板不一致时才 reconcile，否则跳过（不重复写、不空转）
+if [ ! -f "$CFG" ] || ! cmp -s "$_TMPL" "$CFG"; then
+    if [ ! -f "$CFG" ]; then
+        mv "$_TMPL" "$CFG"; log "已写入容器 config"
+    else
+        mv "$_TMPL" "$CFG"
+        log "config 不一致，已直接覆盖重写"
     fi
     # 抠掉本机 LXC 不支持的配置键，直到 config 可解析
-    _trim=0
-    while [ $_trim -lt 20 ]; do
-        if _err=$(lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>&1); then break; fi
-        _bad=$(printf '%s\n' "$_err" | sed -n 's/.*at line "\([^"]*\)".*/\1/p' | head -n1)
-        [ -n "$_bad" ] || { log "!! config 解析失败取不到出错行"; break; }
-        grep -v -F "$_bad" "$CFG" > "$CFG.tmp" 2>/dev/null && mv "$CFG.tmp" "$CFG"
-        rm -f "$CFG.tmp"
-        _trim=$((_trim+1))
-    done
-    # 仍失败则用已知模板兜底重写（旧文件先备份）
-    if ! lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; then
-        cp -f "$CFG" "$CFG.bak" 2>/dev/null; write_cfg
+    if [ -f "$CFG" ] && ! lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; then
+        # 缺 common.conf 时剔除 include 行
+        if [ ! -f /usr/share/lxc/config/common.conf ]; then
+            grep -v '^[[:space:]]*lxc.include' "$CFG" > "$CFG.tmp" 2>/dev/null && mv "$CFG.tmp" "$CFG"
+            rm -f "$CFG.tmp"
+        fi
+        _trim=0
+        while [ $_trim -lt 20 ]; do
+            if _err=$(lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>&1); then break; fi
+            _bad=$(printf '%s\n' "$_err" | sed -n 's/.*at line "\([^"]*\)".*/\1/p' | head -n1)
+            [ -n "$_bad" ] || { log "!! config 解析失败取不到出错行"; break; }
+            grep -v -F "$_bad" "$CFG" > "$CFG.tmp" 2>/dev/null && mv "$CFG.tmp" "$CFG"
+            rm -f "$CFG.tmp"
+            _trim=$((_trim+1))
+        done
+        # 仍失败则用已知模板兜底重写（直接覆盖）
+        if ! lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; then
+            write_cfg
+        fi
     fi
 fi
+# 最终解析兜底：config 仍无法解析则放弃
 if ! lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; then
     log "!! config 仍无法解析，放弃（排查：lxc-info -P $LXC_PATH -n $LXC_NAME）"; exit 1
 fi

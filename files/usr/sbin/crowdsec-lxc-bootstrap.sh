@@ -80,13 +80,6 @@ lxc.pty.max = 1024
 EOF
 }
 
-# ---------- 出厂配置基线：一个大阶段，内部小步骤各自 if -----------
-# baseline_stage 是唯一入口（主流程 / container_restore / step1 解压后都调它），
-# 内部四个小步骤，哪个不对修哪个，修完复验，不堆在一起：
-#   小步骤1 可写层基线就绪？  不在 → baseline_init 修复；修不好 return 1 本轮跳过
-#   小步骤2 白名单文件齐全？  RW 缺 → 从出厂只读层补；两边都缺只警告不中断
-#   小步骤3 容器配置与基线一致？  rootfs 在才做；不一致 → 逐文件覆盖修复
-#   小步骤4 修复后复验：  重比对确认全部一致，才在容器在跑时 restart 生效
 baseline_init() {
     [ -d "$BASELINE_RW" ] && return 0
     if [ ! -d "$BASELINE_RO" ]; then
@@ -103,17 +96,14 @@ baseline_init() {
 }
 
 baseline_stage() {
-    # ---- 小步骤1：可写层基线就绪（不在 → init；老固件无 RO 时 init 内部已放行） ----
     if [ ! -d "$BASELINE_RW/etc/crowdsec" ]; then
         if ! baseline_init; then
             log "!! [基线] 初始化失败，本轮跳过基线同步"
             return 1
         fi
     fi
-    # 老固件（无 RO 也未初始化成功）：静默退出，不影响其余流程
     [ -d "$BASELINE_RW/etc/crowdsec" ] || return 0
-
-    # ---- 小步骤2：白名单文件齐全（RW 缺 → 从出厂 RO 补；两边都缺 → 警告跳过） ----
+    
     for _bs_f in $BASELINE_FILES; do
         if [ ! -f "$BASELINE_RW/etc/crowdsec/$_bs_f" ]; then
             if [ -f "$BASELINE_RO/etc/crowdsec/$_bs_f" ]; then
@@ -129,7 +119,6 @@ baseline_stage() {
         fi
     done
 
-    # ---- 小步骤3：容器配置一致性（rootfs 未就绪则跳过——首次开机由 step1 解压后再次调用） ----
     if [ -f "$ROOTFS/etc/crowdsec/config.yaml" ]; then
         _bs_changed=0
         for _bs_f in $BASELINE_FILES; do
@@ -144,7 +133,7 @@ baseline_stage() {
                 fi
             fi
         done
-        # ---- 小步骤4：修过才复验——重比对确认全部一致，容器在跑才 restart 生效 ----
+        
         if [ "$_bs_changed" -eq 1 ]; then
             _bs_left=0
             for _bs_f in $BASELINE_FILES; do
@@ -164,30 +153,19 @@ baseline_stage() {
     fi
 }
 
-# ---------- 前置：容器整体恢复（"容器不在了" ≠ "没在跑"） ----------
-# 判定：没在跑 且 rootfs 整个目录缺失（lxc-destroy / 误删 / 刷机保留配置场景）。
-#   只没在跑但 rootfs 在 → 归 precheck_container 的 P2 拉起，不在此列。
-# 恢复动作（小步骤各自 if，哪个失败就地报告，不阻断后续）：
-#   tarball 检查 → 解压 rootfs → 基线同步 → 等网桥启动 → 复验在跑。
-# 后续闭环：bouncer 重注册由收尾自检 C2 兜底；enroll 凭据随 rootfs 丢失，
-#   由步骤2 重连（旧一次性 key 失败时日志会提示去 app.crowdsec.net 重新生成）。
 container_restore() {
     log "[恢复] 容器不在（$ROOTFS 缺失），开始用 $TARBALL 整体恢复"
-    # 小步骤1：备份 tarball 在？
     if [ ! -f "$TARBALL" ]; then
         log "!! [恢复] 缺 $TARBALL，无法恢复（从 release 下载放回 /opt/ 后重启）"
         return 1
     fi
-    # 小步骤2：解压 rootfs
     mkdir -p "$ROOTFS"
     if ! tar -xzf "$TARBALL" -C "$ROOTFS"; then
         log "!! [恢复] 解压失败（$TARBALL 损坏？重新下载）"
         return 1
     fi
     log "[恢复] rootfs 已解压（$(du -sh "$ROOTFS" 2>/dev/null | cut -f1)）"
-    # 小步骤3：新 rootfs 是出厂态，同步一次基线（幂等，无差异零动作）
     baseline_stage || true
-    # 小步骤4：等网桥 + 启动 + 复验（config 若也被删，随后主流程校验会重写再拉起）
     if ! ip link show lxcbr0 >/dev/null 2>&1; then
         _cr_i=0
         while [ $_cr_i -lt $MAX_WAIT ]; do
@@ -214,20 +192,12 @@ container_restore() {
     fi
 }
 
-# ---------- 前置：容器侧健康验证 + 修复（放在步骤1/2 前面，防止空跑） -----------
-# 后面所有步骤都默认"容器就绪"；这里先把容器侧前提验证+修好：
-#   P1 rootfs 已解压    —— 没解压属正常首次开机，交给步骤1，不算故障
-#   P2 容器在跑         —— 没跑则等网桥后 lxc-start 拉起
-#   P3 crowdsec active  —— 没起则 restart + 复验
-#   P4 LAPI 就绪        —— 没监听则先等、再 restart + 复验
-# 修不好不终止脚本：步骤1/2 内部各有等待与退出逻辑，收尾自检还会兜底。
 precheck_container() {
-    # P1 rootfs 未解压：正常首次开机，交给步骤1
     if [ ! -f "$ROOTFS/etc/crowdsec/config.yaml" ]; then
         log "[前置] rootfs 未解压（$ROOTFS），首次开机将由步骤1 解压"
         return 0
     fi
-    # P2 容器在跑：没跑则等网桥后拉起
+    
     if ! ct_running; then
         log "[前置] 容器未运行，等网桥后拉起"
         i=0
@@ -246,7 +216,7 @@ precheck_container() {
             return 1
         fi
     fi
-    # P3 crowdsec active：没起则 restart + 复验
+    
     if ! ct /usr/bin/systemctl is-active crowdsec >/dev/null 2>&1; then
         log "[前置] crowdsec 未 active，执行重启"
         ct /usr/bin/systemctl restart crowdsec >/dev/null 2>&1 || true
@@ -258,7 +228,7 @@ precheck_container() {
             && log "[前置] 已修复：crowdsec active" \
             || log "!! [前置] crowdsec 仍未 active（步骤1/2 与收尾自检会再处理）"
     fi
-    # P4 LAPI 就绪：没监听则先等、再 restart + 复验
+    
     if ! lapi_ready; then
         log "[前置] LAPI 未监听，等待后重启 crowdsec"
         i=0
@@ -274,32 +244,22 @@ precheck_container() {
     fi
 }
 
-# 定位路由器侧 bouncer 段 + 读取 enroll 密钥（仅读取，不做任何验证）
 SEC=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
 ENROLL_KEY_FILE="/etc/config/crowdsec_enroll_key.txt"
 ENROLL_KEY=""
 [ -f "$ENROLL_KEY_FILE" ] && ENROLL_KEY="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
 ENROLL_FLAG="$ROOTFS/var/lib/crowdsec/.enrolled"
-# 步骤2 门禁（remote_enroll_needed）写入的 enroll 原因：1=首次无凭据 / 2=被拒重连，
-# step2_enroll 据此决定是否备份回滚旧凭据
 ENROLL_REASON=1
 
-# ---------- 前置：容器整体恢复（一个大 if：容器"不在了"才进） ----------
-# "不在了"= 没在跑 且 rootfs 目录整个缺失；只没在跑归 P2 拉起，不在此列。
-# 恢复失败不终止：config 校验/precheck/步骤1/收尾自检会继续兜底。
 if ! ct_running && [ ! -d "$ROOTFS" ]; then
     container_restore || log "!! 容器恢复未完成（后续步骤与收尾自检继续兜底）"
 fi
 
-# ---------- 容器 config 校验 + 兼容性自愈（缺失或不一致才运行，受 if 守卫）----------
-# 用 write_cfg 模板 cmp 比对 config：缺失或不同才重写（模板含 lxc.start.auto = 1，
-# 等于强制开机自启），并抠掉本机 LXC 不支持的键，保证 config 一定能被解析通过。
-# 只写入本脚本自己生成的键，不碰任何用户手改内容（不一致直接覆盖，不备份）。
 CFG="$LXC_PATH/$LXC_NAME/config"
 mkdir -p "$LXC_PATH/$LXC_NAME"
 _TMPL="$CFG.tmpl"
 write_cfg "$_TMPL"
-# 仅当 config 缺失或与模板不一致时才 reconcile，否则跳过（不重复写、不空转）
+
 if [ ! -f "$CFG" ] || ! cmp -s "$_TMPL" "$CFG"; then
     if [ ! -f "$CFG" ]; then
         mv "$_TMPL" "$CFG"; log "已写入容器 config"
@@ -307,7 +267,7 @@ if [ ! -f "$CFG" ] || ! cmp -s "$_TMPL" "$CFG"; then
         mv "$_TMPL" "$CFG"
         log "config 不一致，已直接覆盖重写"
     fi
-    # 抠掉本机 LXC 不支持的配置键，直到 config 可解析
+
     if [ -f "$CFG" ] && ! lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; then
         # 缺 common.conf 时剔除 include 行
         if [ ! -f /usr/share/lxc/config/common.conf ]; then
@@ -323,45 +283,35 @@ if [ ! -f "$CFG" ] || ! cmp -s "$_TMPL" "$CFG"; then
             rm -f "$CFG.tmp"
             _trim=$((_trim+1))
         done
-        # 仍失败则用已知模板兜底重写（直接覆盖）
+        
         if ! lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; then
             write_cfg
         fi
     fi
 fi
-# 最终解析兜底：config 仍无法解析则放弃
+
 if ! lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; then
     log "!! config 仍无法解析，放弃（排查：lxc-info -P $LXC_PATH -n $LXC_NAME）"; exit 1
 fi
 
-# ---------- 前置：容器侧健康验证 + 修复（防止步骤1/2 空跑） -----------
-# rootfs 未解压时 precheck_container 内部直接放行（交给步骤1），
-# 故这里无需再判 rootfs；config 在上面已保证存在
 if [ -f "$CFG" ]; then
     baseline_stage
     precheck_container
 fi
 
-# ---------- 步骤1：创建 LXC 容器 + 注册 bouncer（本地，不联网）----------
-# 前置判定：本地 api（bouncer 段 api_key 已写）不存在才运行。
-# 全部动作收进 step1_bootstrap()：主流程只留一个 if，与步骤2 完全分开；
-# 函数内失败一律 return 1（不是 exit），由调用处统一决定终止，保住阅读性。
 step1_bootstrap() {
     local i KEY
 
-    # 1.1 解压 rootfs（仅首次）
     if [ ! -f "$ROOTFS/etc/crowdsec/config.yaml" ]; then
         [ -f "$TARBALL" ] || { log "!! 缺少 $TARBALL，放弃引导"; return 1; }
         log "解压容器 rootfs..."
         mkdir -p "$ROOTFS"
         tar -xzf "$TARBALL" -C "$ROOTFS" || { log "!! 解压失败"; return 1; }
         log "解压完成"
-        # 解压出来的是 tarball 出厂态；可写层基线可能被用户更新过，
-        # 跑一遍基线大阶段保证容器内配置与基线一致（幂等）
+
         baseline_stage || true
     fi
 
-    # 1.2 等网桥 + 启动容器（已就绪则跳过）
     if ! ip link show lxcbr0 >/dev/null 2>&1; then
         i=0
         while [ $i -lt $MAX_WAIT ]; do
@@ -376,7 +326,6 @@ step1_bootstrap() {
         sleep 5
     fi
 
-    # 1.3 等容器 IP 通（已通则跳过）
     if ! ping -c1 -W2 "$CONTAINER_IP" >/dev/null 2>&1; then
         i=0
         while [ $i -lt $MAX_WAIT ]; do
@@ -386,7 +335,6 @@ step1_bootstrap() {
         [ $i -lt $MAX_WAIT ] || { log "!! 容器 IP $CONTAINER_IP 不通，放弃"; return 1; }
     fi
 
-    # 1.4 等本地 bouncers API（LAPI）就绪：直接探端点，比 bouncers list 快
     if ! lapi_ready; then
         i=0
         until lapi_ready; do
@@ -396,9 +344,8 @@ step1_bootstrap() {
         done
     fi
 
-    # 1.5 注册 bouncer（本地 api 缺失才进到此，直接建立；先删同名再 add 保证可覆写）
     ct $CSCLI bouncers delete "$BOUNCER_NAME" >/dev/null 2>&1 || true
-    # 移除 hub 私网白名单：不删则 192.168/10 段全当自己人，局域网爆破不报警
+
     if ct $CSCLI parsers list 2>/dev/null | grep -q 'crowdsecurity/whitelists'; then
         ct $CSCLI parsers remove crowdsecurity/whitelists --force >/dev/null 2>&1 || true
         ct /usr/bin/systemctl restart crowdsec >/dev/null 2>&1 || true
@@ -438,25 +385,6 @@ if [ -z "$SEC" ] || [ -z "$(uci -q get "$SEC.api_key" 2>/dev/null)" ]; then
     step1_bootstrap || { log "!! 步骤1 未完成，放弃后续引导"; exit 1; }
 fi
 
-# ---------- 步骤2：控制台绑定 enroll（远程 API，联网）----------
-# 背景（修复"网页端删了 API、设备内不删 → 重启不重连"）：
-#   老逻辑只看 .enrolled 标记文件，而网页端删除 API 不会动设备内任何文件，
-#   于是重启永远走"已绑定，跳过 enroll"，本地凭据变成服务端不认识的孤儿，
-#   crowdsec 推送 signals 一直 401，控制台再也不刷新。
-# 现在把步骤2 需要的验证全部写成条件链（step2_run 内，条件1→6 顺序验证，
-# 哪个失败就近修复哪个，修好复验；全部就绪才 enroll）：
-#   条件1 容器在跑          → 不在则 lxc-start 拉起 + 复验
-#   条件2 ENROLL_KEY 在     → 一次性 key 无法自动生成，缺则本轮放弃
-#   条件3 crowdsec active   → 不在则 restart + 复验
-#   条件4 LAPI 就绪         → 不在则先等、再 restart + 复验
-#   条件5 容器外网通        → 不通则本轮不判（凭据原样不动，下次开机再判）
-#   条件6 凭据状态四态      → 0 有效(跳过) / 1 无凭据(首次 enroll) /
-#                            2 被拒(备份后重连) / 5 cscli 执行失败(放弃本轮)
-# 探测全部放在容器内跑（不是路由器侧）：容器走 NAT 出网，必须测 cscli
-# 真正会走的那条路径（SNAT 配错时路由器通、容器不通）。
-
-# 容器外网探测（步骤2 条件5）：任一 DNS 通即算在线。
-# ICMP 被运营商封很常见，ping 不通只等于"这次不判"，绝不动凭据。
 net_online() {
     ct sh -c '
         if command -v ping >/dev/null 2>&1; then
@@ -469,13 +397,6 @@ net_online() {
     ' 2>/dev/null
 }
 
-# 凭据状态判定（步骤2 条件6）：调用前须已确认外网通（net_online）与
-# LAPI 就绪——本函数只回答"凭据在不在、服务端认不认"，四态：
-#   0 = 凭据在且有效
-#   1 = 本地无凭据文件（首次 enroll）
-#   2 = 凭据被服务端拒绝（not registered / not enrolled / 401/403/unauthorized/invalid/revoked
-#       或 Registered 字段为 false → 需重连）
-#   5 = cscli 自身执行失败（输出为空/连不上 LAPI）
 remote_enroll_state() {
     ct sh -c '
         [ -s /etc/crowdsec/online_api_credentials.yaml ] || exit 1
@@ -495,10 +416,6 @@ remote_enroll_state() {
     ' 2>/dev/null
 }
 
-# enroll 成功后的复检：命令返回成功 ≠ 服务端认账。再跑一次凭据状态判定，
-# 确认真的 registered/enrolled 才写 .enrolled 标记、才删备份——
-# 确保绝不把无效数据录入标记文件。复检容忍瞬态（cscli 刚 restart 完还没起来，
-# exit 5），最多重试 6 次；其余结论（0 有效 / 2 仍被拒）立即出。
 enroll_recheck() {
     local _rv=5 _t=0
     while [ $_t -lt 6 ]; do
@@ -511,20 +428,14 @@ enroll_recheck() {
     return $_rv
 }
 
-# 回滚旧凭据（_CRED_BAK 由 step2_enroll 设置，dash 动态作用域可见）；
-# 没有备份则什么都不做。回滚后 cscli bouncers 等本地功能不受影响。
 rollback_cred() {
     [ -n "$_CRED_BAK" ] && [ -f "$_CRED_BAK" ] || return 0
     mv -f "$_CRED_BAK" "$ROOTFS/etc/crowdsec/online_api_credentials.yaml"
     log "已回滚旧凭据（cscli bouncers 等本地功能不受影响）"
 }
 
-# 步骤2 主函数：条件1→6 顺序验证，哪个失败就近修复哪个（修好立即复验），
-# 全部就绪才调 step2_enroll 执行 enroll 动作；任一条件最终无法满足则
-# return 1 本轮放弃，主流程自然落到收尾。
 step2_run() {
     local _i _re
-    # ---- 条件1：容器在跑（不在 → 拉起 + 复验） ----
     if ! ct_running; then
         log "[步骤2·条件1] 容器未运行，尝试拉起"
         lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null || true
@@ -537,12 +448,12 @@ step2_run() {
             return 1
         fi
     fi
-    # ---- 条件2：ENROLL_KEY 在（一次性 key 无法自动生成，缺则本轮放弃） ----
+  
     if [ -z "$ENROLL_KEY" ]; then
         log "!! [步骤2·条件2] 无 enroll 密钥，本轮放弃（去 app.crowdsec.net 生成，更新 $ENROLL_KEY_FILE）"
         return 1
     fi
-    # ---- 条件3：crowdsec 服务 active（不在 → restart + 复验） ----
+   
     if ! ct /usr/bin/systemctl is-active crowdsec >/dev/null 2>&1; then
         log "[步骤2·条件3] crowdsec 未 active，执行重启"
         ct /usr/bin/systemctl restart crowdsec >/dev/null 2>&1 || true
@@ -557,7 +468,7 @@ step2_run() {
             return 1
         fi
     fi
-    # ---- 条件4：LAPI 就绪（不在 → 先等，再 restart + 复验） ----
+    
     if ! lapi_ready; then
         log "[步骤2·条件4] LAPI 未监听，等待后重启 crowdsec"
         _i=0
@@ -574,12 +485,12 @@ step2_run() {
             return 1
         fi
     fi
-    # ---- 条件5：容器外网通（不通 → 本轮不判，凭据原样不动） ----
+  
     if ! net_online; then
         log "[步骤2·条件5] 外网不通，凭据不动，本轮不判（下次开机再判）"
         return 1
     fi
-    # ---- 条件6：凭据状态（四态）→ 决定是否需要 enroll ----
+    
     remote_enroll_state; _re=$?
     if [ "$_re" -eq 0 ]; then
         log "[步骤2·条件6] 远程 api 已绑定且有效，无需 enroll"
@@ -588,19 +499,15 @@ step2_run() {
         log "!! [步骤2·条件6] console status 执行失败（cscli 异常），本轮放弃"
         return 1
     fi
-    _ENROLL_REASON=$_re    # 1 = 首次无凭据 / 2 = 被拒重连
-    # ---- 条件1~6 全部就绪 → 执行步骤2 动作 ----
+    _ENROLL_REASON=$_re    
+    
     step2_enroll
 }
 
-# 步骤2 全部动作（进入此处 = step2_run 已确认条件1~6 就绪且需要 enroll）：
-# 按 _ENROLL_REASON 决定备份与否 → enroll → 复检 → 录入/回滚。
 step2_enroll() {
     local _CRED_BAK=""
     if [ "$_ENROLL_REASON" -eq 2 ]; then
         log "远程 api 已失效（网页端删除/密钥被撤），备份旧凭据后重连"
-        # 备份而非直接删：凭据文件缺失会让 require.LAPI 加载失败，
-        # 连 cscli bouncers list 都用不了（实测报错）。enroll 失败必须能回滚。
         _CRED_BAK="$ROOTFS/etc/crowdsec/online_api_credentials.yaml.bak"
         mv -f "$ROOTFS/etc/crowdsec/online_api_credentials.yaml" "$_CRED_BAK" 2>/dev/null || true
         rm -f "$ENROLL_FLAG"
@@ -626,28 +533,13 @@ step2_enroll() {
     fi
 }
 
-# ---------- 步骤2 主流程：整个步骤在一个 if 结构里 -----------
-# 有 ENROLL_KEY 才进入；内部条件1→6 顺序验证 + 就近修复 + 复验，
-# 全部就绪才 enroll；任一条件最终无法满足则本轮放弃，直接落到收尾。
 if [ -n "$ENROLL_KEY" ]; then
     step2_run
 else
     log "未提供 enroll 密钥，跳过"
 fi
 
-# ---------- 收尾：本地 LAPI 链路体检（bouncer ↔ 容器 LAPI）----------
-# 与远程 console status 判定对称：不只看静态字段，看动态心跳。
-# 判据是 cscli bouncers inspect 的 last_pull —— LAPI 每次收到 bouncer 的
-# pull 请求就自动刷新这个墙钟时间（RFC3339）。它新鲜 ⇒ 路由器→容器网络 +
-# api_key 认证 + LAPI 服务三者全通。name/valid/type/auth_type 只是静态佐证。
-# 多 bouncer 环境下的身份核对：inspect 按名单查（LAPI 的 name 唯一），
-# 再要求记录的来源 IP 等于路由器 lxcbr0 桥 IP——坐实"这条就是我本机注册的"，
-# 防止同名历史遗留/占名时张冠李戴。任一侧 IP 为空则不比对，只警告不修复。
-# bouncer 默认约 10s 拉一次；开机后首次 pull 需要一点时间，这里只对
-# "从未 pull"继续等（最多 60 秒），其他失败立即出结论，避免无谓空等。
 local_lapi_state() {
-    # $1 = bouncer 名，$2 = 路由器 lxcbr0 IPv4（可空）
-    # 返回：0 健康 / 1 从未 pull / 2 pull 过久(>5min) / 3 已吊销 / 4 来源IP非本机 / 10 查不到
     ct sh -c '
         _bn="$1"; _brip="$2"
         _out=$(cscli bouncers inspect "$_bn" -o json 2>/dev/null) || exit 10
@@ -666,20 +558,9 @@ local_lapi_state() {
     ' _ "$1" "$2"
 }
 
-# ---------- 收尾：CrowdSec 文件与链路自检 + 自愈（每次开机） -----------
-# 分四层，由静到动、从容器内到路由器侧，逐层体检，异常立即自愈：
-#   A 层 静态文件：rootfs / 容器内配置与凭据文件是否齐全（路由器侧直接看）
-#   B 层 容器内配置文件：config/crowdsec.yaml 在不在（纯报告；
-#       服务/LAPI 的修复已在前置 precheck_container 做过，此处不重复修）
-#   C 层 认证链路：cscli 能否加载本地凭据、bouncer 是否注册在 LAPI、hub 内容是否在
-#   D 层 端到端：路由器侧 bouncer 进程、nft crowdsec 表
-# 原则：能自动修的才修（重建凭据/重新注册 bouncer/补 hub）；
-#       修不了的只报警（rootfs 损坏、缺 enroll key），绝不重新解压 rootfs、
-#       绝不删数据，避免"自愈"变"自杀"。
 selfcheck_repair() {
     local _i _nk _nc _f
 
-    # ===== A 层：静态文件（路由器侧直接检查，不惊动容器） =====
     if [ ! -d "$ROOTFS/etc/crowdsec" ]; then
         log "!! [自检A] $ROOTFS/etc/crowdsec 不存在（rootfs 未解压或损坏，重打镜像）"
     else
@@ -697,7 +578,6 @@ selfcheck_repair() {
     [ -s "$ENROLL_KEY_FILE" ] || \
         log "⚠️ [自检A] 无 enroll 密钥 $ENROLL_KEY_FILE（网页端删 API 后将无法自动重连）"
 
-    # ===== B 层：容器内配置文件（纯报告；服务/LAPI 修复已在前置做过） =====
     if ! ct_running; then
         log "!! [自检B] 容器未运行，跳过容器内自检"
     else
@@ -706,13 +586,9 @@ selfcheck_repair() {
                 log "!! [自检B] 容器内缺 /etc/crowdsec/$_f"
         done
 
-        # ===== C 层：认证链路 =====
-        # online 凭据缺失时所有 cscli 命令都挂（require.LAPI 连带加载，实测报错），
-        # 此时跳过 C 层：有 enroll key 的交给步骤2 重连，没有的只能人工补 key
         if ! ct sh -c '[ -s /etc/crowdsec/online_api_credentials.yaml ]' 2>/dev/null; then
             log "⚠️ [自检C] 容器缺 online_api_credentials.yaml，跳过 cscli 链路检查"
         else
-            # C1 cscli 能否加载本地凭据（失败 → 重启 crowdsec 自动重建 local credentials）
             if ! ct $CSCLI machines list >/dev/null 2>&1; then
                 log "!! [自检C] cscli 加载本地凭据失败，重启 crowdsec 重建 local_api_credentials.yaml"
                 ct /usr/bin/systemctl restart crowdsec >/dev/null 2>&1 || true
@@ -724,7 +600,6 @@ selfcheck_repair() {
                     && log "[自愈C] 本地凭据已恢复" \
                     || log "!! [自愈C] cscli 仍无法加载本地凭据"
             fi
-            # C2 bouncer 是否注册在 LAPI（不在 → 重新 add + 同步 uci + 重启路由器侧 bouncer）
             if ! ct $CSCLI bouncers list 2>/dev/null | grep -qw "$BOUNCER_NAME"; then
                 log "!! [自检C] LAPI 中无 bouncer '$BOUNCER_NAME'，重新注册"
                 ct $CSCLI bouncers delete "$BOUNCER_NAME" >/dev/null 2>&1 || true
@@ -739,7 +614,6 @@ selfcheck_repair() {
                     log "!! [自愈C] bouncer add 失败或无 bouncer 段，api_key 未同步"
                 fi
             fi
-            # C3 hub 内容是否为空（collections 全丢 = 一条日志都不解析）
             _nc=$(ct $CSCLI collections list -o json 2>/dev/null | grep -c '"name"')
             if [ "${_nc:-0}" -eq 0 ] 2>/dev/null; then
                 log "⚠️ [自检C] collections 为空，尝试 hub update + upgrade"
@@ -755,7 +629,6 @@ selfcheck_repair() {
         fi
     fi
 
-    # ===== D 层：路由器侧 bouncer 进程 + nft 表 =====
     if ! pgrep -x crowdsec-firewall-bouncer >/dev/null 2>&1; then
         log "!! [自检D] crowdsec-firewall-bouncer 进程不在，enable + restart"
         service crowdsec-firewall-bouncer enable 2>/dev/null || true
@@ -779,14 +652,7 @@ selfcheck_repair() {
     fi
 }
 
-# ---------- 收尾：本地链路心跳体检 + 文件/服务自检自愈 -----------
-# 心跳（local_lapi_state，动态活性 + 身份核对）与自检（selfcheck_repair，
-# 静态文件/容器内配置/认证注册/端到端）收进同一个 final_check()，主流程只留一个 if。
-# 注意：这里的检查与步骤1/2 的门禁验证不重复——门禁看"配置/注册在不在"，
-# 心跳看"链路通不通"，自检看"缺什么补什么"，三者对象不同、各跑一次。
 final_check() {
-    # 心跳体检仅限已 enroll（online 凭据在）时：没 enroll 时 cscli 自身
-    # 加载不了凭据，查了也是误报。只对"从未 pull"等待，其他立即出结论。
     if [ -s "$ROOTFS/etc/crowdsec/online_api_credentials.yaml" ]; then
         local _i=0 _rc
         while :; do
@@ -808,8 +674,6 @@ final_check() {
     selfcheck_repair
 }
 
-# 仅当固件真的带了容器（rootfs 已解压）且 bouncer 段存在才收尾，
-# 没勾 include_crowdsec 的固件不刷噪声日志
 if [ -f "$ROOTFS/etc/crowdsec/config.yaml" ] && [ -n "$SEC" ]; then
     final_check
 else

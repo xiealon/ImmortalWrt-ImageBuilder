@@ -34,7 +34,7 @@ on:
         description: '选择软件包空间大小'
         required: true
         type: choice
-        default: '3G'
+        default: '4G'
         options:
           - '1G'
           - '2G'

@@ -183,11 +183,6 @@ jobs:
 
       - name: Save Router Network Config into OpenWrt files
         run: |
-          # 整个 custom/ 目录会被下一步 docker run 挂成固件里的 /etc/config/，
-          # 所以文件名必须和 99-custom.sh 里读的一字不差：
-          #   custom_router_ip.txt / custom_router_netmask.txt
-          #   custom_router_gateway.txt / custom_router_dns.txt
-          # ⚠️ 此步骤与 25.12 的 build-x86-64-25.12.x.yml 保持一致，两边要改一起改。
           CUSTOM="${{ github.workspace }}/custom"
           mkdir -p "$CUSTOM"
 

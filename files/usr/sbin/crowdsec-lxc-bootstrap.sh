@@ -26,9 +26,15 @@ LXC_NAME="${LXC_NAME:-ubuntu}"
 LXC_PATH="${LXC_PATH:-/srv/lxc}"
 ROOTFS="$LXC_PATH/$LXC_NAME/rootfs"
 TARBALL="${TARBALL:-/opt/lxc-ubuntu.tar.gz}"
-CONTAINER_IP="${CONTAINER_IP:-10.0.0.10}"
 LAPI_PORT="${LAPI_PORT:-8080}"
 BOUNCER_NAME="${BOUNCER_NAME:-openwrt-fw}"
+# 容器 IP 取值链：环境变量 → 固件 /etc/config/custom_container_ip.txt（99-custom.sh 同源写入，
+# Actions UI 的 custom_container_ip 经 workflow 归一化后落在这里）→ 默认 10.0.0.10。
+# 网桥侧 IP 由 99-custom.sh 的 network.lxc 设置，本脚本不关心。
+if [ -z "${CONTAINER_IP:-}" ] && [ -f /etc/config/custom_container_ip.txt ]; then
+    CONTAINER_IP="$(head -n1 /etc/config/custom_container_ip.txt | tr -d ' \t\r\n')"
+fi
+CONTAINER_IP="${CONTAINER_IP:-10.0.0.10}"
 # 运行后配置快照（编译期不打包任何配置，装机后由脚本自行收集）：
 #   时机   final_check 全过（bouncer 身份核对通过 + 自检自愈完成）才收集，
 #          即"第一次开机 → 脚本打入配置 → 状态健康 → 制作备份"链路的最后一环
@@ -51,7 +57,7 @@ CSCLI=/usr/bin/cscli
 MAX_WAIT="${MAX_WAIT:-60}"
 SLEEP=5
 
-SCRIPT_VER="2026-10-14.2"
+SCRIPT_VER="2026-10-14.3"
 log() { echo "[$(date '+%F %T')] $*"; }
 log "===== crowdsec-lxc-bootstrap 版本 $SCRIPT_VER 开始执行 ====="
 

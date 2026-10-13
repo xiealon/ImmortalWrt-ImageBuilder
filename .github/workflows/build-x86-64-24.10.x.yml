@@ -75,7 +75,7 @@ on:
         description: "CrowdSec 控制台注册密钥（app.crowdsec.net 的 enrollment key）；留空则不开通账号绑定。仅 include_crowdsec=yes 时生效"
         required: false
         default: ''
-        type: string
+        type: password
   workflow_call:
     inputs:
       luci_version:
@@ -139,10 +139,20 @@ jobs:
 
       - name: Validate CrowdSec build parameters
         env:
+          # 把 workflow inputs 统一"导入"为环境变量：shell 里只读变量，
+          # 不把 ${{ }} 直接插值进脚本——crowdsec_enroll_key 是 password 型输入，
+          # 若含引号/反引号/$ 等字符，直接插值会破坏 shell 语法甚至注入。
+          # inputs.* 在本 workflow 的 inputs 定义里直接取值即可
+          #（workflow_dispatch 与 workflow_call 两种触发均可用，无需
+          #  github.event.inputs.X || inputs.X 双重兜底）。
           CS_INCLUDE_IN: ${{ inputs.include_crowdsec }}
           CS_KEY: ${{ inputs.crowdsec_enroll_key }}
           CS_PROFILE: ${{ inputs.profile }}
         run: |
+          # ===== CrowdSec 构建参数前置校验（防空跑）=====
+          # 所有 CrowdSec 相关产物（注册密钥文件 / LXC rootfs）统一以本步骤写入
+          # $GITHUB_ENV 的 CS_INCLUDE / CS_ENROLL 为准；后续步骤只读 env、不再各自散落判定。
+          # ⚠️ 此步骤与 25.12 的 build-x86-64-25.12.x.yml 保持一致，两边要改一起改。
           CS_INCLUDE=no
           CS_ENROLL=no
 
@@ -183,6 +193,11 @@ jobs:
 
       - name: Save Router Network Config into OpenWrt files
         run: |
+          # 整个 custom/ 目录会被下一步 docker run 挂成固件里的 /etc/config/，
+          # 所以文件名必须和 99-custom.sh 里读的一字不差：
+          #   custom_router_ip.txt / custom_router_netmask.txt
+          #   custom_router_gateway.txt / custom_router_dns.txt
+          # ⚠️ 此步骤与 25.12 的 build-x86-64-25.12.x.yml 保持一致，两边要改一起改。
           CUSTOM="${{ github.workspace }}/custom"
           mkdir -p "$CUSTOM"
 
@@ -212,8 +227,15 @@ jobs:
           fi
 
       - name: Prepare CrowdSec LXC rootfs
+        # 由前面的「Validate CrowdSec build parameters」步骤统一校验并写入
+        # $GITHUB_ENV 的 CS_INCLUDE；未启用时本步骤直接跳过，杜绝空跑。
         if: env.CS_INCLUDE == 'yes'
         run: |
+          # 这一步在编译机（有网、可 sudo chroot）上把 Ubuntu rootfs + CrowdSec 预制好，
+          # 产物 files/opt/lxc-ubuntu.tar.gz 会随 FILES 一起打进固件。
+          # 容器固定 IP 10.0.0.10 / 网桥 10.0.0.1，必须和 files/etc/uci-defaults/99-custom.sh 一致。
+          # ⚠️ 此步骤与 25.12 的 build-x86-64-25.12.x.yml 完全一致（它跑在 runner 上，与固件版本无关），
+          #    两边要改一起改。
           chmod +x shell/prepare-crowdsec-rootfs.sh
           sudo env CONTAINER_IP=10.0.0.10 BRIDGE_IP=10.0.0.1 \
                bash shell/prepare-crowdsec-rootfs.sh

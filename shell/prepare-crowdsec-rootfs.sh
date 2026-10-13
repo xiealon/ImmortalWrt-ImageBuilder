@@ -268,5 +268,98 @@ if [ "$SIZE" -lt 104857600 ]; then
     exit 1
 fi
 
+# ---------- 7. 出厂配置基线（随固件只读分发到 /opt/crowdsec-baseline/）----------
+# 用途：开机时由 crowdsec-lxc-bootstrap.sh 把基线同步进容器 /etc/crowdsec/，
+#   容器内配置被改坏/改丢时，下次开机自动覆盖回基线（自愈）。
+# 目录分层（重要）：
+#   固件只读层 /opt/crowdsec-baseline/     = 出厂基线，随固件走，用户改不了
+#   可写层     /srv/lxc/crowdsec-baseline/  = 首启从只读层拷贝，之后保留用户
+#                                            改动 —— 这才是用户的修改入口
+# 白名单制（安全核心）：只收「编译期写死的出厂文件」。运行时生成的
+#   local_api_credentials.yaml / online_api_credentials.yaml / database.db /
+#   data/ 一律不收 —— 那些每台机器不同（enroll 后尤其），收进去会被开机
+#   同步覆盖回出厂态，直接搞断账号绑定与 bouncer 注册。
+# 用户自建规则（parsers/scenarios 下其他文件）也不收：不在白名单，开机
+#   同步永远不碰它们，用户放进容器即可长期保留。
+BASELINE="$OUT_DIR/crowdsec-baseline"
+echo "==> 导出出厂配置基线 → $BASELINE"
+sudo rm -rf "$BASELINE"
+sudo mkdir -p "$BASELINE/etc/crowdsec"
+
+# 7.1 核心配置：config.yaml 必须收（5.1/5.2 刚改过 listen_uri/trusted_ips）；
+#     profiles/simulations 是 apt 自带的默认档，缺了只警告不中断
+#     （不同 crowdsec 小版本文件集可能有差异，不为难编译）
+for f in config.yaml profiles.yaml simulations.yaml; do
+    if [ -f "$R/etc/crowdsec/$f" ]; then
+        sudo cp "$R/etc/crowdsec/$f" "$BASELINE/etc/crowdsec/$f"
+    elif [ "$f" = "config.yaml" ]; then
+        echo "!! 基线导出失败：缺 /etc/crowdsec/$f"; exit 1
+    else
+        echo "⚠️ 基线跳过（该版本无此文件）: /etc/crowdsec/$f"
+    fi
+done
+
+# 7.2 本方案自有的三个文件（第 5 步写死的），缺任何一个都说明第 5 步坏了
+for pair in "acquis.d:router.yaml" \
+            "parsers/s01-parse:openwrt-dropbear.yaml" \
+            "parsers/s02-enrich:openwrt-whitelist.yaml"; do
+    sub="${pair%%:*}"; f="${pair##*:}"
+    if [ -f "$R/etc/crowdsec/$sub/$f" ]; then
+        sudo mkdir -p "$BASELINE/etc/crowdsec/$sub"
+        sudo cp "$R/etc/crowdsec/$sub/$f" "$BASELINE/etc/crowdsec/$sub/$f"
+    else
+        echo "!! 基线导出失败：缺 /etc/crowdsec/$sub/$f"; exit 1
+    fi
+done
+
+# 7.3 说明文件：告诉用户基线是什么、改哪儿、怎么恢复出厂
+sudo tee "$BASELINE/README.md" >/dev/null <<'EOF'
+# CrowdSec 出厂配置基线
+
+本目录随固件分发（只读），首次开机时会被拷贝到可写层：
+    /srv/lxc/crowdsec-baseline/
+
+## 修改配置的唯一入口
+改 /srv/lxc/crowdsec-baseline/etc/crowdsec/ 下的对应文件，然后重启路由器
+（或进 Ubuntu 容器 systemctl restart crowdsec）。每次开机会自动把基线
+同步进容器 /etc/crowdsec/，容器内配置被改坏会被自动覆盖修复。
+
+## 恢复出厂基线
+    rm -rf /srv/lxc/crowdsec-baseline
+重启路由器，首启逻辑会从固件只读层重新初始化。
+
+## 不会被覆盖的用户资产
+以下内容不在同步白名单，永远保留：
+  - /etc/crowdsec/parsers/、scenarios/ 下你自己新建的规则文件
+  - local_api_credentials.yaml / online_api_credentials.yaml（凭据）
+  - data/、database.db（运行时状态）
+EOF
+
+# 7.4 校验：白名单文件一个都不能少
+_n=$(find "$BASELINE/etc/crowdsec" -type f | wc -l)
+echo "==> 基线文件数 = $_n（config/profiles/simulations + acquis.d + parsers 共 6）"
+[ "$_n" -ge 6 ] || { echo "!! 基线文件不足，检查上面日志"; exit 1; }
+
+# 7.5 白名单外扫描（防漏验）：/etc/crowdsec 下凡不在白名单、也不属于已知
+#     黑名单（运行时凭据/数据库/用户资产）的文件，编译期全部列出逼人工 review。
+#     以后 crowdsec 升级带了新的出厂静态文件、或本方案加了新配置却忘了加
+#     白名单，这里立刻暴露，不会静默漏验。
+echo "==> 白名单外扫描（确认是用户资产/运行时文件可忽略；若是新的出厂静态文件，请加进白名单与 BASELINE_FILES）"
+_extra=$(sudo find "$R/etc/crowdsec" -type f \
+    ! -name 'local_api_credentials.yaml' \
+    ! -name 'online_api_credentials.yaml' \
+    ! -name 'database.db' \
+    ! -path '*/data/*' \
+    | sed "s|^$R||" \
+    | grep -vE '^/etc/crowdsec/(config\.yaml|profiles\.yaml|simulations\.yaml|acquis\.d/router\.yaml|parsers/s01-parse/openwrt-dropbear\.yaml|parsers/s02-enrich/openwrt-whitelist\.yaml)$' || true)
+if [ -n "$_extra" ]; then
+    echo "⚠️ 白名单外文件："
+    printf '%s\n' "$_extra"
+else
+    echo "    无遗漏：出厂静态文件已全部收编"
+fi
+
 echo "==> 完成：$OUT_DIR/lxc-ubuntu.tar.gz"
 ls -lh "$OUT_DIR/lxc-ubuntu.tar.gz"
+echo "==> 完成：$BASELINE（出厂配置基线）"
+ls -lhR "$BASELINE"

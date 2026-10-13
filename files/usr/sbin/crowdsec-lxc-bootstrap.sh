@@ -1,25 +1,4 @@
 #!/bin/sh
-# =============================================================================
-# /usr/sbin/crowdsec-lxc-bootstrap.sh
-# 由 /etc/rc.local 后台拉起，每次开机跑一遍，幂等安全。
-#
-# 结构：每个大步骤只用一个 if——判定条件留在主流程，动作收进各自函数，
-#       步骤1 与步骤2 完全分开，互不嵌套，保证阅读性。
-#   前置  容器 config 校验（缺失或与模板不一致才 reconcile + 抠不支持键 + 强制 lxc.start.auto）
-#         容器整体恢复（没在跑且 rootfs 目录整个缺失 → tarball 解压重建 + 启动复验）
-#         出厂配置基线：首启初始化 /srv/lxc/crowdsec-baseline/（用户修改入口），
-#         每次开机把白名单配置同步进容器，被改坏自动覆盖回基线（修完复验）
-#         容器侧健康验证 + 修复（rootfs/在跑/服务/LAPI，防止步骤1、2 空跑）
-#   步骤1 step1_bootstrap()：创建 LXC 容器 + 注册 bouncer —— 本地，不联网
-#         前置：本地 api（路由器侧 bouncer 配置）不存在才运行，存在则跳过
-#   步骤2 step2_run()：控制台绑定 enroll             —— 远程 api，联网，必须等步骤1 完成
-#         前置：ENROLL_KEY 存在才进入 if；内部条件1→6 顺序验证，
-#         哪个失败就近修复哪个（修好立即复验），全部就绪才执行 enroll 动作；
-#         任一条件最终无法满足则本轮放弃，直接落到收尾；
-#         enroll 成功后必须复检通过才写 .enrolled 标记（绝不录入无效数据）
-#   收尾  final_check()：本地链路心跳体检 + 文件/链路自检自愈（A文件/B配置文件/C认证/D端到端）+ nft 表
-# =============================================================================
-
 LXC_NAME="${LXC_NAME:-ubuntu}"
 LXC_PATH="${LXC_PATH:-/srv/lxc}"
 ROOTFS="$LXC_PATH/$LXC_NAME/rootfs"
@@ -27,18 +6,9 @@ TARBALL="${TARBALL:-/opt/lxc-ubuntu.tar.gz}"
 CONTAINER_IP="${CONTAINER_IP:-10.0.0.10}"
 LAPI_PORT="${LAPI_PORT:-8080}"
 BOUNCER_NAME="${BOUNCER_NAME:-openwrt-fw}"
-# 出厂配置基线（随固件 /opt/crowdsec-baseline/ 只读分发，首次开机初始化到可写层）：
-#   BASELINE_RO 固件只读层 = 出厂基线，用户改不了
-#   BASELINE_RW 可写层     = 首启从 RO 拷贝，之后保留用户改动 = 唯一修改入口
-# 开机把 RW 白名单同步进容器 /etc/crowdsec/，配置被改坏自动覆盖回基线。
 BASELINE_RO="${BASELINE_RO:-/opt/crowdsec-baseline}"
 BASELINE_RW="${BASELINE_RW:-/srv/lxc/crowdsec-baseline}"
-# 同步白名单：只收编译期写死的出厂文件。local/online_api_credentials.yaml、
-# data/、database.db、用户自建规则是运行时状态或用户资产，一律不碰——
-# 覆盖回去会直接搞断 enroll 账号绑定与 bouncer 注册。
 BASELINE_FILES="config.yaml profiles.yaml simulations.yaml acquis.d/router.yaml parsers/s01-parse/openwrt-dropbear.yaml parsers/s02-enrich/openwrt-whitelist.yaml"
-# 路由器在 lxcbr0 上的 IPv4：心跳体检的身份核对用——LAPI 记录的本机 bouncer
-# 来源 IP 应等于它。探测失败留空则跳过核对（绝不因此误杀），不影响其他检查。
 BRIDGE_IP=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
 CSCLI=/usr/bin/cscli
 MAX_WAIT="${MAX_WAIT:-60}"
@@ -51,8 +21,6 @@ log "===== crowdsec-lxc-bootstrap 版本 $SCRIPT_VER 开始执行 ====="
 ct() { lxc-attach -P "$LXC_PATH" -n "$LXC_NAME" -- "$@"; }
 ct_running() { lxc-ls -P "$LXC_PATH" --running 2>/dev/null | grep -qw "$LXC_NAME"; }
 
-# 本地 bouncers API（LAPI）就绪判定：直接探端点本身，不跑 bouncers list
-# （list 是一条需联网认证的慢查询，开机容器未拉起时会反复空转浪费时间）
 lapi_ready() {
     ct sh -c '
         [ -S /var/lib/crowdsec/data/crowdsec-cli.sock ] && exit 0

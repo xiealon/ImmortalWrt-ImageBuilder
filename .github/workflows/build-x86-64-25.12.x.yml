@@ -93,21 +93,12 @@ jobs:
 
       - name: Validate CrowdSec build parameters
         env:
-          # 把 workflow inputs 统一"导入"为环境变量：shell 里只读变量，
-          # 不把 ${{ }} 直接插值进脚本——crowdsec_enroll_key 是 password 型输入，
-          # 若含引号/反引号/$ 等字符，直接插值会破坏 shell 语法甚至注入。
-          # inputs.* 在本 workflow 的 inputs 定义里直接取值即可
-          #（workflow_dispatch 触发下可用，无需 github.event.inputs.X 前缀）。
           CS_INCLUDE_IN: ${{ inputs.include_crowdsec }}
           CS_KEY: ${{ inputs.crowdsec_enroll_key }}
           CS_PROFILE: ${{ inputs.profile }}
           CS_CT_IP_IN: ${{ inputs.custom_container_ip }}
           CS_BRIDGE_IP_IN: ${{ inputs.custom_bridge_ip }}
         run: |
-          # ===== CrowdSec 构建参数前置校验（防空跑）=====
-          # 所有 CrowdSec 相关产物（注册密钥文件 / LXC rootfs）统一以本步骤写入
-          # $GITHUB_ENV 的 CS_INCLUDE / CS_ENROLL 为准；后续步骤只读 env、不再各自散落判定。
-          # ⚠️ 此步骤与 24.10 的 build-x86-64-24.10.x.yml 保持一致，两边要改一起改。
           CS_INCLUDE=no
           CS_ENROLL=no
 
@@ -134,23 +125,15 @@ jobs:
           fi
 
           if [ "$CS_ENROLL" = "yes" ]; then
-            # 注册密钥落盘只此一处：custom/ 会被下一步 docker run 挂成固件 /etc/config/，
-            # 文件名必须和 99-custom.sh / crowdsec-lxc-bootstrap.sh 读的一字不差。
             CUSTOM="${{ github.workspace }}/custom"
             mkdir -p "$CUSTOM"
             printf '%s\n' "$CS_KEY" > "$CUSTOM/crowdsec_enroll_key.txt"
             echo "已写入注册密钥 → custom/crowdsec_enroll_key.txt"
           fi
 
-          # ===== 容器网络参数（与 CrowdSec 开关无关，lxcbr0 网桥常驻）=====
-          # 两个 input：容器 IP + 网桥 IP（容器的网关和 DNS 合并成网桥 IP 一个值），
-          # 掩码固定 /24，不提供掩码/DNS 输入。归一化后：
-          #   ① 写 custom/*.txt → 固件 /etc/config/（99-custom.sh、bootstrap 同源读）
-          #   ② 写 $GITHUB_ENV  → Prepare 步骤 sudo env 传给编译期 prepare 脚本
-          # 任何非法输入都 ::error:: 并回退默认 10 段，绝不带病进固件。
           CUSTOM="${{ github.workspace }}/custom"
           mkdir -p "$CUSTOM"
-          _cs_valid_ip() {   # 合法 IPv4（四段 0-255）→ 0
+          _cs_valid_ip() {
               printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
               for _o in $(printf '%s' "$1" | tr '.' ' '); do
                   [ "$_o" -ge 0 ] 2>/dev/null && [ "$_o" -le 255 ] 2>/dev/null || return 1
@@ -168,7 +151,6 @@ jobs:
               echo "::error::custom_bridge_ip=$CS_BRIDGE_IP_IN 不是合法 IPv4，已回退默认 10.0.0.1"
               CS_BRIDGE_IP_IN='10.0.0.1'
           fi
-          # 掩码固定 /24：容器与网桥必须同段，否则容器网关不可达（编译期写进 networkd，无报错）
           if [ "$(_cs_net24 "$CS_CT_IP_IN")" != "$(_cs_net24 "$CS_BRIDGE_IP_IN")" ]; then
               echo "::error::容器 IP($CS_CT_IP_IN) 与网桥 IP($CS_BRIDGE_IP_IN) 不在同一 /24 网段（掩码固定 24 位），已回退默认 10.0.0.10 / 10.0.0.1"
               CS_CT_IP_IN='10.0.0.10'; CS_BRIDGE_IP_IN='10.0.0.1'
@@ -189,12 +171,6 @@ jobs:
 
       - name: Save Router Network Config into OpenWrt files
         run: |
-          # 整个 custom/ 目录会被下一步 docker run 挂成固件里的 /etc/config/，
-          # 所以文件名必须和 99-custom.sh 里读的一字不差：
-          #   custom_router_ip.txt / custom_router_netmask.txt
-          #   custom_router_gateway.txt / custom_router_dns.txt
-          # 容器网络两个文件（custom_container_ip.txt / custom_bridge_ip.txt）由前面的
-          # 「Validate CrowdSec build parameters」步骤校验归一化后写入，此处不再重复。
           CUSTOM="${{ github.workspace }}/custom"
           mkdir -p "$CUSTOM"
 
@@ -203,16 +179,11 @@ jobs:
           echo "${{ github.event.inputs.custom_router_gateway  }}" > "$CUSTOM/custom_router_gateway.txt"
           echo "${{ github.event.inputs.custom_router_dns      }}" > "$CUSTOM/custom_router_dns.txt"
 
-          # 掩码留空 → 99-custom.sh 用 255.255.255.0
-          # 网关留空 → 自动推导「IP 前三段 + .1」（仅 /24 有效，非 /24 时必须手填）
-          # DNS  留空 → 跟随网关
           echo "已写入: IP=$(cat "$CUSTOM/custom_router_ip.txt")"
           echo "        掩码=[$(tr -d '\r\n' < "$CUSTOM/custom_router_netmask.txt")]"
           echo "        网关=[$(tr -d '\r\n' < "$CUSTOM/custom_router_gateway.txt")]"
           echo "        DNS=[$(tr -d '\r\n' < "$CUSTOM/custom_router_dns.txt")]"
 
-          # CrowdSec 注册密钥（custom/crowdsec_enroll_key.txt）已由前面的
-          # 「Validate CrowdSec build parameters」步骤统一校验并按需写入，此处不再重复判定。
 
       - name: Enable Store integration
         run: |
@@ -224,14 +195,8 @@ jobs:
           fi
 
       - name: Prepare CrowdSec LXC rootfs
-        # 由前面的「Validate CrowdSec build parameters」步骤统一校验并写入
-        # $GITHUB_ENV 的 CS_INCLUDE；未启用时本步骤直接跳过，杜绝空跑。
         if: env.CS_INCLUDE == 'yes'
         run: |
-          # 这一步在编译机（有网、可 sudo chroot）上把 Ubuntu rootfs + CrowdSec 预制好，
-          # 产物 files/opt/lxc-ubuntu.tar.gz 会随 FILES 一起打进固件。
-          # 容器 IP / 网桥 IP 由前面 Validate 步骤归一化后写入 $GITHUB_ENV（CS_CT_IP/CS_BRIDGE_IP，
-          # 默认 10.0.0.10 / 10.0.0.1），此处透传；99-custom.sh 与 bootstrap 读同源 txt，三处一致。
           chmod +x shell/prepare-crowdsec-rootfs.sh
           sudo env CONTAINER_IP="${CS_CT_IP:-10.0.0.10}" BRIDGE_IP="${CS_BRIDGE_IP:-10.0.0.1}" \
                bash shell/prepare-crowdsec-rootfs.sh
@@ -300,9 +265,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ===== 以下为「额外产出 ISO 安装器」步骤（复用 build-iso 工作流的流程）=====
-      # 唯一的总开关在下面的 build_installer_iso job 上（if 提到 job 级），
-      # 这里两步默认都会执行（cp + 上传 artifact 开销极小），由 job 级 if 决定是否进 ISO 制作。
       - name: 复制固件到根目录
         run: |
           cp ${{ github.workspace }}/bin/targets/x86/64/*squashfs-combined-efi.img.gz ${{ github.workspace }}
@@ -317,14 +279,8 @@ jobs:
   build_installer_iso:
     runs-on: ubuntu-22.04
     needs: build
-    # 总开关提到 job 级（唯一一处 if）。dispatch 与 workflow_call 两种触发都能正确取值。
     if: ${{ (github.event.inputs.include_iso || inputs.include_iso || 'no') == 'yes' }}
     env:
-      # 复用「固件版本选择」下拉框(luci_version)作为 ISO 文件名后缀，
-      # 让 24.10 与 25.12 的 ISO 落在同一 tag 时因文件名不同而共存、互不覆盖。
-      # 该值会经 autobuild.sh → docker -e ISO_VER → build.sh 透传；
-      # 若 fork(xiealon/img-installer) 已应用版本化命名则直接产出带版本文件，
-      # 否则由下方「制作 ISO」步骤的 mv 兜底重命名。
       ISO_VER: "${{ github.event.inputs.luci_version || inputs.luci_version }}"
 
     steps:
@@ -348,8 +304,6 @@ jobs:
           firmware_file=$(ls *squashfs-combined-efi.img.gz)
           cd img-installer
           bash autobuild/autobuild.sh "../$firmware_file"
-          # 兜底重命名：若 fork 未应用版本化命名，这里把固定名改成带版本后缀，
-          # 保证无论 fork 是否改动，上传步骤都能找到 custom-installer-x86_64-${ISO_VER}.iso
           if [ ! -f "output/custom-installer-x86_64-${ISO_VER}.iso" ]; then
             mv output/custom-installer-x86_64.iso "output/custom-installer-x86_64-${ISO_VER}.iso"
           fi

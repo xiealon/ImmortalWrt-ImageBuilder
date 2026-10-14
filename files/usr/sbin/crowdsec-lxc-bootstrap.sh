@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-14.12"
+SCRIPT_VER="2026-10-15.22"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -44,11 +44,6 @@ ct_exists() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; }
 _pgrep_bouncer() { pgrep -f "crowdsec-firewall-bouncer" >/dev/null 2>&1; }
 _ct_env() { ct sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; '"$1"; }
 
-ct_crowdsec_active() {
-    _ct_env '[ -x /bin/systemctl ] && systemctl is-active crowdsec >/dev/null 2>&1 && exit 0
-              pgrep -x crowdsec >/dev/null 2>&1 && exit 0
-              exit 1' 2>/dev/null
-}
 cs_active_on_host() { _pgrep_bouncer; }
 nft_table_ready() { nft list table ip crowdsec >/dev/null 2>&1; }
 
@@ -72,14 +67,7 @@ net_online() {
               exit 1' 2>/dev/null
 }
 
-setup_bridge() {
-    _br=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
-    if ip link show lxcbr0 >/dev/null 2>&1 \
-       && [ "$(uci -q get network.lxc.proto 2>/dev/null)" = "static" ] \
-       && [ -n "$_br" ] && [ "$_br" = "$BRIDGE_IP" ]; then
-        log "[网桥] 已就绪 lxcbr0=${BRIDGE_IP}/24，跳过重建"
-        return 0
-    fi
+setup_lxc_firewall() {
     _lsc_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
     _lan_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
     if [ -z "$_lan_ip" ] && [ -f /etc/config/custom_router_ip.txt ]; then
@@ -87,20 +75,6 @@ setup_bridge() {
     fi
     [ -n "$_lan_ip" ] || _lan_ip='192.168.3.201'
 
-    uci -q set network.lxcbr0=device
-    uci -q set network.lxcbr0.name='lxcbr0'
-    uci -q set network.lxcbr0.type='bridge'
-    uci -q set network.lxcbr0.bridge_empty='1'
-    uci -q set network.lxc=interface
-    uci -q set network.lxc.device='lxcbr0'
-    uci -q set network.lxc.proto='static'
-    uci -q set network.lxc.ipaddr="${BRIDGE_IP}"
-    uci -q set network.lxc.netmask='255.255.255.0'
-    uci -q set dhcp.lxc=dhcp
-    uci -q set dhcp.lxc.interface='lxc'
-    uci -q set dhcp.lxc.start='100'
-    uci -q set dhcp.lxc.limit='150'
-    uci -q set dhcp.lxc.leasetime='1h'
     uci -q set firewall.lxczone=zone
     uci -q set firewall.lxczone.name='lxc'
     uci -q set firewall.lxczone.network='lxc'
@@ -127,12 +101,41 @@ setup_bridge() {
     uci -q set firewall.lxcsnat.src_ip="${_lsc_net}"
     uci -q set firewall.lxcsnat.target='SNAT'
     uci -q set firewall.lxcsnat.snat_ip="${_lan_ip}"
+    uci -q commit firewall
+    /etc/init.d/firewall reload >/dev/null 2>&1
+    log "[防火墙] lxc 区 input/output/forward=ACCEPT（8080/tcp、514/udp 可达）"
+    return 0
+}
+
+setup_bridge() {
+    _lsc_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
+    _br=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
+    if ip link show lxcbr0 >/dev/null 2>&1 \
+       && [ "$(uci -q get network.lxc.proto 2>/dev/null)" = "static" ] \
+       && [ -n "$_br" ] && [ "$_br" = "$BRIDGE_IP" ]; then
+        log "[网桥] 已就绪 lxcbr0=${BRIDGE_IP}/24，跳过重建"
+        setup_lxc_firewall
+        return 0
+    fi
+
+    uci -q set network.lxcbr0=device
+    uci -q set network.lxcbr0.name='lxcbr0'
+    uci -q set network.lxcbr0.type='bridge'
+    uci -q set network.lxcbr0.bridge_empty='1'
+    uci -q set network.lxc=interface
+    uci -q set network.lxc.device='lxcbr0'
+    uci -q set network.lxc.proto='static'
+    uci -q set network.lxc.ipaddr="${BRIDGE_IP}"
+    uci -q set network.lxc.netmask='255.255.255.0'
+    uci -q set dhcp.lxc=dhcp
+    uci -q set dhcp.lxc.interface='lxc'
+    uci -q set dhcp.lxc.start='100'
+    uci -q set dhcp.lxc.limit='150'
+    uci -q set dhcp.lxc.leasetime='1h'
     uci -q commit network
     uci -q commit dhcp
-    uci -q commit firewall
 
     /etc/init.d/network reload >/dev/null 2>&1
-    /etc/init.d/firewall reload >/dev/null 2>&1
 
     if ! ip link show lxcbr0 >/dev/null 2>&1; then
         ip link add lxcbr0 type bridge 2>/dev/null
@@ -143,6 +146,7 @@ setup_bridge() {
 
     BRIDGE_IP=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
     log "[网桥] lxcbr0=${BRIDGE_IP}/24 容器=${CONTAINER_IP} 网段=${_lsc_net}"
+    setup_lxc_firewall
 }
 
 write_cfg() {
@@ -267,41 +271,46 @@ sync_from_baseline() {
     return "$_changed"
 }
 
-setup_prometheus() {
-    [ -f "$CROWDSEC_CFG" ] || return 2
+cfg_ok() {
+    ct_running || return 1
+    _ct_env "timeout 20 $CSCLI config show -o json" >/dev/null 2>&1
+}
 
-    _prom_ok=$(awk '
+prom_block_present() {
+    grep -qE "^#?[[:space:]]*prometheus:[[:space:]]*(#.*)?$" "$CROWDSEC_CFG" 2>/dev/null
+}
+
+strip_prom_block() {
+    awk '
         /^#?[[:space:]]*prometheus:[[:space:]]*(#.*)?$/ { f = 1; next }
-        f && /^[^[:space:]#]/ { exit }
-        f && /^[[:space:]]*enabled:[[:space:]]*true/ { print "yes"; exit }
-    ' "$CROWDSEC_CFG" 2>/dev/null)
+        f && /^[^[:space:]#]/ { f = 0 }
+        f { next }
+        { print }
+    ' "$CROWDSEC_CFG" > "$CROWDSEC_CFG.ps" 2>/dev/null
+    if [ -s "$CROWDSEC_CFG.ps" ]; then
+        mv -f "$CROWDSEC_CFG.ps" "$CROWDSEC_CFG" 2>/dev/null && return 0
+    fi
+    rm -f "$CROWDSEC_CFG.ps" 2>/dev/null
+    return 1
+}
 
-    [ "$_prom_ok" = "yes" ] && return 1
+repair_crowdsec_cfg() {
+    [ -f "$CROWDSEC_CFG" ] || return 2
+    cfg_ok && return 1
 
-    if grep -qE "^#?[[:space:]]*prometheus:" "$CROWDSEC_CFG" 2>/dev/null; then
-        awk '
-            /^#?[[:space:]]*prometheus:[[:space:]]*(#.*)?$/ {
-                print "prometheus:"
-                print "  enabled: true"
-                print "  level: full"
-                print "  listen_address: 0.0.0.0"
-                print "  listen_port: 6060"
-                f = 1
-                next
-            }
-            f && /^[^[:space:]#]/ { f = 0 }
-            f { next }
-            { print }
-        ' "$CROWDSEC_CFG" > "$CROWDSEC_CFG.new" 2>/dev/null
-        if [ -s "$CROWDSEC_CFG.new" ]; then
-            mv -f "$CROWDSEC_CFG.new" "$CROWDSEC_CFG" 2>/dev/null && return 0
-        fi
-        rm -f "$CROWDSEC_CFG.new" 2>/dev/null
-        return 2
+    _cbak="$CROWDSEC_CFG.cbak"
+    cp -p "$CROWDSEC_CFG" "$_cbak" 2>/dev/null
+
+    if prom_block_present && strip_prom_block && cfg_ok; then
+        rm -f "$_cbak" 2>/dev/null
+        log "[步骤1] config.yaml 里有本机 crowdsec 不认的 prometheus 段，已剔除并回到包默认"
+        return 0
     fi
 
-    printf '\nprometheus:\n  enabled: true\n  level: full\n  listen_address: 0.0.0.0\n  listen_port: 6060\n' >> "$CROWDSEC_CFG"
-    return 0
+    cp -p "$_cbak" "$CROWDSEC_CFG" 2>/dev/null
+    rm -f "$_cbak" 2>/dev/null
+    log "[步骤1] config.yaml 解析不过且自动修复失败（手工查：cscli config show）"
+    return 2
 }
 
 step1_local() {
@@ -328,6 +337,8 @@ step1_local() {
     fi
 
     setup_bridge
+
+    setup_container_dns || log "[步骤1] 启动前 DNS 写入失败，容器可能无外网解析"
 
     _api_url_want="http://${CONTAINER_IP}:${LAPI_PORT}/"
     _sec=""
@@ -387,19 +398,18 @@ step1_local() {
         log "[步骤1] 首次开机无备份，跳过一致性校验"
     fi
 
-    if ct_crowdsec_active; then
-        log "[步骤1] crowdsec 服务 active"
-    else
-        log "[步骤1] crowdsec 未 active，重启"
-        _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
-        _wait_ct_cs() { ct_crowdsec_active; }
-        _wait _wait_ct_cs 12 || { log "[步骤1] 服务仍未 active"; return 1; }
-    fi
-
     [ -f "$CROWDSEC_CFG" ] || { log "[步骤1] 容器内无 /etc/crowdsec/config.yaml，镜像不完整"; return 1; }
 
     _cs_restart=0
-    setup_prometheus && { log "[步骤1] Prometheus exporter 已开启（:6060）"; _cs_restart=1; }
+    repair_crowdsec_cfg; _rp=$?
+    if [ "$_rp" = "0" ]; then
+        log "[步骤1] config.yaml 已修复，重启 crowdsec 生效"
+        _cs_restart=1
+    elif [ "$_rp" = "2" ]; then
+        log "[步骤1] config.yaml 仍不可解析，注册会失败"
+    fi
+
+    setup_acquis && _cs_restart=1
 
     if grep -qE "^[[:space:]]*listen_uri:[[:space:]]*['\"]?0\.0\.0\.0:$LAPI_PORT" "$CROWDSEC_CFG" 2>/dev/null; then
         log "[步骤1] LAPI 已对外监听 0.0.0.0:$LAPI_PORT"
@@ -423,6 +433,8 @@ step1_local() {
         log "[步骤1] 已重启 crowdsec 使覆盖生效"
     fi
 
+    log "[步骤1] 配置已写入，直接注册 bouncer"
+
     _ncoll=$(_ct_env "$CSCLI collections list -o json 2>/dev/null | grep -c '\"name\"'")
     if [ "${_ncoll:-0}" -gt 0 ] 2>/dev/null; then
         log "[步骤1] 场景库就绪（$_ncoll 个 collection）"
@@ -434,23 +446,31 @@ step1_local() {
 
     [ -n "$_sec" ] || { log "[步骤1] bouncer 段不存在，无法注册 api_key"; return 1; }
 
-    if [ -n "$_uci_key" ] && ct $CSCLI bouncers list 2>/dev/null | grep -qw "$BOUNCER_NAME"; then
-        log "[步骤1] bouncer '$BOUNCER_NAME' 在册且本地 key 完整，跳过注册"
-    else
-        if ct $CSCLI parsers list 2>/dev/null | grep -q 'crowdsecurity/whitelists'; then
-            ct $CSCLI parsers remove crowdsecurity/whitelists --force >/dev/null 2>&1 || true
+    _need_reg=1
+    if [ -n "$_uci_key" ] && _ct_env "$CSCLI bouncers list" 2>/dev/null | grep -qw "$BOUNCER_NAME"; then
+        case "$_uci_key" in
+            *[!A-Za-z0-9+/=_-]*|*/*/*) _need_reg=1; log "[步骤1] 本地 api_key 格式异常，强制重注册" ;;
+            *) _need_reg=0; log "[步骤1] bouncer '$BOUNCER_NAME' 在册且本地 key 完整，跳过注册" ;;
+        esac
+    fi
+
+    if [ "$_need_reg" = "1" ]; then
+        if _ct_env "$CSCLI parsers remove crowdsecurity/whitelists --force" >/dev/null 2>&1; then
             _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
         fi
 
         _key=""
         _i=0
-        while [ "$_i" -lt 10 ]; do
+        while [ "$_i" -lt 20 ]; do
             _i=$((_i+1))
-            ct $CSCLI bouncers delete "$BOUNCER_NAME" >/dev/null 2>&1 || true
-            _key=$(ct $CSCLI bouncers add "$BOUNCER_NAME" -o raw 2>/dev/null \
-                   | sed -e 's/\r$//' | grep -Eo '[A-Za-z0-9+/=_-]{16,}' | tail -n1)
+            _ct_env "$CSCLI bouncers delete \"$BOUNCER_NAME\"" >/dev/null 2>&1 || true
+            _raw=$(_ct_env "$CSCLI bouncers add \"$BOUNCER_NAME\" -o raw" 2>&1)
+            _key=$(printf '%s\n' "$_raw" | sed -e 's/\r$//' \
+                   | grep -Eo '^[A-Za-z0-9+/=_-]{16,}$' | tail -n1)
             [ -n "$_key" ] && break
             log "[步骤1] 第 $_i 次注册未拿到 key，5 秒后重试"
+            printf '%s\n' "$_raw" | grep -v '^[[:space:]]*$' | head -n5 \
+                | while IFS= read -r _l; do log "[步骤1] cscli> $_l"; done
             sleep 5
         done
         [ -n "$_key" ] || { log "[步骤1] 注册 bouncer 失败（cscli 不可用）"; return 1; }
@@ -639,8 +659,102 @@ setup_syslog_forward() {
     uci -q set system.@system[0].log_remote='1'
     uci -q set system.@system[0].cronloglevel='5'
     uci commit system
-    log "[准备] 系统日志外发至 ${CONTAINER_IP}:514"
+    /etc/init.d/log restart >/dev/null 2>&1
+    log "[日志] 宿主 syslog 已外发至 ${CONTAINER_IP}:514/udp"
     return 0
+}
+
+setup_acquis() {
+    [ -d "$ROOTFS/etc/crowdsec" ] || return 1
+    mkdir -p "$ROOTFS/etc/crowdsec/acquis.d" \
+             "$ROOTFS/etc/crowdsec/parsers/s01-parse" \
+             "$ROOTFS/etc/crowdsec/parsers/s02-enrich" 2>/dev/null
+
+    _chg=0
+
+    _acq="$ROOTFS/etc/crowdsec/acquis.d/router.yaml"
+    if ! grep -qE '^[[:space:]]*listen_port:[[:space:]]*514' "$_acq" 2>/dev/null; then
+        cat > "$_acq" <<'EOF'
+source: syslog
+listen_addr: 0.0.0.0
+listen_port: 514
+protocol: udp
+labels:
+  type: syslog
+EOF
+        _chg=1
+    fi
+
+    _par="$ROOTFS/etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml"
+    if ! grep -q 'ssh_failed-auth' "$_par" 2>/dev/null; then
+        cat > "$_par" <<'EOF'
+name: openwrt/dropbear-logs
+description: Parse OpenWrt non-PAM dropbear logs
+filter: evt.Parsed.program == 'dropbear'
+onsuccess: next_stage
+nodes:
+  - grok:
+      pattern: "Bad password attempt for '?%{DATA:username}'? from %{IP:source_ip}:%{INT:source_port}"
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: ssh_failed-auth
+  - grok:
+      pattern: "Login attempt for nonexistent user %{GREEDYDATA:username} from %{IP:source_ip}:%{INT:source_port}"
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: ssh_failed-auth
+  - grok:
+      pattern: "Exit before auth from <%{IP:source_ip}:%{INT:source_port}>"
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: ssh_failed-auth
+  - grok:
+      pattern: "Password auth succeeded for '?%{DATA:username}'? from %{IP:source_ip}:%{INT:source_port}"
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: ssh_auth_success
+  - grok:
+      pattern: "Pubkey auth succeeded for '?%{DATA:username}'? with key %{DATA:key_type} from %{IP:source_ip}:%{INT:source_port}"
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: ssh_auth_success
+statics:
+  - meta: service
+    value: ssh
+  - meta: source_ip
+    expression: evt.Parsed.source_ip
+  - meta: username
+    expression: evt.Parsed.username
+EOF
+        _chg=1
+    fi
+
+    _wl="$ROOTFS/etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml"
+    if [ ! -s "$_wl" ]; then
+        cat > "$_wl" <<'EOF'
+name: openwrt/my-whitelist
+description: 'No whitelist configured - placeholder only'
+whitelist:
+  reason: placeholder, nothing is whitelisted
+  ip:
+    - 127.0.0.1
+  cidr:
+    - 240.0.0.0/4
+EOF
+        _chg=1
+    fi
+
+    if [ "$_chg" = "1" ]; then
+        log "[日志] 容器内已写入日志源：UDP 514 收 syslog + dropbear 解析器"
+        return 0
+    fi
+    log "[日志] 容器内日志源已在位（UDP 514 + dropbear 解析器）"
+    return 1
 }
 
 setup_container_dns() {
@@ -706,7 +820,9 @@ main() {
 
     mount_cgroup
 
-    setup_container_dns || log "[DNS] 写入失败，容器可能无外网解析"
+    setup_syslog_forward
+
+    setup_container_dns || log "[DNS] 此处跳过（rootfs 未就绪），步骤1 解压后会写入"
 
     early_start || log "[启动] 首次拉起容器未成功，后续步骤会继续处理"
 
@@ -729,7 +845,6 @@ main() {
     done
 
     if [ "$R1" = "0" ]; then
-        setup_syslog_forward
         step2_enroll; R2=$?
     else
         R2=1

@@ -225,42 +225,31 @@ uci -q set system.@system[0].cronloglevel='5'
 uci commit system
 echo "系统日志外发至 ${CS_CT_IP}:514" >>$LOGFILE
 
-if [ -d /srv/lxc/ubuntu/rootfs ] || [ -f /opt/lxc-ubuntu.tar.gz ]; then
-cat > /etc/init.d/lxc-autostart <<'EOF'
-#!/bin/sh /etc/rc.common
-START=99
-STOP=10
-CT_NAME=ubuntu
-CT_PATH=/srv/lxc
-
-_running() { lxc-ls -P "$CT_PATH" --running 2>/dev/null | grep -qw "$CT_NAME"; }
-
-start() {
-    # 已经跑着就别重复拉
-    if _running; then
-        logger -t lxc-autostart "容器 $CT_NAME 已在运行，跳过"
-        return 0
-    fi
-    # 容器还没由 bootstrap 解压出来时，悄悄跳过，不刷报错
-    if [ ! -d "$CT_PATH/$CT_NAME/rootfs" ]; then
-        logger -t lxc-autostart "rootfs 尚未就绪，跳过（等待 bootstrap 解压）"
-        return 0
-    fi
-    logger -t lxc-autostart "拉起容器 $CT_NAME"
-    lxc-start -P "$CT_PATH" -n "$CT_NAME" -d
-}
-
-stop() {
-    _running && lxc-stop -P "$CT_PATH" -n "$CT_NAME"
-    return 0
-}
-EOF
-    chmod +x /etc/init.d/lxc-autostart
-    /etc/init.d/lxc-autostart enable
-    echo "已安装 lxc-autostart (START=99)" >>$LOGFILE
+# ---------------------------------------------------------------- CrowdSec 引导
+# 归拢目录：容器镜像 + 稳定态配置备份统一放 /etc/crowdsec/
+CS_HOME='/etc/crowdsec'
+CS_TARBALL="$CS_HOME/lxc-ubuntu.tar.gz"
+CS_ROOTFS='/srv/lxc/ubuntu/rootfs'
+# 兼容旧固件：把 /opt 下的镜像挪进 /etc/crowdsec/
+if [ ! -f "$CS_TARBALL" ] && [ -f /opt/lxc-ubuntu.tar.gz ]; then
+    mkdir -p "$CS_HOME" 2>/dev/null
+    mv -f /opt/lxc-ubuntu.tar.gz "$CS_TARBALL" 2>/dev/null \
+        && echo "容器镜像已迁移到 $CS_TARBALL" >>$LOGFILE
+fi
+if [ -d "$CS_HOME" ] || [ -f "$CS_TARBALL" ] || [ -d "$CS_ROOTFS" ]; then
+    mkdir -p "$CS_HOME" 2>/dev/null
+    echo "CrowdSec 工作目录 $CS_HOME（镜像 $CS_TARBALL，备份 $CS_HOME/baseline）" >>$LOGFILE
+    # 快照目录要跟 sysupgrade 一起保留，否则升级后要重建一次备份窗口
+    grep -q "^${CS_HOME}/baseline" /etc/sysupgrade.conf 2>/dev/null \
+        || echo "${CS_HOME}/baseline" >> /etc/sysupgrade.conf 2>/dev/null
 fi
 
-if { [ -f /opt/lxc-ubuntu.tar.gz ] || [ -d /srv/lxc/ubuntu/rootfs ]; } && [ -f /etc/config/crowdsec ]; then
+# 容器自启统一交给 bootstrap（它内部有幂等拉起 + 重建逻辑）。
+# 这里不再装 lxc-autostrt 之类的并行自启服务 —— 两套自启抢同一个容器
+# 会造成「bootstrap 正在解压 rootfs，lxc-autostart 看到目录存在就来拉起半解压的容器」的竞态。
+# bootstrap 的 write_cfg 里已写 lxc.start.auto = 1，LXC 自身的 autostart 机制负责兜底自启。
+
+if { [ -f "$CS_TARBALL" ] || [ -d "$CS_ROOTFS" ]; } && [ -f /etc/config/crowdsec ]; then
     CS_SEC=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
     if [ -z "$CS_SEC" ]; then
         uci add crowdsec bouncer >/dev/null 2>&1
@@ -277,15 +266,15 @@ if { [ -f /opt/lxc-ubuntu.tar.gz ] || [ -d /srv/lxc/ubuntu/rootfs ]; } && [ -f /
         uci -q del "$CS_SEC.interface"
         uci add_list "$CS_SEC.interface=br-lan"
         uci commit crowdsec
-        echo "已预填 bouncer 段: $CS_SEC" >>$LOGFILE
+        echo "已预填 bouncer 段: $CS_SEC（api_key 由开机引导自动获取填入）" >>$LOGFILE
+    else
+        echo "!! /etc/config/crowdsec 存在但建不出 bouncer 段，检查 crowdsec-firewall-bouncer 包" >>$LOGFILE
     fi
 else
-    echo "跳过 bouncer 预填（无容器 tarball/rootfs，或无 /etc/config/crowdsec）" >>$LOGFILE
+    echo "跳过 bouncer 预填（无容器镜像/rootfs，或无 /etc/config/crowdsec）" >>$LOGFILE
 fi
 
-chmod +x /usr/sbin/crowdsec-lxc-bootstrap.sh 2>/dev/null
-chmod +x /etc/rc.local 2>/dev/null
-echo "CrowdSec 引导已就绪" >>$LOGFILE
+echo "CrowdSec 引导已就绪（rc.local → crowdsec-lxc-bootstrap.sh）" >>$LOGFILE
 
 if [ -d /aria2 ] && [ -f /etc/config/aria2 ]; then
     uci set aria2.main.dir='/aria2'

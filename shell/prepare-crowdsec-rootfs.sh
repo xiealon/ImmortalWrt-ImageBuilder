@@ -20,7 +20,8 @@ set -euo pipefail
 
 UBUNTU_BASE_URL="${UBUNTU_BASE_URL:-https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-amd64.tar.gz}"
 CONTAINER_IP="${CONTAINER_IP:-10.0.0.10}"   # 容器固定 IP，要和 99-custom.sh 一致
-BRIDGE_IP="${BRIDGE_IP:-10.0.0.1}"          # lxcbr0 网桥 IP，同时是容器网关/DNS
+BRIDGE_IP="${BRIDGE_IP:-10.0.0.1}"          # lxcbr0 网桥 IP，同时是容器网关
+CT_DNS="${CT_DNS:-223.5.5.5}"              # 容器 DNS 兜底值，运行时可由 bootstrap 按 txt 覆盖
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 归拢到 files/etc/crowdsec/ —— 与 99-custom.sh、bootstrap 脚本里的 CS_HOME 保持一致
@@ -101,7 +102,6 @@ Name=eth0
 [Network]
 Address=${CONTAINER_IP}/24
 Gateway=${BRIDGE_IP}
-DNS=${BRIDGE_IP}
 EOF
 
 # 开机自启 networkd + crowdsec（chroot 里 systemctl enable 不可用，手动建软链）
@@ -247,7 +247,7 @@ echo "    已卸载干净"
 # 宿主机的 /etc/resolv.conf 有可能是个指向 /run/systemd/... 的软链接，
 # 那样 tee 会顺着链接写出去。这里先删掉再重建，确保它在 rootfs 内落地成实体文件。
 sudo rm -f "$R/etc/resolv.conf"
-echo "nameserver ${BRIDGE_IP}" | sudo tee "$R/etc/resolv.conf" >/dev/null
+echo "nameserver ${CT_DNS}" | sudo tee "$R/etc/resolv.conf" >/dev/null
 [ -f "$R/etc/resolv.conf" ] || { echo "!! resolv.conf 写入失败"; exit 1; }
 
 # ---- 6.3 打包 ----

@@ -277,6 +277,71 @@ def insert_new_block(lines, bridge_ip, cnet):
     return insert_at if insert_at is not None else api_idx + 1
 
 
+PROM_SEC_RE = re.compile(r"^prometheus\s*:\s*(#.*)?$")
+
+
+def _prom_block_range(lines):
+    """返回顶层 prometheus: 段的 (start, end)；段不存在返回 None。"""
+    for i, ln in enumerate(lines):
+        if PROM_SEC_RE.match(ln):
+            for j in range(i + 1, len(lines)):
+                s = lines[j]
+                if not s.strip():
+                    continue
+                if not s[0].isspace() and ":" in s:
+                    return i, j
+            return i, len(lines)
+    return None
+
+
+def patch_prometheus(path, listen_addr, port):
+    """启用 Prometheus exporter（:6060/metrics），供 LuCI 与外部抓取。
+
+    背景：crowdsec 包默认 prometheus.enabled=false，于是 cscli metrics 报
+      dial tcp 127.0.0.1:6060: connect: connection refused
+    这不是故障，但 LuCI 拿不到指标。编译期直接打开，避免刷机后才发现。
+
+    listen_address 必须是 0.0.0.0 不能用 127.0.0.1：
+      bouncer 与 LuCI 跑在宿主，从 10.0.0.1 访问容器的 10.0.0.10:6060，
+      容器里只听回环地址的话宿主永远连不上。
+
+    整段改写而非逐行打补丁：prometheus 段各版本差异大（有的整段注释、
+    有的 key 名不同），逐行匹配容易静默失配。整段替换后用 YAML 复验兜底。
+    """
+    lines = read(path).split("\n")
+    block = [
+        "prometheus:",
+        "  enabled: true",
+        "  level: full",
+        "  listen_address: %s" % listen_addr,
+        "  listen_port: %d" % port,
+    ]
+
+    rng = _prom_block_range(lines)
+    if rng is None:
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines += [""] + block
+    else:
+        start, end = rng
+        lines[start:end] = block
+
+    write(path, "\n".join(lines))
+
+    try:
+        import yaml
+        data = yaml.safe_load(read(path)) or {}
+        prom = data.get("prometheus") or {}
+        if prom.get("enabled") is not True:
+            log("!! prometheus 写入后仍未启用，请人工检查")
+            return False
+        log("prometheus 已启用：%s:%s" % (prom.get("listen_address"),
+                                         prom.get("listen_port")))
+    except ImportError:
+        log("prometheus 已写入（无 PyYAML，跳过复验）")
+    return True
+
+
 def main():
     if len(sys.argv) != 4:
         print("用法: %s <config.yaml> <bridge_ip> <container_net>" % sys.argv[0],
@@ -306,6 +371,12 @@ def main():
         log("!! listen_uri 修改后校验不通过（当前 %r），abort" % _verify)
         return 1
     log("listen_uri 复验通过：%s" % _verify)
+
+    # 打开 Prometheus exporter（可选项，失败只警告）
+    try:
+        patch_prometheus(path, "0.0.0.0", 6060)
+    except Exception as exc:                       # noqa: BLE001
+        log("启用 prometheus 时出错（%s），跳过（不影响 bouncer 认证）" % exc)
 
     # 再处理 trusted_ips（保险项，失败只警告）
     probed = patch_with_pyyaml(path, bridge_ip, cnet)

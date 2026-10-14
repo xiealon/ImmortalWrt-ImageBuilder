@@ -182,21 +182,11 @@ uci commit system
 echo "系统日志外发至 ${CS_CT_IP}:514" >>$LOGFILE
 
 CS_HOME='/etc/crowdsec'
-CS_TARBALL="$CS_HOME/lxc-ubuntu.tar.gz"
-CS_ROOTFS='/srv/lxc/ubuntu/rootfs'
-if [ ! -f "$CS_TARBALL" ] && [ -f /opt/lxc-ubuntu.tar.gz ]; then
+if [ -d "$CS_HOME" ] || [ -f "$CS_HOME/lxc-ubuntu.tar.gz" ] || [ -d /srv/lxc/ubuntu/rootfs ]; then
     mkdir -p "$CS_HOME" 2>/dev/null
-    mv -f /opt/lxc-ubuntu.tar.gz "$CS_TARBALL" 2>/dev/null \
-        && echo "容器镜像已迁移到 $CS_TARBALL" >>$LOGFILE
-fi
-if [ -d "$CS_HOME" ] || [ -f "$CS_TARBALL" ] || [ -d "$CS_ROOTFS" ]; then
-    mkdir -p "$CS_HOME" 2>/dev/null
-    echo "CrowdSec 工作目录 $CS_HOME（镜像 $CS_TARBALL，备份 $CS_HOME/baseline）" >>$LOGFILE
     grep -q "^${CS_HOME}/baseline" /etc/sysupgrade.conf 2>/dev/null \
         || echo "${CS_HOME}/baseline" >> /etc/sysupgrade.conf 2>/dev/null
 fi
-
-echo "CrowdSec 引导已就绪（rc.local → crowdsec-lxc-bootstrap.sh）" >>$LOGFILE
 
 if [ -d /aria2 ] && [ -f /etc/config/aria2 ]; then
     uci set aria2.main.dir='/aria2'

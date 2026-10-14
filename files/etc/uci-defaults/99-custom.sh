@@ -50,10 +50,7 @@ echo "最终网络配置: IP=${BPS_IP}/${NETMASK} 网关=${BPS_GW} DNS=${BPS_DN}
 
 CS_CT_IP="$(_read_netconf custom_container_ip.txt)"
 [ -n "$CS_CT_IP" ] || CS_CT_IP='10.0.0.10'
-CS_BRIDGE_IP="$(_read_netconf custom_bridge_ip.txt)"
-[ -n "$CS_BRIDGE_IP" ] || CS_BRIDGE_IP='10.0.0.1'
-LSC_IP="$(echo "$CS_CT_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')"
-echo "容器网络: IP=${CS_CT_IP} 网关/DNS=${CS_BRIDGE_IP} 掩码=255.255.255.0 NAT=${LSC_IP}" >>$LOGFILE
+echo "容器网络: IP=${CS_CT_IP}（网桥/接口由开机引导脚本创建）" >>$LOGFILE
 
 
 uci set network.wan.disabled='1'
@@ -67,45 +64,6 @@ uci set network.br_lan.name='br-lan'
 uci set network.br_lan.type='bridge'
 uci set network.br_lan.bridge_empty='1'
 
-uci set network.lxcbr0=device
-uci set network.lxcbr0.name='lxcbr0'
-uci set network.lxcbr0.type='bridge'
-uci set network.lxcbr0.bridge_empty='1'
-uci set network.lxc=interface
-uci set network.lxc.device='lxcbr0'
-uci set network.lxc.proto='static'
-uci set network.lxc.ipaddr="${CS_BRIDGE_IP}"
-uci set network.lxc.netmask='255.255.255.0'
-uci set dhcp.lxc=dhcp
-uci set dhcp.lxc.interface='lxc'
-uci set dhcp.lxc.start='100'
-uci set dhcp.lxc.limit='150'
-uci set dhcp.lxc.leasetime='1h'
-uci set firewall.lxczone=zone
-uci set firewall.lxczone.name='lxc'
-uci set firewall.lxczone.network='lxc'
-uci set firewall.lxczone.input='ACCEPT'
-uci set firewall.lxczone.output='ACCEPT'
-uci set firewall.lxczone.forward='ACCEPT'
-uci set firewall.lxc2lan=forwarding
-uci set firewall.lxc2lan.src='lxc'
-uci set firewall.lxc2lan.dest='lan'
-uci set firewall.lxc2docker=forwarding
-uci set firewall.lxc2docker.src='lxc'
-uci set firewall.lxc2docker.dest='docker'
-uci set firewall.lxc2vpn=forwarding
-uci set firewall.lxc2vpn.src='lxc'
-uci set firewall.lxc2vpn.dest='vpn'
-uci set firewall.lan2lxc=forwarding
-uci set firewall.lan2lxc.src='lan'
-uci set firewall.lan2lxc.dest='lxc'
-uci set firewall.lxcsnat=nat
-uci set firewall.lxcsnat.name='lxc-snat'
-uci add_list firewall.lxcsnat.proto='all'
-uci set firewall.lxcsnat.src='lan'
-uci set firewall.lxcsnat.src_ip="${LSC_IP}"
-uci set firewall.lxcsnat.target='SNAT'
-uci set firewall.lxcsnat.snat_ip="${BPS_IP}"
 uci commit
 
 uci -q del network.br_lan.ports

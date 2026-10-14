@@ -48,10 +48,6 @@ _UDN=$(_read_netconf custom_router_dns.txt)
 
 echo "最终网络配置: IP=${BPS_IP}/${NETMASK} 网关=${BPS_GW} DNS=${BPS_DN}" >>$LOGFILE
 
-CS_CT_IP="$(_read_netconf custom_container_ip.txt)"
-[ -n "$CS_CT_IP" ] || CS_CT_IP='10.0.0.10'
-echo "容器网络: IP=${CS_CT_IP}（网桥/接口由开机引导脚本创建）" >>$LOGFILE
-
 
 uci set network.wan.disabled='1'
 uci set network.wan6.disabled='1'
@@ -162,30 +158,13 @@ else
     echo "未检测到 Docker，跳过防火墙配置。"
 fi
 
-if ! mountpoint -q /sys/fs/cgroup 2>/dev/null; then
-    mkdir -p /sys/fs/cgroup
-    if mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null; then
-        echo "cgroup2 已挂载到 /sys/fs/cgroup" >>$LOGFILE
-    else
-        echo "cgroup2 挂载失败（可能内核已挂载或不支持）" >>$LOGFILE
-    fi
-else
-    echo "cgroup 已挂载，跳过" >>$LOGFILE
-fi
-
-uci set system.@system[0].log_ip="${CS_CT_IP}"
-uci set system.@system[0].log_port='514'
-uci set system.@system[0].log_proto='udp'
-uci -q set system.@system[0].log_remote='1'
-uci -q set system.@system[0].cronloglevel='5'
-uci commit system
-echo "系统日志外发至 ${CS_CT_IP}:514" >>$LOGFILE
-
 CS_HOME='/etc/crowdsec'
 if [ -d "$CS_HOME" ] || [ -f "$CS_HOME/lxc-ubuntu.tar.gz" ] || [ -d /srv/lxc/ubuntu/rootfs ]; then
     mkdir -p "$CS_HOME" 2>/dev/null
-    grep -q "^${CS_HOME}/baseline" /etc/sysupgrade.conf 2>/dev/null \
-        || echo "${CS_HOME}/baseline" >> /etc/sysupgrade.conf 2>/dev/null
+    for _keep in "$CS_HOME/baseline" "$CS_HOME/lxc-ubuntu.tar.gz"; do
+        grep -q "^$_keep" /etc/sysupgrade.conf 2>/dev/null \
+            || echo "$_keep" >> /etc/sysupgrade.conf 2>/dev/null
+    done
 fi
 
 if [ -d /aria2 ] && [ -f /etc/config/aria2 ]; then

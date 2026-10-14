@@ -125,33 +125,26 @@ sudo mkdir -p "$R/etc/crowdsec/acquis.d" \
               "$R/etc/crowdsec/parsers/s01-parse" \
               "$R/etc/crowdsec/parsers/s02-enrich"
 
-# 5.1 LAPI 对外监听，否则路由器上的 bouncer 连不上
-sudo sed -i 's|listen_uri: 127.0.0.1:8080|listen_uri: 0.0.0.0:8080|' "$R/etc/crowdsec/config.yaml"
-# 5.2 把容器网段加进 LAPI 信任列表（保险，bouncer 实际用 api_key 认证）
-#     ⚠️ 缩进必须跟随 trusted_ips: 自身的缩进 + 2，不能写死 6 空格。
-#     CrowdSec 官方 config.yaml 里 trusted_ips: 在 2 空格、同级列表项在 4 空格；
-#     写死 6 空格会产出 YAML 解析错误（bad indentation of a sequence entry），
-#     导致容器内 crowdsec 起不来 → LAPI 永不就绪 → bouncer 的 api_key 永远为空。
-sudo awk -v bip="$BRIDGE_IP" -v cnet="$CS_NET" '
-    /^[[:space:]]*trusted_ips:[[:space:]]*$/ {
-        match($0, /^[[:space:]]*/)
-        ind = substr($0, 1, RLENGTH)
-        print
-        print ind "  - " bip
-        print ind "  - " cnet
-        next
-    }
-    { print }
-' "$R/etc/crowdsec/config.yaml" > "$WORK/config.yaml.new"
-sudo mv "$WORK/config.yaml.new" "$R/etc/crowdsec/config.yaml"
-grep -q "listen_uri: 0.0.0.0:8080" "$R/etc/crowdsec/config.yaml" \
-    || { echo "!! listen_uri 修改失败，检查 crowdsec 版本"; exit 1; }
-grep -qE "^[[:space:]]+- ${BRIDGE_IP//./\\.}$" "$R/etc/crowdsec/config.yaml" \
-    || { echo "!! trusted_ips 未插入 $BRIDGE_IP，abort"; exit 1; }
-# 关键校验：YAML 必须能被解析，否则打出去的包在容器里根本起不来
-sudo python3 -c "import yaml,sys; yaml.safe_load(open('$R/etc/crowdsec/config.yaml'))" \
-    || { echo "!! config.yaml 语法被改坏（缩进错误？），abort"; exit 1; }
-echo "==> config.yaml 校验通过（listen_uri + trusted_ips + YAML 语法）"
+# 5.1 + 5.2  改 config.yaml：LAPI 对外监听 + trusted_ips 白名单
+#     ⚠️ 这两件事都交给 Python 脚本做，绝不能用 awk/sed 盲改 YAML：
+#       - trusted_ips: 的缩进在不同 crowdsec 版本里不一样（master 是 4 空格 key + 6 空格列表项，
+#         旧版是 2+4），写死缩进会产出 "bad indentation of a sequence entry"
+#         → 容器内 crowdsec 起不来 → LAPI 永不就绪 → bouncer 的 api_key 永远为空
+#       - 某些版本的 config.yaml 里 trusted_ips 整段被注释掉，正则根本匹配不到，
+#         awk 会静默什么都不做 → 构建"成功"但打出一个 LAPI 绑死 127.0.0.1 的包
+#       - sed 的反向引用在 GNU/BSD 之间语法不一致（\g<1> 只有部分实现支持），
+#         写错会把整行替换成字面量
+#     所以统一用 shell/_patch-crowdsec-config.py：解析 → 改 → 重新解析验证。
+#     分级明确：listen_uri 改不动 → 退出码 1（真致命）；trusted_ips 处理不了 → 只警告
+#     （bouncer 走 api_key 认证，trusted_ips 是保险不是必需，不该让整个构建失败）。
+CS_CFG="$R/etc/crowdsec/config.yaml"
+sudo python3 "$REPO_ROOT/shell/_patch-crowdsec-config.py" "$CS_CFG" "$BRIDGE_IP" "$CS_NET" \
+    || { echo "!! config.yaml 处理失败（listen_uri 未改成 0.0.0.0），abort"; exit 1; }
+
+# 兜底复验：YAML 必须能解析
+sudo python3 -c "import yaml; yaml.safe_load(open('$CS_CFG'))" \
+    || { echo "!! config.yaml 语法被改坏，abort"; exit 1; }
+echo "==> config.yaml 校验通过（listen_uri=0.0.0.0 + YAML 语法）"
 
 # 5.3 日志源：UDP 514 收路由器 syslog
 sudo tee "$R/etc/crowdsec/acquis.d/router.yaml" >/dev/null <<'EOF'

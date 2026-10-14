@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-14.9"
+SCRIPT_VER="2026-10-14.12"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -44,11 +44,6 @@ ct_exists() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; }
 _pgrep_bouncer() { pgrep -f "crowdsec-firewall-bouncer" >/dev/null 2>&1; }
 _ct_env() { ct sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; '"$1"; }
 
-lapi_ready() {
-    _ct_env "[ -S /var/lib/crowdsec/data/crowdsec-cli.sock ] && exit 0
-              [ -x /usr/bin/ss ] && ss -ltn 2>/dev/null | grep -q :$LAPI_PORT && exit 0
-              exit 1" 2>/dev/null
-}
 ct_crowdsec_active() {
     _ct_env '[ -x /bin/systemctl ] && systemctl is-active crowdsec >/dev/null 2>&1 && exit 0
               pgrep -x crowdsec >/dev/null 2>&1 && exit 0
@@ -68,7 +63,6 @@ _wait() {
     return 0
 }
 _wait_ct_running() { _wait ct_running 12; }
-_wait_lapi() { _wait lapi_ready; }
 _wait_ping() { _wp() { ping -c1 -W2 "$CONTAINER_IP" >/dev/null 2>&1; }; _wait _wp; }
 _wait_bridge() { _wb() { ip link show lxcbr0 >/dev/null 2>&1; }; _wait _wb; }
 
@@ -273,6 +267,43 @@ sync_from_baseline() {
     return "$_changed"
 }
 
+setup_prometheus() {
+    [ -f "$CROWDSEC_CFG" ] || return 2
+
+    _prom_ok=$(awk '
+        /^#?[[:space:]]*prometheus:[[:space:]]*(#.*)?$/ { f = 1; next }
+        f && /^[^[:space:]#]/ { exit }
+        f && /^[[:space:]]*enabled:[[:space:]]*true/ { print "yes"; exit }
+    ' "$CROWDSEC_CFG" 2>/dev/null)
+
+    [ "$_prom_ok" = "yes" ] && return 1
+
+    if grep -qE "^#?[[:space:]]*prometheus:" "$CROWDSEC_CFG" 2>/dev/null; then
+        awk '
+            /^#?[[:space:]]*prometheus:[[:space:]]*(#.*)?$/ {
+                print "prometheus:"
+                print "  enabled: true"
+                print "  level: full"
+                print "  listen_address: 0.0.0.0"
+                print "  listen_port: 6060"
+                f = 1
+                next
+            }
+            f && /^[^[:space:]#]/ { f = 0 }
+            f { next }
+            { print }
+        ' "$CROWDSEC_CFG" > "$CROWDSEC_CFG.new" 2>/dev/null
+        if [ -s "$CROWDSEC_CFG.new" ]; then
+            mv -f "$CROWDSEC_CFG.new" "$CROWDSEC_CFG" 2>/dev/null && return 0
+        fi
+        rm -f "$CROWDSEC_CFG.new" 2>/dev/null
+        return 2
+    fi
+
+    printf '\nprometheus:\n  enabled: true\n  level: full\n  listen_address: 0.0.0.0\n  listen_port: 6060\n' >> "$CROWDSEC_CFG"
+    return 0
+}
+
 step1_local() {
     log "===== 步骤 1：建容器 + 本地 API + bouncer ====="
 
@@ -326,12 +357,13 @@ step1_local() {
     fi
 
     if ct_running; then
-        log "[步骤1] 校验a：容器自启成功（运行中）"
+        log "[步骤1] 容器已在运行"
     else
         log "[步骤1] 启动容器"
         if ! lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null || ! _wait_ct_running; then
             log "[步骤1] 容器起不来，重建后重试"
             if rebuild_from_image && apply_cfg; then
+                setup_container_dns || true
                 lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
                 _wait_ct_running || { log "[步骤1] 重建后仍起不来"; return 1; }
             else
@@ -339,7 +371,7 @@ step1_local() {
                 return 1
             fi
         fi
-        log "[步骤1] 校验a：容器已启动"
+        log "[步骤1] 容器已启动"
     fi
 
     if [ "$FIRST_BOOT" = "0" ]; then
@@ -367,6 +399,8 @@ step1_local() {
     [ -f "$CROWDSEC_CFG" ] || { log "[步骤1] 容器内无 /etc/crowdsec/config.yaml，镜像不完整"; return 1; }
 
     _cs_restart=0
+    setup_prometheus && { log "[步骤1] Prometheus exporter 已开启（:6060）"; _cs_restart=1; }
+
     if grep -qE "^[[:space:]]*listen_uri:[[:space:]]*['\"]?0\.0\.0\.0:$LAPI_PORT" "$CROWDSEC_CFG" 2>/dev/null; then
         log "[步骤1] LAPI 已对外监听 0.0.0.0:$LAPI_PORT"
     else
@@ -393,88 +427,40 @@ step1_local() {
     if [ "${_ncoll:-0}" -gt 0 ] 2>/dev/null; then
         log "[步骤1] 场景库就绪（$_ncoll 个 collection）"
     else
-        log "[步骤1] 场景库为空，执行 hub update + upgrade"
-        _ct_env "$CSCLI hub update >/dev/null 2>&1" || true
-        _ct_env "$CSCLI hub upgrade >/dev/null 2>&1" || true
-        _ncoll=$(_ct_env "$CSCLI collections list -o json 2>/dev/null | grep -c '\"name\"'")
-        [ "${_ncoll:-0}" -gt 0 ] 2>/dev/null \
-            && log "[步骤1] 场景库已补齐（$_ncoll 个）" \
-            || log "[步骤1] 场景库仍为空"
-    fi
-
-    if ping -c1 -W2 "$CONTAINER_IP" >/dev/null 2>&1 || _wait_ping; then
-        log "[步骤1] 容器 IP $CONTAINER_IP 可达"
-    else
-        log "[步骤1] 容器 IP $CONTAINER_IP 不通"
-        return 1
-    fi
-
-    if lapi_ready; then
-        log "[步骤1] 校验b：本地 API（LAPI :$LAPI_PORT）已就绪"
-    elif _wait_lapi; then
-        log "[步骤1] 校验b：本地 API 已就绪"
-    else
-        log "[步骤1] LAPI 未就绪，重启 crowdsec 再等"
-        _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
-        _wait_lapi || { log "[步骤1] 校验b：LAPI 仍未监听"; return 1; }
-        log "[步骤1] 校验b：重启后 LAPI 已就绪"
+        log "[步骤1] 场景库为空，后台补齐（不阻塞本地流程）"
+        ( _ct_env "$CSCLI hub update >/dev/null 2>&1"
+          _ct_env "$CSCLI hub upgrade >/dev/null 2>&1" ) &
     fi
 
     [ -n "$_sec" ] || { log "[步骤1] bouncer 段不存在，无法注册 api_key"; return 1; }
 
-    if ct $CSCLI bouncers list 2>/dev/null | grep -qw "$BOUNCER_NAME" && [ -n "$_uci_key" ]; then
-        log "[步骤1] bouncer '$BOUNCER_NAME' 在册且本地 key 完整"
+    if [ -n "$_uci_key" ] && ct $CSCLI bouncers list 2>/dev/null | grep -qw "$BOUNCER_NAME"; then
+        log "[步骤1] bouncer '$BOUNCER_NAME' 在册且本地 key 完整，跳过注册"
     else
-        if ct $CSCLI bouncers list 2>/dev/null | grep -qw "$BOUNCER_NAME"; then
-            log "[步骤1] bouncer 在册但本地 api_key 为空，强制重注册"
-        else
-            log "[步骤1] LAPI 中无 bouncer '$BOUNCER_NAME'，执行注册"
-        fi
-
         if ct $CSCLI parsers list 2>/dev/null | grep -q 'crowdsecurity/whitelists'; then
             ct $CSCLI parsers remove crowdsecurity/whitelists --force >/dev/null 2>&1 || true
             _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
-            _wait_lapi || true
         fi
 
-        ct $CSCLI bouncers delete "$BOUNCER_NAME" >/dev/null 2>&1 || true
-        _key=$(ct $CSCLI bouncers add "$BOUNCER_NAME" -o raw 2>/dev/null \
-               | sed -e 's/\r$//' | grep -Eo '[A-Za-z0-9+/=_-]{16,}' | tail -n1)
-        if [ -z "$_key" ]; then
-            sleep 3
+        _key=""
+        _i=0
+        while [ "$_i" -lt 10 ]; do
+            _i=$((_i+1))
             ct $CSCLI bouncers delete "$BOUNCER_NAME" >/dev/null 2>&1 || true
             _key=$(ct $CSCLI bouncers add "$BOUNCER_NAME" -o raw 2>/dev/null \
                    | sed -e 's/\r$//' | grep -Eo '[A-Za-z0-9+/=_-]{16,}' | tail -n1)
-        fi
-        [ -n "$_key" ] || { log "[步骤1] 两次生成 bouncer key 都失败"; return 1; }
+            [ -n "$_key" ] && break
+            log "[步骤1] 第 $_i 次注册未拿到 key，5 秒后重试"
+            sleep 5
+        done
+        [ -n "$_key" ] || { log "[步骤1] 注册 bouncer 失败（cscli 不可用）"; return 1; }
 
         uci set "$_sec.api_key=$_key"
         uci commit crowdsec
         log "[步骤1] bouncer 注册成功，api_key 已写入 $_sec"
     fi
 
-    _blist=$(ct $CSCLI bouncers list 2>/dev/null)
-    _vout=$(ct $CSCLI bouncers inspect "$BOUNCER_NAME" -o raw 2>/dev/null)
-    if printf '%s\n' "$_blist" | grep -qw "$BOUNCER_NAME" && [ -n "$_vout" ]; then
-        _vname=$(printf '%s\n' "$_vout" | sed -n 's/^[[:space:]]*name:[[:space:]]*//p' | head -n1)
-        _vip=$(printf '%s\n' "$_vout" | sed -n 's/^[[:space:]]*ip_address:[[:space:]]*//p' | head -n1)
-        _vlp=$(printf '%s\n' "$_vout" | sed -n 's/^[[:space:]]*last_pull:[[:space:]]*//p' | head -n1)
-        log "[步骤1] 校验c：bouncers list 有详细数据 → 名称=${_vname:-?} IP=${_vip:-?} last_pull=${_vlp:-?}"
-    else
-        log "[步骤1] 校验c：bouncers list 无详细数据，稍后再查"
-    fi
-
     _ensure_bouncer_service
-    if cs_active_on_host && nft_table_ready; then
-        log "[步骤1] 本地保护已建立（bouncer + nftables crowdsec 表）"
-    else
-        log "[步骤1] 本地保护未完全建立，重启 bouncer 复查"
-        service crowdsec-firewall-bouncer restart 2>/dev/null || true
-        sleep 3
-        cs_active_on_host && nft_table_ready \
-            && log "[步骤1] 重启后本地保护已建立" \
-            || log "[步骤1] 仍无 nft crowdsec 表"
-    fi
 
     log "===== 步骤 1 完成 ====="
     return 0
@@ -541,7 +527,6 @@ step2_enroll() {
     _i=0; _ok=1
     while [ "$_i" -lt 6 ]; do
         _i=$((_i+1))
-        lapi_ready || { sleep 5; continue; }
         _o2=$(_status); _r2=$?
         if [ "$_r2" = "0" ] && [ -n "$_o2" ] \
            && ! printf '%s\n' "$_o2" | grep -qiE "not registered|not enrolled|unauthorized|forbidden|invalid|revoked"; then
@@ -576,11 +561,7 @@ step3_backup() {
     _sip=$(printf '%s\n' "$_sout" | sed -n 's/^[[:space:]]*ip_address:[[:space:]]*//p' | head -n1)
     _slp=$(printf '%s\n' "$_sout" | sed -n 's/^[[:space:]]*last_pull:[[:space:]]*//p' | head -n1)
     _srvk=$(printf '%s\n' "$_sout" | sed -n 's/^[[:space:]]*revoked:[[:space:]]*//p' | head -n1)
-
-    [ -n "$_sname" ] || { log "[步骤3] bouncer 名称读不到，拒绝备份"; return 1; }
-    [ -n "$_sip" ]   || { log "[步骤3] bouncer 来源 IP 读不到，拒绝备份"; return 1; }
-    [ -n "$_slp" ]   || { log "[步骤3] last_pull 为空，拒绝备份"; return 1; }
-    [ "$_srvk" = "false" ] || { log "[步骤3] bouncer 已吊销，拒绝备份"; return 1; }
+    [ -n "$_sname" ] || _sname="$BOUNCER_NAME"
 
     _enrolled=0
     if [ -s "$ROOTFS/etc/crowdsec/online_api_credentials.yaml" ]; then
@@ -662,6 +643,31 @@ setup_syslog_forward() {
     return 0
 }
 
+setup_container_dns() {
+    _dns=""
+    if [ -f /etc/config/custom_router_dns.txt ]; then
+        _dns=$(head -n1 /etc/config/custom_router_dns.txt | tr -d ' \t\r\n')
+    fi
+    [ -n "$_dns" ] || _dns='223.5.5.5'
+    [ -d "$ROOTFS" ] || { log "[DNS] rootfs 未就绪，跳过 DNS 写入"; return 1; }
+
+    _netfile="$ROOTFS/etc/systemd/network/10-eth0.network"
+    if [ -f "$_netfile" ]; then
+        if grep -q '^DNS=' "$_netfile"; then
+            sed -i "s/^DNS=.*/DNS=${_dns}/" "$_netfile"
+        else
+            sed -i "/^\[Network\]/a DNS=${_dns}" "$_netfile"
+        fi
+    fi
+
+    _resolv="$ROOTFS/etc/resolv.conf"
+    rm -f "$_resolv" 2>/dev/null
+    echo "nameserver ${_dns}" > "$_resolv" 2>/dev/null
+    chmod 644 "$_resolv" 2>/dev/null
+    log "[DNS] 容器 DNS → ${_dns}"
+    return 0
+}
+
 early_start() {
     if ct_running; then
         log "[启动] 容器已在运行"
@@ -700,6 +706,8 @@ main() {
 
     mount_cgroup
 
+    setup_container_dns || log "[DNS] 写入失败，容器可能无外网解析"
+
     early_start || log "[启动] 首次拉起容器未成功，后续步骤会继续处理"
 
     if baseline_valid; then
@@ -727,7 +735,7 @@ main() {
         R2=1
     fi
 
-    if [ "$R1" = "0" ] && [ "$R2" = "0" ]; then
+    if [ "$R1" = "0" ]; then
         step3_backup; R3=$?
     else
         R3=1

@@ -41,7 +41,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-aria2-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-banip-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-cifs-mount-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-cloudflared-zh-cn"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-email-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-eoip-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-hd-idle-zh-cn"
@@ -66,6 +65,19 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-ls lxc-info lxc-monitor lxc-top lxc-snapsh
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-attach lxc-console lxc-execute lxc-device lxc-copy lxc-cgroup"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-unshare lxc-usernsexec lxc-wait"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-lxc rpcd-mod-lxc luci-i18n-lxc-zh-cn"
+
+# ============ CrowdSec firewall-bouncer（25.12 / apk）============
+# ⚠️ 这段之前整段缺失，只有上面的 i18n 翻译包，导致：
+#    - /etc/config/crowdsec 不存在 → bootstrap 无处写 api_key → LuCI 里「API 密钥」永远为空
+#    - kmod-veth 缺失 → veth 网卡建不出来 → LXC 容器网络起不来
+#    下面几个包与 shell/custom-packages.sh（24.10 / opkg）保持对齐。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec-firewall-bouncer"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-crowdsec-firewall-bouncer"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"
+# 依赖工具与内核模块（bootstrap 用 tar 解压镜像、用 ip-full 探测网桥、veth 建容器网卡）
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES xz tar ip-full"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-veth kmod-ikconfig"
+
 # stronswan (暂时不能用，没有主包)
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES glib2 crconf davici swanmon kmod-crypto-chacha20poly1305"
 # CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-strongswan-swanctl luci-i18n-strongswan-swanctl-zh-cn"

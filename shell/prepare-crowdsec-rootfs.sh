@@ -14,7 +14,7 @@
 #   x86-64 squashfs 固件的 / 是只读层 + overlay 可写层。把容器 rootfs 放在只读层，
 #   systemd 启动时会踩 overlayfs 的 copy-up / capability 坑。落在可写层最稳。
 #
-# 产物：files/opt/lxc-ubuntu.tar.gz
+# 产物：files/etc/crowdsec/lxc-ubuntu.tar.gz（CS_HOME，与 99-custom.sh / bootstrap 对齐）
 # =============================================================================
 set -euo pipefail
 
@@ -23,11 +23,15 @@ CONTAINER_IP="${CONTAINER_IP:-10.0.0.10}"   # 容器固定 IP，要和 99-custom
 BRIDGE_IP="${BRIDGE_IP:-10.0.0.1}"          # lxcbr0 网桥 IP，同时是容器网关/DNS
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${OUT_DIR:-$REPO_ROOT/files/opt}"
+# 归拢到 files/etc/crowdsec/ —— 与 99-custom.sh、bootstrap 脚本里的 CS_HOME 保持一致
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/files/etc/crowdsec}"
 WORK="${WORK:-/tmp/lxc-ubuntu-build}"
 R="$WORK/rootfs"
 
-echo "==> 目标容器 IP=${CONTAINER_IP}  网桥 IP=${BRIDGE_IP}"
+# 容器网段（trusted_ips 白名单要用，不能写死 10.0.0.0/24 —— 用户可在 Actions 改容器 IP）
+CS_NET="$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')"
+
+echo "==> 目标容器 IP=${CONTAINER_IP}  网桥 IP=${BRIDGE_IP}  容器网段=${CS_NET}"
 
 # ---------- 1. 下载并展开 ubuntu-base ----------
 rm -rf "$WORK"
@@ -124,14 +128,30 @@ sudo mkdir -p "$R/etc/crowdsec/acquis.d" \
 # 5.1 LAPI 对外监听，否则路由器上的 bouncer 连不上
 sudo sed -i 's|listen_uri: 127.0.0.1:8080|listen_uri: 0.0.0.0:8080|' "$R/etc/crowdsec/config.yaml"
 # 5.2 把容器网段加进 LAPI 信任列表（保险，bouncer 实际用 api_key 认证）
-#     用 awk 而不是 sed 'a\text'：sed 的 a 命令对前导空格/转义换行处理不一致
-sudo awk '
-    /^[[:space:]]*trusted_ips:/ { print; print "      - '${BRIDGE_IP}'"; print "      - 10.0.0.0/24"; next }
+#     ⚠️ 缩进必须跟随 trusted_ips: 自身的缩进 + 2，不能写死 6 空格。
+#     CrowdSec 官方 config.yaml 里 trusted_ips: 在 2 空格、同级列表项在 4 空格；
+#     写死 6 空格会产出 YAML 解析错误（bad indentation of a sequence entry），
+#     导致容器内 crowdsec 起不来 → LAPI 永不就绪 → bouncer 的 api_key 永远为空。
+sudo awk -v bip="$BRIDGE_IP" -v cnet="$CS_NET" '
+    /^[[:space:]]*trusted_ips:[[:space:]]*$/ {
+        match($0, /^[[:space:]]*/)
+        ind = substr($0, 1, RLENGTH)
+        print
+        print ind "  - " bip
+        print ind "  - " cnet
+        next
+    }
     { print }
 ' "$R/etc/crowdsec/config.yaml" > "$WORK/config.yaml.new"
 sudo mv "$WORK/config.yaml.new" "$R/etc/crowdsec/config.yaml"
 grep -q "listen_uri: 0.0.0.0:8080" "$R/etc/crowdsec/config.yaml" \
     || { echo "!! listen_uri 修改失败，检查 crowdsec 版本"; exit 1; }
+grep -qE "^[[:space:]]+- ${BRIDGE_IP//./\\.}$" "$R/etc/crowdsec/config.yaml" \
+    || { echo "!! trusted_ips 未插入 $BRIDGE_IP，abort"; exit 1; }
+# 关键校验：YAML 必须能被解析，否则打出去的包在容器里根本起不来
+sudo python3 -c "import yaml,sys; yaml.safe_load(open('$R/etc/crowdsec/config.yaml'))" \
+    || { echo "!! config.yaml 语法被改坏（缩进错误？），abort"; exit 1; }
+echo "==> config.yaml 校验通过（listen_uri + trusted_ips + YAML 语法）"
 
 # 5.3 日志源：UDP 514 收路由器 syslog
 sudo tee "$R/etc/crowdsec/acquis.d/router.yaml" >/dev/null <<'EOF'

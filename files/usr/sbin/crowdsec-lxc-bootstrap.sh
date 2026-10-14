@@ -298,6 +298,33 @@ step1_local() {
 
     setup_bridge
 
+    _api_url_want="http://${CONTAINER_IP}:${LAPI_PORT}/"
+    _sec=""
+    _uci_key=""
+    if [ -f /etc/config/crowdsec ]; then
+        _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+        if [ -z "$_sec" ]; then
+            uci add crowdsec bouncer >/dev/null 2>&1
+            _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+        fi
+        if [ -n "$_sec" ]; then
+            _uci_key="$(uci -q get "$_sec.api_key" 2>/dev/null)"
+            uci set "$_sec.enabled=1"
+            uci set "$_sec.api_url=$_api_url_want"
+            uci set "$_sec.ipv4=1"
+            uci set "$_sec.ipv6=0"
+            uci set "$_sec.deny_action=drop"
+            uci set "$_sec.filter_input=1"
+            uci set "$_sec.filter_forward=1"
+            uci -q del "$_sec.interface"
+            uci add_list "$_sec.interface=br-lan"
+            uci commit crowdsec
+            log "[步骤1] bouncer 段已预填（api_url=$_api_url_want）"
+        fi
+    else
+        log "[步骤1] /etc/config/crowdsec 不存在，bouncer 包未装进固件"
+    fi
+
     if ct_running; then
         log "[步骤1] 校验a：容器自启成功（运行中）"
     else
@@ -393,29 +420,7 @@ step1_local() {
         log "[步骤1] 校验b：重启后 LAPI 已就绪"
     fi
 
-    [ -f /etc/config/crowdsec ] || { log "[步骤1] /etc/config/crowdsec 不存在，bouncer 包未装进固件"; return 1; }
-
-    _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
-    if [ -z "$_sec" ]; then
-        uci add crowdsec bouncer >/dev/null 2>&1
-        _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
-    fi
-    [ -n "$_sec" ] || { log "[步骤1] 无法创建 bouncer 配置段"; return 1; }
-
-    _uci_key="$(uci -q get "$_sec.api_key" 2>/dev/null)"
-    _api_url_want="http://${CONTAINER_IP}:${LAPI_PORT}/"
-
-    uci set "$_sec.enabled=1"
-    uci set "$_sec.api_url=$_api_url_want"
-    uci set "$_sec.ipv4=1"
-    uci set "$_sec.ipv6=0"
-    uci set "$_sec.deny_action=drop"
-    uci set "$_sec.filter_input=1"
-    uci set "$_sec.filter_forward=1"
-    uci -q del "$_sec.interface"
-    uci add_list "$_sec.interface=br-lan"
-    uci commit crowdsec
-    log "[步骤1] bouncer 段已预填（api_url=$_api_url_want）"
+    [ -n "$_sec" ] || { log "[步骤1] bouncer 段不存在，无法注册 api_key"; return 1; }
 
     if ct $CSCLI bouncers list 2>/dev/null | grep -qw "$BOUNCER_NAME" && [ -n "$_uci_key" ]; then
         log "[步骤1] bouncer '$BOUNCER_NAME' 在册且本地 key 完整"
@@ -631,6 +636,60 @@ EOF
     return 0
 }
 
+mount_cgroup() {
+    if mountpoint -q /sys/fs/cgroup 2>/dev/null; then
+        log "[准备] cgroup 已挂载"
+        return 0
+    fi
+    mkdir -p /sys/fs/cgroup
+    if mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null; then
+        log "[准备] cgroup2 已挂载"
+    else
+        log "[准备] cgroup2 挂载失败（可能内核已挂载或不支持）"
+    fi
+    return 0
+}
+
+setup_syslog_forward() {
+    [ -n "$CONTAINER_IP" ] || return 0
+    uci set system.@system[0].log_ip="${CONTAINER_IP}"
+    uci set system.@system[0].log_port='514'
+    uci set system.@system[0].log_proto='udp'
+    uci -q set system.@system[0].log_remote='1'
+    uci -q set system.@system[0].cronloglevel='5'
+    uci commit system
+    log "[准备] 系统日志外发至 ${CONTAINER_IP}:514"
+    return 0
+}
+
+early_start() {
+    if ct_running; then
+        log "[启动] 容器已在运行"
+        return 0
+    fi
+    [ -f "$CROWDSEC_CFG" ] || { log "[启动] rootfs 未就绪，暂不启动"; return 1; }
+    setup_bridge
+    if ! apply_cfg; then
+        log "[启动] config 无法解析，暂不启动"
+        return 1
+    fi
+    lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null || { log "[启动] 启动命令失败"; return 1; }
+    if _wait_ct_running; then
+        log "[启动] 容器已提前启动"
+        return 0
+    fi
+    log "[启动] 提前启动超时"
+    return 1
+}
+
+baseline_valid() {
+    [ -f "$STATE_FILE" ] || return 1
+    [ -d "$SNAP_ETC" ] || return 1
+    grep -q '^BOUNCER_NAME=' "$STATE_FILE" 2>/dev/null || return 1
+    grep -q '^API_URL=' "$STATE_FILE" 2>/dev/null || return 1
+    return 0
+}
+
 main() {
     log "===== crowdsec-lxc-bootstrap v$SCRIPT_VER 开始（容器 $LXC_NAME）====="
 
@@ -639,23 +698,36 @@ main() {
             && log "镜像已从 $LEGACY_TARBALL 迁移到 $TARBALL"
     fi
 
-    if [ -f "$STATE_FILE" ] && [ -d "$SNAP_ETC" ]; then
+    mount_cgroup
+
+    early_start || log "[启动] 首次拉起容器未成功，后续步骤会继续处理"
+
+    if baseline_valid; then
         FIRST_BOOT=0
-        log "检测到备份基线，进入恢复判定流程"
+        log "判定文件齐全，进入核对流程"
     else
         FIRST_BOOT=1
-        log "首次开机：无备份基线，执行完整构建"
+        log "判定文件缺失，认定为第一次开机，从头完整构建"
     fi
 
-    step1_local; R1=$?
+    R1=1
+    _step1_try=0
+    while [ "$_step1_try" -lt 3 ]; do
+        step1_local; R1=$?
+        [ "$R1" = "0" ] && break
+        _step1_try=$((_step1_try+1))
+        log "步骤1 未通过（第 $_step1_try/3 次），$SLEEP 秒后重试整个步骤1"
+        sleep $SLEEP
+    done
 
     if [ "$R1" = "0" ]; then
+        setup_syslog_forward
         step2_enroll; R2=$?
     else
         R2=1
     fi
 
-    if [ "$R1" = "0" ]; then
+    if [ "$R1" = "0" ] && [ "$R2" = "0" ]; then
         step3_backup; R3=$?
     else
         R3=1

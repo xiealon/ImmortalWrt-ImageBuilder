@@ -201,7 +201,7 @@ jobs:
           sudo env CONTAINER_IP="${CS_CT_IP:-10.0.0.10}" BRIDGE_IP="${CS_BRIDGE_IP:-10.0.0.1}" \
                bash shell/prepare-crowdsec-rootfs.sh
           echo "容器 rootfs 体积："
-          ls -lh files/opt/lxc-ubuntu.tar.gz
+          ls -lh files/etc/crowdsec/lxc-ubuntu.tar.gz
           echo "⚠️ 若下一步 make image 报空间不足，请把 profile 调到 2G 或更大"
 
       - name: Build ImmortalWrt-x86-64-efi 25.12.x

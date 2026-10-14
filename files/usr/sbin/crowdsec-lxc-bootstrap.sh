@@ -79,6 +79,13 @@ net_online() {
 }
 
 setup_bridge() {
+    _br=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
+    if ip link show lxcbr0 >/dev/null 2>&1 \
+       && [ "$(uci -q get network.lxc.proto 2>/dev/null)" = "static" ] \
+       && [ -n "$_br" ] && [ "$_br" = "$BRIDGE_IP" ]; then
+        log "[网桥] 已就绪 lxcbr0=${BRIDGE_IP}/24，跳过重建"
+        return 0
+    fi
     _lsc_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
     _lan_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
     if [ -z "$_lan_ip" ] && [ -f /etc/config/custom_router_ip.txt ]; then

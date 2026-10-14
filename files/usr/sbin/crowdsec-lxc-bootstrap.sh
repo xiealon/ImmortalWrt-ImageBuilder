@@ -91,7 +91,7 @@ setup_bridge() {
     if [ -z "$_lan_ip" ] && [ -f /etc/config/custom_router_ip.txt ]; then
         _lan_ip=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n')
     fi
-    [ -n "$_lan_ip" ] || _lan_ip='192.168.3.201'
+    [ -n "$_lan_ip" ] || _lan_ip='10.0.0..201'
 
     uci -q set network.lxcbr0=device
     uci -q set network.lxcbr0.name='lxcbr0'

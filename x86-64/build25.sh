@@ -136,6 +136,16 @@ case " $PACKAGES " in
         ;;
 esac
 
+# ============ CrowdSec 引导脚本权限位 ============
+# 这些脚本在 git index 里是 100644（非可执行），make image FILES= 会按现有权限位
+# 原样打进固件。调用方（/etc/init.d/done 的 `sh /etc/rc.local`、uci-defaults 的 source、
+# rc.local 的 `/bin/sh "$BOOT"`）都已改成不依赖可执行位，但这里再补一次 chmod，
+# 保证任何直接执行 /etc/usr/sbin 下脚本的场景也正常。
+chmod +x files/etc/rc.local \
+         files/etc/uci-defaults/99-custom.sh \
+         files/usr/sbin/crowdsec-lxc-bootstrap.sh 2>/dev/null
+echo "==> 已确保 CrowdSec 引导脚本可执行"
+
 # 构建镜像
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Building image with the following packages:"
 echo "$PACKAGES"

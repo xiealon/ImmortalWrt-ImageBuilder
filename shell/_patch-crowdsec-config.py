@@ -61,6 +61,7 @@ def write(path, text):
 # --------------------------------------------------------------------------
 LISTEN_RE = re.compile(
     r'^(?P<pre>[ \t]*listen_uri:[ \t]*)'
+    r'(?P<q>["\']?)'
     r'(?P<host>\[[^\]]*\]|[^:#\'"\s]+)'
     r':(?P<port>[0-9]+)'
     r'(?P<post>.*)$'
@@ -76,14 +77,25 @@ def patch_listen_uri(path):
             continue
         if m.group("host") == "0.0.0.0":
             continue
-        lines[i] = "%s0.0.0.0:%s%s" % (
-            m.group("pre"), m.group("port"), m.group("post"))
+        lines[i] = "%s%s0.0.0.0:%s%s" % (
+            m.group("pre"), m.group("q"), m.group("port"), m.group("post"))
         changed = True
         log("listen_uri: %s -> 0.0.0.0:%s"
             % (m.group("host"), m.group("port")))
     if changed:
         write(path, "\n".join(lines))
     return changed
+
+
+def _find_listen_uri(text):
+    """从 config.yaml 文本里提取 listen_uri 的值（去掉引号），找不到返回 None。
+
+    用纯文本正则而非 YAML 解析：不同 crowdsec 版本的字段层级可能不同
+    （顶层 api.server 或 crowdsec_service.api.server），文本正则永远命中，
+    不会因为字段层级变化而误判。
+    """
+    m = re.search(r'^[ \t]*listen_uri:[ \t]*["\']?([^"\'\s#]+)["\']?', text, re.M)
+    return m.group(1) if m else None
 
 
 # --------------------------------------------------------------------------
@@ -105,13 +117,15 @@ def patch_with_pyyaml(path, bridge_ip, cnet):
         log("config.yaml 顶层不是字典，跳过 trusted_ips 处理")
         return None
 
-    api = data.get("crowdsec_service", {}).get("api") if isinstance(
-        data.get("crowdsec_service"), dict) else None
-    if not isinstance(api, dict):
-        log("未找到 crowdsec_service.api，跳过 trusted_ips 处理（不影响 bouncer）")
+    # 真实结构是顶层 api.server.trusted_ips（不是 crowdsec_service.api）。
+    # 历史 bug：曾写成 crowdsec_service.api.server，永远取不到值。
+    _api = data.get("api") if isinstance(data.get("api"), dict) else None
+    server = _api.get("server") if isinstance(_api, dict) else None
+    if not isinstance(server, dict):
+        log("未找到 api.server，跳过 trusted_ips 处理（不影响 bouncer）")
         return None
 
-    cur = api.get("trusted_ips")
+    cur = server.get("trusted_ips")
     if cur is None:
         cur = []
     elif not isinstance(cur, list):
@@ -130,7 +144,7 @@ def patch_with_pyyaml(path, bridge_ip, cnet):
         log("trusted_ips 已含 %s / %s，无需改动" % (bridge_ip, cnet))
         return True
 
-    api["trusted_ips"] = cur
+    server["trusted_ips"] = cur
 
     # CrowdSec 的 config.yaml 带大量注释，safe_dump 会把注释全丢掉。
     # 所以这里只把改动的 trusted_ips 段落用行级方式写回（方案 B 的逻辑），
@@ -282,22 +296,16 @@ def main():
         return 2
 
     # 先修 LAPI 监听（致命项，必须成功）
-    if not patch_listen_uri(path):
-        log("未找到可修改的 listen_uri 行")
-    else:
-        # 复验：必须能解析且确实是 0.0.0.0
-        try:
-            import yaml
-            reparsed = yaml.safe_load(read(path))
-            _srv = reparsed.get("crowdsec_service", {}).get("api", {}).get("server", {})
-            if not str(_srv.get("listen_uri", "")).startswith("0.0.0.0:"):
-                log("!! listen_uri 修改后校验不通过（当前 %r）" % _srv.get("listen_uri"))
-                return 1
-        except ImportError:
-            pass                                    # 无 PyYAML，交给 shell 侧的 grep 校验
-        except Exception as exc:                   # noqa: BLE001
-            log("!! 修改 listen_uri 后 YAML 解析失败: %s" % exc)
-            return 1
+    patch_listen_uri(path)
+
+    # 复验：listen_uri 必须已经是 0.0.0.0（文本级校验，不依赖 YAML 结构）。
+    # 历史 bug：复验时用 PyYAML 取 crowdsec_service.api.server 路径，
+    #   但真实结构是顶层 api.server，永远取到 None → 把构建判死（abort）。
+    _verify = _find_listen_uri(read(path))
+    if not _verify or not _verify.startswith("0.0.0.0:"):
+        log("!! listen_uri 修改后校验不通过（当前 %r），abort" % _verify)
+        return 1
+    log("listen_uri 复验通过：%s" % _verify)
 
     # 再处理 trusted_ips（保险项，失败只警告）
     probed = patch_with_pyyaml(path, bridge_ip, cnet)

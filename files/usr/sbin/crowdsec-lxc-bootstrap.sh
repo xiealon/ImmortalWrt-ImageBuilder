@@ -84,7 +84,7 @@ setup_bridge() {
     if [ -z "$_lan_ip" ] && [ -f /etc/config/custom_router_ip.txt ]; then
         _lan_ip=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n')
     fi
-    [ -n "$_lan_ip" ] || _lan_ip='10.0.0.201'
+    [ -n "$_lan_ip" ] || _lan_ip='192.168.3.201'
 
     uci -q set network.lxcbr0=device
     uci -q set network.lxcbr0.name='lxcbr0'
@@ -396,16 +396,22 @@ step1_local() {
     [ -n "$_sec" ] || { log "[步骤1] 无法创建 bouncer 配置段"; return 1; }
 
     _uci_key="$(uci -q get "$_sec.api_key" 2>/dev/null)"
-    _uci_url="$(uci -q get "$_sec.api_url" 2>/dev/null)"
     _api_url_want="http://${CONTAINER_IP}:${LAPI_PORT}/"
+
+    uci set "$_sec.enabled=1"
+    uci set "$_sec.api_url=$_api_url_want"
+    uci set "$_sec.ipv4=1"
+    uci set "$_sec.ipv6=0"
+    uci set "$_sec.deny_action=drop"
+    uci set "$_sec.filter_input=1"
+    uci set "$_sec.filter_forward=1"
+    uci -q del "$_sec.interface"
+    uci add_list "$_sec.interface=br-lan"
+    uci commit crowdsec
+    log "[步骤1] bouncer 段已预填（api_url=$_api_url_want）"
 
     if ct $CSCLI bouncers list 2>/dev/null | grep -qw "$BOUNCER_NAME" && [ -n "$_uci_key" ]; then
         log "[步骤1] bouncer '$BOUNCER_NAME' 在册且本地 key 完整"
-        if [ "$_uci_url" != "$_api_url_want" ]; then
-            uci set "$_sec.api_url=$_api_url_want"
-            uci commit crowdsec
-            log "[步骤1] api_url 已校正为 $_api_url_want"
-        fi
     else
         if ct $CSCLI bouncers list 2>/dev/null | grep -qw "$BOUNCER_NAME"; then
             log "[步骤1] bouncer 在册但本地 api_key 为空，强制重注册"
@@ -430,16 +436,7 @@ step1_local() {
         fi
         [ -n "$_key" ] || { log "[步骤1] 两次生成 bouncer key 都失败"; return 1; }
 
-        uci set "$_sec.enabled=1"
-        uci set "$_sec.api_url=$_api_url_want"
         uci set "$_sec.api_key=$_key"
-        uci set "$_sec.ipv4=1"
-        uci set "$_sec.ipv6=0"
-        uci set "$_sec.deny_action=drop"
-        uci set "$_sec.filter_input=1"
-        uci set "$_sec.filter_forward=1"
-        uci -q del "$_sec.interface"
-        uci add_list "$_sec.interface=br-lan"
         uci commit crowdsec
         log "[步骤1] bouncer 注册成功，api_key 已写入 $_sec"
     fi

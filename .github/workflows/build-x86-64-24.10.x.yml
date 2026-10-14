@@ -31,11 +31,11 @@ on:
         required: false
         default: ""
       custom_container_ip:
-        description: "CrowdSec 容器固定 IP，留空默认 10.0.0.10（须与网桥 IP 同 /24 网段）"
+        description: "CrowdSec 容器固定 IP，留空默认 10.0.0.10（须与网桥 IP 同 /24 网段；编译期写入容器 rootfs，开机由引导脚本建网桥）"
         required: false
         default: "10.0.0.10"
       custom_bridge_ip:
-        description: "lxcbr0 网桥 IP，留空默认 10.0.0.1；同时作为容器的网关和 DNS（掩码固定 255.255.255.0）"
+        description: "lxcbr0 网桥 IP，留空默认 10.0.0.1；同时作为容器的网关和 DNS（掩码固定 255.255.255.0）。网桥/接口由开机引导脚本按此值创建"
         required: false
         default: "10.0.0.1"
       profile:

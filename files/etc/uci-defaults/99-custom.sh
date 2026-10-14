@@ -203,9 +203,7 @@ if [ -d "$CS_HOME" ] || [ -f "$CS_TARBALL" ] || [ -d "$CS_ROOTFS" ]; then
 fi
 
 # 容器自启统一交给 bootstrap（它内部有幂等拉起 + 重建逻辑）。
-# 这里不再装 lxc-autostrt 之类的并行自启服务 —— 两套自启抢同一个容器
-# 会造成「bootstrap 正在解压 rootfs，lxc-autostart 看到目录存在就来拉起半解压的容器」的竞态。
-# bootstrap 的 write_cfg 里已写 lxc.start.auto = 1，LXC 自身的 autostart 机制负责兜底自启。
+# 这里不再装 lxc-autostrt 之类的并行自启服务
 
 if { [ -f "$CS_TARBALL" ] || [ -d "$CS_ROOTFS" ]; } && [ -f /etc/config/crowdsec ]; then
     CS_SEC=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)

@@ -15,7 +15,6 @@ STATE_FILE="$BASELINE/STATE"
 LAPI_PORT="${LAPI_PORT:-8080}"
 BOUNCER_NAME="${BOUNCER_NAME:-openwrt-fw}"
 ENROLL_KEY_FILE="${ENROLL_KEY_FILE:-/etc/config/crowdsec_enroll_key.txt}"
-ENROLL_USED_FILE="$CS_HOME/enroll.used"
 MAX_WAIT="${MAX_WAIT:-60}"
 SLEEP=5
 CROWDSEC_CFG="$ROOTFS/etc/crowdsec/config.yaml"
@@ -535,29 +534,32 @@ step2_remote_enroll() {
 
     _out=$(_console_status); _rc=$?
     if [ "$_rc" -eq 0 ] && [ -n "$_out" ]; then
-        if printf '%s\n' "$_out" | grep -qiE "not registered|not enrolled|unauthorized|forbidden|invalid|revoked"; then
-            log "[步骤2] 远程 API 已失效，需重新 enroll"
-            _need=2
+        # CAPI（Central API 认证）和 enroll（控制台绑定）是两个独立状态，分开看
+        _capi_ok=0; _enroll_ok=0
+        if printf '%s\n' "$_out" | grep -qiE "unauthorized|forbidden|invalid|revoked"; then
+            :   # 凭据失效 → 两者都判失败
         else
-            log "[步骤2] 远程 API 已绑定且有效"
-            printf '%s\n' "$_out" | sed -n '1,6p' | while IFS= read -r _l; do log "[步骤2]   $_l"; done
+            printf '%s\n' "$_out" | grep -qiE "Central API.*authenticated" && _capi_ok=1
+            if ! printf '%s\n' "$_out" | grep -qiE "not enrolled"; then
+                printf '%s\n' "$_out" | grep -qiE "Enrolled.*enrolled" && _enroll_ok=1
+            fi
+        fi
+
+        if [ "$_capi_ok" = "1" ] && [ "$_enroll_ok" = "1" ]; then
+            log "[步骤2] CAPI 已认证 + 已 enroll，均有效"
+            printf '%s\n' "$_out" | sed -n '1,8p' | while IFS= read -r _l; do log "[步骤2]   $_l"; done
             return 0
         fi
+
+        log "[步骤2] CAPI=$([ "$_capi_ok" = "1" ] && echo 已认证 || echo 未注册/失效)  enroll=$([ "$_enroll_ok" = "1" ] && echo 已绑定 || echo 未绑定)"
+        _need=2
     else
         log "[步骤2] 无凭据或 console status 异常，判定为需要 enroll"
         _need=1
     fi
 
     if [ -z "$ST_ENROLL_KEY" ]; then
-        if [ -s "$ENROLL_USED_FILE" ] && [ "$_need" = "1" ]; then
-            log "[步骤2] 注册码已用尽（一次性），去 app.crowdsec.net 重新生成后写入 $ENROLL_KEY_FILE"
-            return 1
-        fi
         log "[步骤2] 未配置注册码，跳过（写入 $ENROLL_KEY_FILE 后下次开机生效）"
-        return 1
-    fi
-    if [ -s "$ENROLL_USED_FILE" ] && [ "$(head -n1 "$ENROLL_USED_FILE")" = "$ST_ENROLL_KEY" ] && [ "$_need" = "1" ]; then
-        log "[步骤2] 该注册码上次已用过且未成功，不再重复消耗（去换新码）"
         return 1
     fi
 
@@ -570,9 +572,7 @@ step2_remote_enroll() {
 
     if ! _ct_env "/usr/bin/cscli console enroll $ST_ENROLL_KEY >/dev/null 2>&1"; then
         [ -n "$_CRED_BAK" ] && mv -f "$_CRED_BAK" "$ROOTFS/etc/crowdsec/online_api_credentials.yaml"
-        mkdir -p "$CS_HOME" 2>/dev/null
-        printf '%s\n' "$ST_ENROLL_KEY" > "$ENROLL_USED_FILE" 2>/dev/null
-        log "[步骤2] !! enroll 失败（注册码一次性，已记入 $ENROLL_USED_FILE）"
+        log "[步骤2] !! enroll 执行失败（多为网络未通，注册码未消耗），下次开机用同一注册码重试"
         return 1
     fi
 
@@ -591,13 +591,11 @@ step2_remote_enroll() {
     done
 
     if [ "$_ok" -eq 0 ]; then
-        mkdir -p "$CS_HOME" 2>/dev/null
-        printf '%s\n' "$ST_ENROLL_KEY" > "$ENROLL_USED_FILE" 2>/dev/null
         ST_ENROLL_CRED=1
         log "[步骤2] ✅ 控制台绑定完成（记得回 app.crowdsec.net 点 Accept）"
     else
         [ -n "$_CRED_BAK" ] && mv -f "$_CRED_BAK" "$ROOTFS/etc/crowdsec/online_api_credentials.yaml"
-        log "[步骤2] !! enroll 后复检未通过，已回滚旧凭据"
+        log "[步骤2] !! enroll 后复检未通过，已回滚旧凭据（下次开机重试）"
         return 1
     fi
 

@@ -79,11 +79,6 @@ on:
         options:
           - 'yes'
           - 'no'
-      crowdsec_enroll_key:
-        description: "CrowdSec 控制台注册密钥（app.crowdsec.net 的 enrollment key）；留空则不开通账号绑定。仅 include_crowdsec=yes 时生效"
-        required: false
-        default: ''
-        type: password
   workflow_call:
     inputs:
       luci_version:
@@ -134,10 +129,6 @@ on:
         required: false
         default: "no"
         type: string
-      crowdsec_enroll_key:
-        required: false
-        default: ""
-        type: string
 
 permissions:
   contents: write
@@ -156,41 +147,24 @@ jobs:
       - name: Validate CrowdSec build parameters
         env:
           CS_INCLUDE_IN: ${{ inputs.include_crowdsec }}
-          CS_KEY: ${{ inputs.crowdsec_enroll_key }}
           CS_PROFILE: ${{ inputs.profile }}
           CS_CT_IP_IN: ${{ inputs.custom_container_ip }}
           CS_BRIDGE_IP_IN: ${{ inputs.custom_bridge_ip }}
         run: |
           CS_INCLUDE=no
-          CS_ENROLL=no
 
           if [ "$CS_INCLUDE_IN" != "yes" ]; then
             echo "❎ include_crowdsec=no，本轮不构建 CrowdSec 容器"
-            if [ -n "$CS_KEY" ]; then
-              echo "::warning::已填写 crowdsec_enroll_key 但 include_crowdsec=no，密钥不会写入固件、账号绑定不生效"
-            fi
           else
             case "$CS_PROFILE" in
               2G|3G|4G|10G)
                 CS_INCLUDE=yes
-                if [ -n "$CS_KEY" ]; then
-                  CS_ENROLL=yes
-                  echo "✅ include_crowdsec=yes，已提供注册密钥，将开通控制台账号绑定"
-                else
-                  echo "✅ include_crowdsec=yes，未提供注册密钥，跳过账号绑定（本地 bouncer/LAPI 功能不受影响）"
-                fi
+                echo "✅ include_crowdsec=yes，将构建 CrowdSec 容器"
                 ;;
               *)
                 echo "::error::include_crowdsec=yes 但 profile=$CS_PROFILE 空间不足（CrowdSec 容器需 2G 以上 rootfs），已自动跳过 CrowdSec 容器构建，其余部分照常"
                 ;;
             esac
-          fi
-
-          if [ "$CS_ENROLL" = "yes" ]; then
-            CUSTOM="${{ github.workspace }}/custom"
-            mkdir -p "$CUSTOM"
-            printf '%s\n' "$CS_KEY" > "$CUSTOM/crowdsec_enroll_key.txt"
-            echo "已写入注册密钥 → custom/crowdsec_enroll_key.txt"
           fi
 
           CUSTOM="${{ github.workspace }}/custom"
@@ -228,8 +202,7 @@ jobs:
           echo "容器网络: IP=$CS_CT_IP_IN 网关/DNS=$CS_BRIDGE_IP_IN 掩码=255.255.255.0（已写 custom/*.txt）"
 
           echo "CS_INCLUDE=$CS_INCLUDE" >> $GITHUB_ENV
-          echo "CS_ENROLL=$CS_ENROLL" >> $GITHUB_ENV
-          echo "校验结果: CS_INCLUDE=$CS_INCLUDE CS_ENROLL=$CS_ENROLL"
+          echo "校验结果: CS_INCLUDE=$CS_INCLUDE"
 
       - name: Save Router Network Config into OpenWrt files
         run: |

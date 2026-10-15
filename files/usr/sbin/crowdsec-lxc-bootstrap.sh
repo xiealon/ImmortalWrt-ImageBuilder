@@ -236,6 +236,17 @@ bouncer_pulling() {
     [ -n "$_lp" ] && [ "$_lp" != "null" ]
 }
 
+host_bouncer_ok() {
+    _yaml="/tmp/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+    _log="/tmp/log/crowdsec-firewall-bouncer.log"
+    [ -f "$_yaml" ] || { log "[bouncer] 宿主机 bouncer 配置文件缺失: $_yaml"; return 1; }
+    grep -qE '^[[:space:]]*api_key:[[:space:]]*[A-Za-z0-9+/=_-]{16,}' "$_yaml" || { log "[bouncer] 宿主机 bouncer api_key 为空或非明文"; return 1; }
+    if [ -f "$_log" ]; then
+        grep -qiE "forbidden|unauthorized|connection refused|dial tcp|401|403" "$_log" && { log "[bouncer] 宿主机 bouncer 日志存在认证/连接错误"; return 1; }
+    fi
+    return 0
+}
+
 console_enroll_ok() {
     _out="$(_ct_env "$CSCLI console status" 2>&1)"
     [ -n "$_out" ] \
@@ -445,6 +456,7 @@ LAST_PULL=$_slp
 API_URL=$(uci -q get "$_sec.api_url" 2>/dev/null)
 UCI_SECTION=$_sec
 ENROLLED=$_enrolled
+ENROLL_KEY=$( [ -f "$ENROLL_KEY_FILE" ] && head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n' )
 EOF
     log "[步骤3] 稳定态标记已写入 $STATE_FILE"
 
@@ -679,6 +691,22 @@ diag_bouncer() {
 
     log "[诊断] 5) bouncer 状态："
     _ct_env "$CSCLI bouncers list" 2>/dev/null | sed 's/^/  /'
+
+    log "[诊断] 6) 宿主机 bouncer 配置文件："
+    _yaml="/tmp/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+    if [ -f "$_yaml" ]; then
+        grep -E '^[[:space:]]*(api_url|api_key):' "$_yaml" | sed 's/^/  /'
+    else
+        echo "  缺失: $_yaml"
+    fi
+
+    log "[诊断] 7) 宿主机 bouncer 日志（末 5 行）："
+    _log="/tmp/log/crowdsec-firewall-bouncer.log"
+    if [ -f "$_log" ]; then
+        tail -5 "$_log" | sed 's/^/  /'
+    else
+        echo "  缺失: $_log"
+    fi
     log "[诊断] ---- 排查结束 ----"
 }
 
@@ -707,8 +735,12 @@ re_enroll() {
 
     _enroll_key=""
     [ -f "$ENROLL_KEY_FILE" ] && _enroll_key="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
+    if [ -z "$_enroll_key" ] && [ -f "$STATE_FILE" ]; then
+        _enroll_key="$(sed -n 's/^ENROLL_KEY=//p' "$STATE_FILE" | head -n1 | tr -d ' \t\r\n')"
+        [ -n "$_enroll_key" ] && log "[自愈] 注册码文件为空，使用备份中的注册码"
+    fi
     if [ -z "$_enroll_key" ]; then
-        log "[自愈] 未配置注册码（$ENROLL_KEY_FILE 为空），无法 re-enroll"
+        log "[自愈] 无注册码（文件与备份均无），放弃 re-enroll"
         return 1
     fi
 
@@ -828,8 +860,20 @@ main() {
         if [ "$SELF_PULL" = "0" ]; then
             log "bouncer 未拉取，进入自愈"
             diag_bouncer
-            if ! _bouncer_heal 5; then
-                log "bouncer 自愈 5 轮仍失败，判定本地 API 链路损坏，用镜像重建"
+            if host_bouncer_ok; then
+                log "宿主机 bouncer 配置/日志正常，仅重注册恢复"
+                if _bouncer_heal 5; then
+                    :
+                else
+                    log "重注册 5 轮仍失败，判定本地 API 链路损坏，用镜像重建"
+                    rebuild_from_image && apply_cfg && setup_container_dns || true
+                    lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
+                    _wait_ct_running || { log "重建后仍起不来"; exit 1; }
+                    _bouncer_register_once || true
+                    _ensure_bouncer_service
+                fi
+            else
+                log "宿主机 bouncer 配置/日志异常，用镜像重建"
                 rebuild_from_image && apply_cfg && setup_container_dns || true
                 lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
                 _wait_ct_running || { log "重建后仍起不来"; exit 1; }
@@ -838,19 +882,24 @@ main() {
             fi
         fi
 
-        if [ "$SELF_CONS" = "0" ]; then
-            re_enroll || log "console 自愈未成功（可能是外网不通或无注册码），下次开机再试"
-        fi
-
         self_check
         [ "$SELF_CT" = "1" ] && [ "$SELF_PULL" = "1" ] && R1=0 || R1=1
         [ "$SELF_CONS" = "1" ] && R2=0 || R2=1
     fi
 
-    if [ "$R1" = "0" ]; then
+    if [ "$R1" = "0" ] && [ "$FIRST_BOOT" = "1" ]; then
         step3_backup; R3=$?
+    elif [ "$R1" = "0" ]; then
+        log "已有备份，跳过重复备份"
+        R3=0
     else
         R3=1
+    fi
+
+    if [ "$R2" = "0" ]; then
+        :
+    else
+        re_enroll || log "console 自愈未成功（可能是外网不通或无注册码），下次开机再试"
     fi
 
     log "----- 汇总 -----"

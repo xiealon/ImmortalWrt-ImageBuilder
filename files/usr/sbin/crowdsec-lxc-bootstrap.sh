@@ -12,7 +12,7 @@
 # 纯净镜像原则：镜像编译期只 apt 装 crowdsec，不写定制配置；
 # 网络/解析器/listen_uri/trusted_ips 等全部在本脚本运行期生成。
 # =============================================================================
-SCRIPT_VER="2026-10-16.28"
+SCRIPT_VER="2026-10-16.29"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -417,12 +417,14 @@ ensure_online_client_off() {
 
     # 用 sed 精确处理 online_client 块（busybox sed 支持 \1 反向引用）：
     #   1) 注释 online_client 行本身
-    #   2) 注释紧随其后的 credentials_path 子行（缩进比 online_client 更深，
-    #      固定是 6 空格，即 "      credentials_path:"）
-    # 只动这两行，绝不影响 api.client 段（其 credentials_path 缩进是 4 空格）。
+    #   2) 注释紧随其后的 credentials_path 子行（缩进比 online_client 更深）。
+    #      用 \1 保留原有缩进，只把行首的 "credentials_path:" 改成
+    #      "# credentials_path:"，这样无论原文件是 4/6 空格还是 tab 都能正确
+    #      注释，且不会改变缩进风格。
+    # 只动这两行，绝不影响 api.client 段（其 credentials_path 缩进较浅）。
     sed -i -E \
         -e "s|^([[:space:]]*)online_client:.*|\\1# online_client: # Central API credentials disabled by bootstrap|" \
-        -e "s|^[[:space:]]{6}credentials_path:.*|      # credentials_path: /etc/crowdsec/online_api_credentials.yaml|" \
+        -e "s|^([[:space:]]*)credentials_path:.*online_api_credentials.yaml.*|\\1# credentials_path: /etc/crowdsec/online_api_credentials.yaml|" \
         "$CROWDSEC_CFG" 2>/dev/null
 
     # 反向修复：若 api.client 段的 credentials_path 被历史坏 sed 误注释，

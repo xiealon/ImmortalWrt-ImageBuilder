@@ -76,12 +76,6 @@ _wait() {
 }
 _wait_ct_running() { _wait ct_running 12; }
 
-net_online() {
-    _ct_env '[ -x /bin/ping ] && { ping -c1 -W3 223.5.5.5 >/dev/null 2>&1 || ping -c1 -W3 119.29.29.29 >/dev/null 2>&1; } && exit 0
-              [ -x /usr/bin/curl ] && curl -s -m 8 -o /dev/null https://api.crowdsec.net 2>/dev/null && exit 0
-              exit 1' 2>/dev/null
-}
-
 setup_lxc_firewall() {
     _lsc_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
     _lan_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
@@ -604,11 +598,6 @@ self_check() {
 re_enroll() {
     log "[自愈] console 状态异常，尝试用注册码重新 enroll"
 
-    if ! net_online; then
-        log "[自愈] 外网不通，本轮跳过 re-enroll（下次开机再试）"
-        return 1
-    fi
-
     _enroll_key=""
     [ -f "$ENROLL_KEY_FILE" ] && _enroll_key="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
     if [ -z "$_enroll_key" ] && [ -f "$STATE_FILE" ]; then
@@ -772,7 +761,7 @@ main() {
     if [ "$R2" = "0" ]; then
         :
     else
-        re_enroll || log "console 自愈未成功（可能是外网不通或无注册码），下次开机再试"
+        re_enroll || log "console 自愈未成功（无注册码或 enroll 失败），下次开机再试"
     fi
 
     log "----- 汇总 -----"

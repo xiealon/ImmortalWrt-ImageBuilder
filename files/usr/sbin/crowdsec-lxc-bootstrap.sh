@@ -12,6 +12,7 @@ BASELINE="$CS_HOME/baseline"
 STATE_FILE="$BASELINE/STATE"
 LAPI_PORT="${LAPI_PORT:-8080}"
 BOUNCER_NAME="${BOUNCER_NAME:-openwrt-fw}"
+ENROLL_KEY_FILE="${ENROLL_KEY_FILE:-/etc/config/crowdsec_enroll_key.txt}"
 MAX_WAIT="${MAX_WAIT:-60}"
 SLEEP=5
 CROWDSEC_CFG="$ROOTFS/etc/crowdsec/config.yaml"
@@ -74,6 +75,12 @@ _wait() {
     return 0
 }
 _wait_ct_running() { _wait ct_running 12; }
+
+net_online() {
+    _ct_env '[ -x /bin/ping ] && { ping -c1 -W3 223.5.5.5 >/dev/null 2>&1 || ping -c1 -W3 119.29.29.29 >/dev/null 2>&1; } && exit 0
+              [ -x /usr/bin/curl ] && curl -s -m 8 -o /dev/null https://api.crowdsec.net 2>/dev/null && exit 0
+              exit 1' 2>/dev/null
+}
 
 setup_lxc_firewall() {
     _lsc_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
@@ -263,6 +270,14 @@ host_bouncer_ok() {
     return 0
 }
 
+console_enroll_ok() {
+    _out="$(_ct_env "$CSCLI console status" 2>&1)"
+    [ -n "$_out" ] \
+        && printf '%s\n' "$_out" | grep -qiE "authenticated" \
+        && printf '%s\n' "$_out" | grep -qiE "enrolled" \
+        && ! printf '%s\n' "$_out" | grep -qiE "not registered|not enrolled|unauthorized|forbidden|invalid|revoked"
+}
+
 _ensure_bouncer_service() {
     if cs_active_on_host && nft_table_ready; then
         return 0
@@ -294,6 +309,7 @@ BRIDGE_IP=$BRIDGE_IP
 LAPI_PORT=$LAPI_PORT
 API_URL=$(uci -q get "$_sec.api_url" 2>/dev/null)
 UCI_SECTION=$_sec
+ENROLL_KEY=$( [ -f "$ENROLL_KEY_FILE" ] && head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n' )
 EOF
     log "[标记] 稳定态标记已写入 $STATE_FILE"
     return 0
@@ -571,16 +587,68 @@ diag_bouncer() {
 }
 
 self_check() {
-    SELF_CT=0; SELF_PULL=0; SELF_ALL=0
+    SELF_CT=0; SELF_PULL=0; SELF_CONS=0; SELF_ALL=0
 
     ct_running && SELF_CT=1
     bouncer_pulling && SELF_PULL=1
+    console_enroll_ok && SELF_CONS=1
 
-    [ "$SELF_CT" = "1" ] && [ "$SELF_PULL" = "1" ] && SELF_ALL=1
+    [ "$SELF_CT" = "1" ] && [ "$SELF_PULL" = "1" ] && [ "$SELF_CONS" = "1" ] && SELF_ALL=1
 
     log "[自检] 容器=$([ "$SELF_CT" = "1" ] && echo 运行 || echo 停止)"
     log "[自检] bouncer last_pull=$([ "$SELF_PULL" = "1" ] && echo 正常 || echo 空)"
+    log "[自检] console status=$([ "$SELF_CONS" = "1" ] && echo 正常 || echo 异常)"
     return 0
+}
+
+re_enroll() {
+    log "[自愈] console 状态异常，尝试用注册码重新 enroll"
+
+    if ! net_online; then
+        log "[自愈] 外网不通，本轮跳过 re-enroll（下次开机再试）"
+        return 1
+    fi
+
+    _enroll_key=""
+    [ -f "$ENROLL_KEY_FILE" ] && _enroll_key="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
+    if [ -z "$_enroll_key" ] && [ -f "$STATE_FILE" ]; then
+        _enroll_key="$(sed -n 's/^ENROLL_KEY=//p' "$STATE_FILE" | head -n1 | tr -d ' \t\r\n')"
+        [ -n "$_enroll_key" ] && log "[自愈] 注册码文件为空，使用备份中的注册码"
+    fi
+    if [ -z "$_enroll_key" ]; then
+        log "[自愈] 无注册码（文件与备份均无），放弃 re-enroll"
+        return 1
+    fi
+
+    _cred_file="$ROOTFS/etc/crowdsec/online_api_credentials.yaml"
+    _bak=""
+    if [ -s "$_cred_file" ]; then
+        _bak="$_cred_file.bak"
+        mv -f "$_cred_file" "$_bak" 2>/dev/null || true
+    fi
+
+    if ! _ct_env "/usr/bin/cscli console enroll $_enroll_key >/dev/null 2>&1"; then
+        [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
+        log "[自愈] re-enroll 执行失败（注册码未消耗），下次开机重试"
+        return 1
+    fi
+
+    _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
+    _ct_env '/usr/bin/cscli console enable --all >/dev/null 2>&1' || true
+
+    _i=0
+    while [ "$_i" -lt 6 ]; do
+        _i=$((_i+1))
+        if console_enroll_ok; then
+            log "[自愈] re-enroll 成功，console 状态恢复正常"
+            return 0
+        fi
+        sleep 5
+    done
+
+    [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
+    log "[自愈] re-enroll 复检未通过，已回滚旧凭据"
+    return 1
 }
 
 main() {
@@ -652,8 +720,8 @@ main() {
     self_check
 
     if [ "$SELF_ALL" = "1" ]; then
-        log "两项自检全部通过，跳过修复流程"
-        R1=0
+        log "三项自检全部通过，跳过修复流程"
+        R1=0; R2=0
     else
         if [ "$SELF_CT" = "0" ]; then
             log "容器仍未运行，重建"
@@ -689,6 +757,7 @@ main() {
 
         self_check
         [ "$SELF_CT" = "1" ] && [ "$SELF_PULL" = "1" ] && R1=0 || R1=1
+        [ "$SELF_CONS" = "1" ] && R2=0 || R2=1
     fi
 
     if [ "$R1" = "0" ] && [ "$FIRST_BOOT" = "1" ]; then
@@ -700,8 +769,14 @@ main() {
         R3=1
     fi
 
+    if [ "$R2" = "0" ]; then
+        :
+    else
+        re_enroll || log "console 自愈未成功（可能是外网不通或无注册码），下次开机再试"
+    fi
+
     log "----- 汇总 -----"
-    log "容器+本地=$R1 标记=$R3"
+    log "容器+本地=$R1 console=$R2 标记=$R3"
 
     _final_key=""
     _final_sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
@@ -710,7 +785,7 @@ main() {
         log "终局检查失败：api_key 仍为空"
         exit 1
     fi
-    log "终局检查通过：api_key 已就绪（$R1$R3）"
+    log "终局检查通过：api_key 已就绪（$R1$R2$R3）"
     exit 0
 }
 

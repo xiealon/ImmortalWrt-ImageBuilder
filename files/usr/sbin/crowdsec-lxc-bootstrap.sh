@@ -225,21 +225,17 @@ _cs_append_trusted_ip() {
     grep -qE "^[[:space:]]*-[[:space:]]*$_tip([[:space:]]|$)" "$_tf"
 }
 
-# 用 inspect -o json 精确读取某个 bouncer 的 last_pull 字段。
-# 每个 bouncer 有独立标记，不会被 bouncers list 的表格渲染干扰。
 bouncer_last_pull() {
     _ct_env "$CSCLI bouncers inspect \"$BOUNCER_NAME\" -o json" 2>/dev/null \
         | sed -n 's/.*"last_pull"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
         | head -n1
 }
 
-# bouncer 是否已成功拉取（last_pull 有真实时间戳即视为本地 API 链路全通）
 bouncer_pulling() {
     _lp="$(bouncer_last_pull)"
     [ -n "$_lp" ] && [ "$_lp" != "null" ]
 }
 
-# 远程 enroll 状态：用 cscli console status 判断（console enroll 无 inspect 子命令）。
 console_enroll_ok() {
     _out="$(_ct_env "$CSCLI console status" 2>&1)"
     [ -n "$_out" ] \
@@ -334,12 +330,9 @@ repair_crowdsec_cfg() {
     return 2
 }
 
-# 配置保障：容器起来后、自检前执行一次，确保容器内 crowdsec 配置正确。
-# 涵盖 baseline 同步、config.yaml 修复、日志源、listen_uri、trusted_ips、场景库。
 ensure_crowdsec_cfg() {
     [ -f "$CROWDSEC_CFG" ] || { log "[配置] 容器内无 config.yaml，镜像不完整"; return 1; }
 
-    # 非首次开机：用备份校正容器内配置
     if [ "$FIRST_BOOT" = "0" ]; then
         sync_from_baseline; _sr=$?
         if [ "$_sr" = "0" ]; then
@@ -588,8 +581,6 @@ EOF
 }
 
 setup_container_dns() {
-    # 容器 DNS 走宿主机网桥（BRIDGE_IP，默认 10.0.0.1）的 dnsmasq 统一解析，
-    # 避免直连公共 DNS 偶发 misbehaving。可在 /etc/config/custom_router_dns.txt 覆盖。
     _dns=""
     if [ -f /etc/config/custom_router_dns.txt ]; then
         _dns=$(cat /etc/config/custom_router_dns.txt | tr '\n' ' ' | tr -d '\r')
@@ -626,12 +617,7 @@ baseline_valid() {
     return 0
 }
 
-# =============================================================================
-# 自检与自愈
-# =============================================================================
 
-# 单次注册 bouncer：删除旧 key → 重新 add → 把新 key 写回 UCI。
-# 成功返回 0 并（在 caller 侧）拿到 key；失败返回 1。
 _bouncer_register_once() {
     _ct_env "$CSCLI bouncers delete \"$BOUNCER_NAME\"" >/dev/null 2>&1 || true
     _raw=$(_ct_env "$CSCLI bouncers add \"$BOUNCER_NAME\" -o raw" 2>&1)
@@ -645,9 +631,6 @@ _bouncer_register_once() {
     return 0
 }
 
-# bouncer 自愈：反复「先删后加」重注册，直到 last_pull 有值或次数用尽。
-# 参数 $1 为最大重试次数（默认 5）。
-# 返回 0=last_pull 就绪；1=仍未就绪。
 _bouncer_heal() {
     _max="${1:-5}"
     _i=0
@@ -669,8 +652,6 @@ _bouncer_heal() {
     return 1
 }
 
-# 诊断 bouncer 异常：逐项查解析器 / 宿主机网络 / 容器网络 / 端口。
-# 纯诊断，不改状态；把结论打进日志。
 diag_bouncer() {
     log "[诊断] ---- bouncer 异常排查 ----"
 
@@ -701,12 +682,6 @@ diag_bouncer() {
     log "[诊断] ---- 排查结束 ----"
 }
 
-# 三项自检，输出到全局变量（供 main 分流用）。
-# 自检项：
-#   SELF_CT    = 1 容器运行中
-#   SELF_PULL  = 1 bouncer last_pull 有值
-#   SELF_CONS  = 1 console status 正常
-#   SELF_ALL   = 1 三项全过
 self_check() {
     SELF_CT=0; SELF_PULL=0; SELF_CONS=0; SELF_ALL=0
 
@@ -722,8 +697,6 @@ self_check() {
     return 0
 }
 
-# 用注册码文件重新 enroll（console 状态错误时的自愈）。
-# 复用 step2 的 enroll 核心，但独立可调；无注册码时仅提示。
 re_enroll() {
     log "[自愈] console 状态异常，尝试用注册码重新 enroll"
 
@@ -781,7 +754,6 @@ main() {
     mount_cgroup
     setup_syslog_forward
 
-    # ---------- 首次开机判定：无容器 / 无 rootfs → 从镜像新建 ----------
     if baseline_valid; then
         FIRST_BOOT=0
         log "判定文件齐全，非首次开机"
@@ -790,19 +762,16 @@ main() {
         log "判定文件缺失，认定为第一次开机"
     fi
 
-    # 无镜像且无 rootfs：本机根本不带 CrowdSec，直接退出
     if [ ! -f "$TARBALL" ] && [ ! -f "$CROWDSEC_CFG" ]; then
         log "无镜像且无 rootfs，本机不带 CrowdSec，跳过"
         exit 0
     fi
 
-    # 容器不存在 / rootfs 未就绪 → 从镜像重建（首次开机或 rootfs 丢失）
     if ! ct_exists || [ ! -f "$CROWDSEC_CFG" ]; then
         log "容器或 rootfs 未就绪，从镜像重建"
         rebuild_from_image || { log "镜像重建失败"; exit 1; }
     fi
 
-    # 容器未运行 → 尝试拉起；起不来 → rebuild
     if ! ct_running; then
         setup_bridge
         setup_container_dns || true
@@ -816,13 +785,10 @@ main() {
         log "容器已启动"
     fi
 
-    # 容器起来了，写一次 DNS（幂等，确保走宿主机 dnsmasq）
     setup_container_dns || true
 
-    # 配置保障：容器内 config.yaml / 日志源 / listen_uri / trusted_ips / 场景库
     ensure_crowdsec_cfg || log "[配置] 配置保障未通过，自检会兜底"
 
-    # 确保 bouncer 段存在并预填 api_url（不碰 api_key）
     if [ -f /etc/config/crowdsec ]; then
         _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
         if [ -z "$_sec" ]; then
@@ -846,15 +812,12 @@ main() {
         log "[配置] /etc/config/crowdsec 不存在，bouncer 包未装进固件"
     fi
 
-    # ---------- 三项自检 ----------
     self_check
 
-    # 全过 → 直接跳过修复，进备份
     if [ "$SELF_ALL" = "1" ]; then
         log "三项自检全部通过，跳过修复流程"
         R1=0; R2=0
     else
-        # 容器起不来（理论上上面已处理，这里是兜底）
         if [ "$SELF_CT" = "0" ]; then
             log "容器仍未运行，重建"
             rebuild_from_image && apply_cfg && setup_container_dns || true
@@ -862,7 +825,6 @@ main() {
             _wait_ct_running || { log "重建后仍起不来"; exit 1; }
         fi
 
-        # bouncer last_pull 空 → 诊断 + 重试自愈，仍失败才 rebuild
         if [ "$SELF_PULL" = "0" ]; then
             log "bouncer 未拉取，进入自愈"
             diag_bouncer
@@ -871,24 +833,20 @@ main() {
                 rebuild_from_image && apply_cfg && setup_container_dns || true
                 lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
                 _wait_ct_running || { log "重建后仍起不来"; exit 1; }
-                # 重建后重新注册一次
                 _bouncer_register_once || true
                 _ensure_bouncer_service
             fi
         fi
 
-        # console status 异常 → 用注册码文件重新 enroll
         if [ "$SELF_CONS" = "0" ]; then
             re_enroll || log "console 自愈未成功（可能是外网不通或无注册码），下次开机再试"
         fi
 
-        # 复检
         self_check
         [ "$SELF_CT" = "1" ] && [ "$SELF_PULL" = "1" ] && R1=0 || R1=1
         [ "$SELF_CONS" = "1" ] && R2=0 || R2=1
     fi
 
-    # ---------- 备份（保持原有逻辑，未改动） ----------
     if [ "$R1" = "0" ]; then
         step3_backup; R3=$?
     else

@@ -174,8 +174,6 @@ setup_bridge() {
 write_cfg() {
     _dst="${1:-$CFG}"
     cat > "$_dst" <<EOF
-lxc.start.auto = 1
-lxc.start.order = 10
 lxc.arch = amd64
 lxc.include = /usr/share/lxc/config/common.conf
 lxc.rootfs.path = dir:$ROOTFS

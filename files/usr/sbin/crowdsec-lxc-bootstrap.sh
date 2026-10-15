@@ -12,7 +12,7 @@
 # 纯净镜像原则：镜像编译期只 apt 装 crowdsec，不写定制配置；
 # 网络/解析器/listen_uri/trusted_ips 等全部在本脚本运行期生成。
 # =============================================================================
-SCRIPT_VER="2026-10-16.29"
+SCRIPT_VER="2026-10-16.30"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -125,6 +125,51 @@ setup_lxc_firewall() {
     uci -q commit firewall
     /etc/init.d/firewall reload >/dev/null 2>&1
     log "[防火墙] lxc 区 input/output/forward=ACCEPT（8080/tcp、514/udp 可达）"
+    return 0
+}
+
+# ---------- 宿主机系统日志 → 容器 CrowdSec 转发 ----------
+# 问题背景：CrowdSec 在容器内通过 acquis.d/router.yaml 监听 0.0.0.0:514/udp
+# 收 syslog，但宿主机 OpenWrt 的 logd 默认只写本地环形缓冲，不会主动把
+# dropbear 等日志推给容器，导致 CrowdSec 采集不到 ssh 暴力破解日志，
+# 检测完全失效（之前 logread 一直报 "Failed to send log data to 10.0.0.10:514"）。
+#
+# 解决：配置 OpenWrt logd 的远程日志转发，把系统日志经 UDP 514 发到容器。
+#   system.@system[0].log_ip     = 容器 IP
+#   system.@system[0].log_port   = 514
+#   system.@system[0].log_proto  = udp
+#   system.@system[0].log_remote = 1
+setup_log_forward() {
+    [ -n "$CONTAINER_IP" ] || { log "[日志] 无容器 IP，跳过转发配置"; return 1; }
+
+    _sys=$(uci show system 2>/dev/null | grep '=system$' | head -n1 | cut -d= -f1)
+    if [ -z "$_sys" ]; then
+        uci add system system >/dev/null 2>&1
+        _sys=$(uci show system 2>/dev/null | grep '=system$' | head -n1 | cut -d= -f1)
+    fi
+    [ -n "$_sys" ] || { log "[日志] 无 system 段，无法配置远程日志"; return 1; }
+
+    # 幂等：仅当目标/端口/协议/开关任一项不匹配时才写入并重载
+    _want_ip="$CONTAINER_IP"
+    _cur_ip=$(uci -q get "$_sys.log_ip" 2>/dev/null)
+    _cur_port=$(uci -q get "$_sys.log_port" 2>/dev/null)
+    _cur_proto=$(uci -q get "$_sys.log_proto" 2>/dev/null)
+    _cur_remote=$(uci -q get "$_sys.log_remote" 2>/dev/null)
+
+    if [ "$_cur_ip" = "$_want_ip" ] && [ "$_cur_port" = "514" ] \
+       && [ "$_cur_proto" = "udp" ] && [ "$_cur_remote" = "1" ]; then
+        log "[日志] 远程日志已指向容器 ${_want_ip}:514/udp，跳过"
+        return 0
+    fi
+
+    uci -q set "$_sys.log_ip=$_want_ip"
+    uci -q set "$_sys.log_port=514"
+    uci -q set "$_sys.log_proto=udp"
+    uci -q set "$_sys.log_remote=1"
+    uci commit system
+
+    /etc/init.d/log reload >/dev/null 2>&1 || /etc/init.d/logd reload >/dev/null 2>&1 || true
+    log "[日志] 宿主机系统日志已转发到容器 ${_want_ip}:514/udp"
     return 0
 }
 
@@ -643,6 +688,9 @@ main() {
     lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null || true
     _wait_ct_running || { log "容器起不来"; exit 1; }
     log "容器已启动"
+
+    # 步骤1.5：配置宿主机系统日志 → 容器 CrowdSec（514/udp）
+    setup_log_forward
 
     # 步骤1：注册 bouncer（以「LAPI 侧 last_pull 是否成功」为判据，
     # 而不是只看本地 UCI 有没有 key。避免 LAPI 侧记录错位/名字错成"1"

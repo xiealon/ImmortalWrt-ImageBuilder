@@ -9,7 +9,6 @@ CFG="$LXC_PATH/$LXC_NAME/config"
 TARBALL="${TARBALL:-$CS_HOME/lxc-ubuntu.tar.gz}"
 LEGACY_TARBALL="/opt/lxc-ubuntu.tar.gz"
 BASELINE="$CS_HOME/baseline"
-SNAP_ETC="$BASELINE/etc/crowdsec"
 STATE_FILE="$BASELINE/STATE"
 LAPI_PORT="${LAPI_PORT:-8080}"
 BOUNCER_NAME="${BOUNCER_NAME:-openwrt-fw}"
@@ -38,9 +37,27 @@ esac
 [ -n "$_SELF" ] && chmod +x "$_SELF" 2>/dev/null
 chmod +x /etc/rc.local 2>/dev/null
 
-ct() { lxc-attach -P "$LXC_PATH" -n "$LXC_NAME" -- "$@"; }
+ct() { timeout 30 lxc-attach -P "$LXC_PATH" -n "$LXC_NAME" -- "$@"; }
 ct_running() { lxc-ls -P "$LXC_PATH" --running 2>/dev/null | grep -qw "$LXC_NAME"; }
 ct_exists() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; }
+ct_pid() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>/dev/null | sed -n 's/^PID:[[:space:]]*//p' | head -n1; }
+ct_force_stop() {
+    _pid="$(ct_pid)"
+    ct_running || return 0
+    lxc-stop -P "$LXC_PATH" -n "$LXC_NAME" -k >/dev/null 2>&1
+    _i=0
+    while ct_running; do
+        _i=$((_i+1))
+        if [ "$_i" -ge 12 ]; then
+            _pid="$(ct_pid)"
+            [ -n "$_pid" ] && kill -9 "$_pid" 2>/dev/null
+            sleep 1
+        fi
+        [ "$_i" -ge 24 ] && { log "[步骤1] 容器无法停止，跳过重建"; return 1; }
+        sleep $SLEEP
+    done
+    return 0
+}
 _pgrep_bouncer() { pgrep -f "crowdsec-firewall-bouncer" >/dev/null 2>&1; }
 _ct_env() { ct sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; '"$1"; }
 
@@ -186,8 +203,7 @@ apply_cfg() {
 rebuild_from_image() {
     log "[步骤1] 尝试从镜像重建 rootfs：$TARBALL"
     [ -f "$TARBALL" ] || { log "[步骤1] 镜像文件不存在，无法重建"; return 1; }
-    ct_running && lxc-stop -P "$LXC_PATH" -n "$LXC_NAME" -k -f >/dev/null 2>&1
-    sleep 2
+    ct_force_stop || return 1
     rm -rf "$ROOTFS" 2>/dev/null
     mkdir -p "$ROOTFS" || return 1
     if ( set -C; : > "$ROOTFS/.extracting" ) 2>/dev/null; then
@@ -208,21 +224,26 @@ rebuild_from_image() {
     [ -f "$CROWDSEC_CFG" ]
 }
 
-_cs_append_trusted_ip() {
-    _tip="${1:-$BRIDGE_IP}"
-    _tf="$CROWDSEC_CFG"
-    [ -f "$_tf" ] || return 1
-    awk -v tip="$_tip" '
-        BEGIN { in_ti=0; ti_indent=0; indent="      " }
-        /^[[:space:]]*trusted_ips:/ { match($0, /^[[:space:]]*/); ti_indent=RLENGTH; in_ti=1; print; next }
-        in_ti && /^[[:space:]]*-[[:space:]]/ { match($0, /^[[:space:]]*/); indent=substr($0, 1, RLENGTH); print; next }
-        in_ti && /^[[:space:]]*#/ { match($0, /^[[:space:]]*/); if (RLENGTH <= ti_indent) { print indent "- " tip; in_ti=0 } print; next }
+ensure_trusted_ip() {
+    [ -f "$CROWDSEC_CFG" ] || return 1
+    [ -n "$BRIDGE_IP" ] || return 1
+    grep -qE "^[[:space:]]*-[[:space:]]*${BRIDGE_IP}([[:space:]]|$)" "$CROWDSEC_CFG" 2>/dev/null \
+        && { log "[配置] trusted_ips 已含 $BRIDGE_IP"; return 0; }
+    awk -v tip="$BRIDGE_IP" '
+        BEGIN { in_ti=0; indent="      " }
+        /^[[:space:]]*trusted_ips:/ { in_ti=1; print; next }
+        in_ti && /^[[:space:]]*-[[:space:]]/ { print; next }
+        in_ti && /^[[:space:]]*#/ { print indent "- " tip; in_ti=0; print; next }
         in_ti && /^[[:space:]]*$/ { print; next }
         in_ti { print indent "- " tip; in_ti=0; print; next }
         { print }
         END { if (in_ti) print indent "- " tip }
-    ' "$_tf" > "$_tf.tmp" && mv "$_tf.tmp" "$_tf" || return 1
-    grep -qE "^[[:space:]]*-[[:space:]]*$_tip([[:space:]]|$)" "$_tf"
+    ' "$CROWDSEC_CFG" > "$CROWDSEC_CFG.tmp" 2>/dev/null \
+        && mv -f "$CROWDSEC_CFG.tmp" "$CROWDSEC_CFG" 2>/dev/null \
+        && { log "[配置] trusted_ips 已补上 $BRIDGE_IP"; return 0; }
+    rm -f "$CROWDSEC_CFG.tmp" 2>/dev/null
+    log "[配置] 补 trusted_ips 失败"
+    return 1
 }
 
 bouncer_last_pull() {
@@ -270,179 +291,13 @@ _ensure_bouncer_service() {
     return 0
 }
 
-sync_from_baseline() {
-    [ -d "$ROOTFS/etc/crowdsec" ] || { log "[步骤1] rootfs 未就绪，无法比对"; return 2; }
-    _changed=0
-    _list=/tmp/.cs-base-list.$$
-    { ( cd "$SNAP_ETC" 2>/dev/null && find . -type f -name '*.yaml' 2>/dev/null )
-      ( cd "$ROOTFS/etc/crowdsec" 2>/dev/null && find . -type f -name '*.yaml' 2>/dev/null )
-    } | sed 's|^\./||' | sort -u > "$_list"
-    while IFS= read -r _rel; do
-        [ -n "$_rel" ] || continue
-        case "$_rel" in *whitelists*) continue ;; esac
-        _sn_f="$SNAP_ETC/$_rel"
-        _ct_f="$ROOTFS/etc/crowdsec/$_rel"
-        if [ -f "$_sn_f" ] && [ ! -f "$_ct_f" ]; then
-            mkdir -p "$(dirname "$_ct_f")"
-            cp -p "$_sn_f" "$_ct_f" 2>/dev/null \
-                && { log "[步骤1] 补回缺失配置: $_rel"; _changed=1; } \
-                || log "[步骤1] 补回失败: $_rel"
-        elif [ -f "$_ct_f" ] && [ -f "$_sn_f" ]; then
-            cmp -s "$_ct_f" "$_sn_f" && continue
-            mkdir -p "$(dirname "$_ct_f")"
-            cp -p "$_sn_f" "$_ct_f" 2>/dev/null \
-                && { log "[步骤1] 配置与备份不一致，已覆盖: $_rel"; _changed=1; } \
-                || log "[步骤1] 覆盖失败: $_rel"
-        fi
-    done < "$_list"
-    rm -f "$_list"
-    return "$_changed"
-}
-
-cfg_ok() {
-    ct_running || return 1
-    _ct_env "timeout 20 $CSCLI config show -o json" >/dev/null 2>&1
-}
-
-prom_block_present() {
-    grep -qE "^#?[[:space:]]*prometheus:[[:space:]]*(#.*)?$" "$CROWDSEC_CFG" 2>/dev/null
-}
-
-strip_prom_block() {
-    awk '
-        /^#?[[:space:]]*prometheus:[[:space:]]*(#.*)?$/ { f = 1; next }
-        f && /^[^[:space:]#]/ { f = 0 }
-        f { next }
-        { print }
-    ' "$CROWDSEC_CFG" > "$CROWDSEC_CFG.ps" 2>/dev/null
-    if [ -s "$CROWDSEC_CFG.ps" ]; then
-        mv -f "$CROWDSEC_CFG.ps" "$CROWDSEC_CFG" 2>/dev/null && return 0
-    fi
-    rm -f "$CROWDSEC_CFG.ps" 2>/dev/null
-    return 1
-}
-
-repair_crowdsec_cfg() {
-    [ -f "$CROWDSEC_CFG" ] || return 2
-    cfg_ok && return 1
-
-    _cbak="$CROWDSEC_CFG.cbak"
-    cp -p "$CROWDSEC_CFG" "$_cbak" 2>/dev/null
-
-    if prom_block_present && strip_prom_block && cfg_ok; then
-        rm -f "$_cbak" 2>/dev/null
-        log "[步骤1] config.yaml 里有本机 crowdsec 不认的 prometheus 段，已剔除并回到包默认"
-        return 0
-    fi
-
-    cp -p "$_cbak" "$CROWDSEC_CFG" 2>/dev/null
-    rm -f "$_cbak" 2>/dev/null
-    log "[步骤1] config.yaml 解析不过且自动修复失败（手工查：cscli config show）"
-    return 2
-}
-
-ensure_crowdsec_cfg() {
-    [ -f "$CROWDSEC_CFG" ] || { log "[配置] 容器内无 config.yaml，镜像不完整"; return 1; }
-
-    if [ "$FIRST_BOOT" = "0" ]; then
-        sync_from_baseline; _sr=$?
-        if [ "$_sr" = "0" ]; then
-            log "[配置] 配置与备份一致"
-        else
-            log "[配置] 配置已按备份校正"
-            _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
-            sleep 3
-        fi
-    fi
-
-    _cs_restart=0
-
-    repair_crowdsec_cfg; _rp=$?
-    if [ "$_rp" = "0" ]; then
-        log "[配置] config.yaml 已修复"
-        _cs_restart=1
-    elif [ "$_rp" = "2" ]; then
-        log "[配置] config.yaml 仍不可解析，注册会失败"
-    fi
-
-    setup_acquis && _cs_restart=1
-
-    if grep -qE "^[[:space:]]*listen_uri:[[:space:]]*['\"]?0\.0\.0\.0:$LAPI_PORT" "$CROWDSEC_CFG" 2>/dev/null; then
-        log "[配置] LAPI 已对外监听 0.0.0.0:$LAPI_PORT"
-    else
-        log "[配置] listen_uri 不对，覆盖为 0.0.0.0:$LAPI_PORT"
-        sed -i -E "s|^([[:space:]]*listen_uri:)[[:space:]]*.*|\\1 0.0.0.0:${LAPI_PORT}|" "$CROWDSEC_CFG" 2>/dev/null
-        _cs_restart=1
-    fi
-
-    if [ -z "$BRIDGE_IP" ]; then
-        log "[配置] 未取到网桥 IP，跳过 trusted_ips 校正"
-    elif grep -qE "^[[:space:]]*-[[:space:]]*$BRIDGE_IP([[:space:]]|$)" "$CROWDSEC_CFG" 2>/dev/null; then
-        log "[配置] trusted_ips 已含 $BRIDGE_IP"
-    else
-        log "[配置] trusted_ips 未含 $BRIDGE_IP，补上"
-        _cs_append_trusted_ip "$BRIDGE_IP" && _cs_restart=1 || log "[配置] 补 trusted_ips 失败"
-    fi
-
-    if [ "$_cs_restart" = "1" ]; then
-        _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
-        log "[配置] 已重启 crowdsec 使覆盖生效"
-    fi
-
-    _ncoll=$(_ct_env "$CSCLI collections list -o json 2>/dev/null | grep -c '\"name\"'")
-    if [ "${_ncoll:-0}" -gt 0 ] 2>/dev/null; then
-        log "[配置] 场景库就绪（$_ncoll 个 collection）"
-    else
-        log "[配置] 场景库为空，后台补齐（不阻塞本地流程）"
-        ( _ct_env "$CSCLI hub update >/dev/null 2>&1"
-          _ct_env "$CSCLI hub upgrade >/dev/null 2>&1" ) &
-    fi
-
-    return 0
-}
-
-step3_backup() {
-    log "===== 步骤 3：备份 ====="
-
+write_state_mark() {
     _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
     _key=""
     [ -n "$_sec" ] && _key="$(uci -q get "$_sec.api_key" 2>/dev/null)"
+    [ -n "$_key" ] || { log "[标记] api_key 为空，不写稳定态标记"; return 1; }
 
-    [ -n "$_key" ] || { log "[步骤3] api_key 为空，拒绝备份"; return 1; }
-
-    _sout=$(ct $CSCLI bouncers inspect "$BOUNCER_NAME" -o raw 2>/dev/null)
-    _sname=$(printf '%s\n' "$_sout" | sed -n 's/^[[:space:]]*name:[[:space:]]*//p' | head -n1)
-    _sip=$(printf '%s\n' "$_sout" | sed -n 's/^[[:space:]]*ip_address:[[:space:]]*//p' | head -n1)
-    _slp=$(printf '%s\n' "$_sout" | sed -n 's/^[[:space:]]*last_pull:[[:space:]]*//p' | head -n1)
-    _srvk=$(printf '%s\n' "$_sout" | sed -n 's/^[[:space:]]*revoked:[[:space:]]*//p' | head -n1)
-    [ -n "$_sname" ] || _sname="$BOUNCER_NAME"
-
-    _enrolled=0
-    if [ -s "$ROOTFS/etc/crowdsec/online_api_credentials.yaml" ]; then
-        _cst=$(ct $CSCLI console status 2>&1)
-        if printf '%s\n' "$_cst" | grep -qiE "not registered|not enrolled|unauthorized|forbidden|invalid|revoked"; then
-            log "[步骤3] console 凭据异常，仍备份本地配置"
-        else
-            log "[步骤3] console 状态有效"
-            _enrolled=1
-        fi
-    else
-        log "[步骤3] 未 enroll，只备份本地配置"
-    fi
-
-    mkdir -p "$SNAP_ETC" 2>/dev/null || { log "[步骤3] 无法创建 $SNAP_ETC"; return 1; }
-
-    _bc=0
-    for _rel in $( cd "$ROOTFS/etc/crowdsec" 2>/dev/null && find . -type f -name '*.yaml' 2>/dev/null | sed 's|^\./||' ); do
-        case "$_rel" in *whitelists*) continue ;; esac
-        _dst="$SNAP_ETC/$_rel"
-        mkdir -p "$(dirname "$_dst")" 2>/dev/null
-        cp -p "$ROOTFS/etc/crowdsec/$_rel" "$_dst" 2>/dev/null \
-            && _bc=$((_bc+1)) \
-            || log "[步骤3] 备份失败: $_rel"
-    done
-    log "[步骤3] 已备份 $_bc 个配置文件到 $SNAP_ETC"
-
+    mkdir -p "$BASELINE" 2>/dev/null || { log "[标记] 无法创建 $BASELINE"; return 1; }
     cat > "$STATE_FILE" <<EOF
 VER=$SCRIPT_VER
 TIME=$(date '+%F %T')
@@ -450,25 +305,11 @@ CONTAINER=$LXC_NAME
 CONTAINER_IP=$CONTAINER_IP
 BRIDGE_IP=$BRIDGE_IP
 LAPI_PORT=$LAPI_PORT
-BOUNCER_NAME=$_sname
-BOUNCER_IP=$_sip
-LAST_PULL=$_slp
 API_URL=$(uci -q get "$_sec.api_url" 2>/dev/null)
 UCI_SECTION=$_sec
-ENROLLED=$_enrolled
 ENROLL_KEY=$( [ -f "$ENROLL_KEY_FILE" ] && head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n' )
 EOF
-    log "[步骤3] 稳定态标记已写入 $STATE_FILE"
-
-    _bad=0
-    for _rel in $( cd "$SNAP_ETC" 2>/dev/null && find . -type f -name '*.yaml' 2>/dev/null | sed 's|^\./||' ); do
-        cmp -s "$ROOTFS/etc/crowdsec/$_rel" "$SNAP_ETC/$_rel" || _bad=1
-    done
-    [ "$_bad" -eq 0 ] \
-        && log "[步骤3] 复验通过，配置与备份完全一致" \
-        || log "[步骤3] 复验未过，仍有文件不一致"
-
-    log "===== 步骤 3 完成 ====="
+    log "[标记] 稳定态标记已写入 $STATE_FILE"
     return 0
 }
 
@@ -497,99 +338,6 @@ setup_syslog_forward() {
     /etc/init.d/log restart >/dev/null 2>&1
     log "[日志] 宿主 syslog 已外发至 ${CONTAINER_IP}:514/udp"
     return 0
-}
-
-setup_acquis() {
-    [ -d "$ROOTFS/etc/crowdsec" ] || return 1
-    mkdir -p "$ROOTFS/etc/crowdsec/acquis.d" \
-             "$ROOTFS/etc/crowdsec/parsers/s01-parse" \
-             "$ROOTFS/etc/crowdsec/parsers/s02-enrich" 2>/dev/null
-
-    _chg=0
-
-    _acq="$ROOTFS/etc/crowdsec/acquis.d/router.yaml"
-    if ! grep -qE '^[[:space:]]*listen_port:[[:space:]]*514' "$_acq" 2>/dev/null; then
-        cat > "$_acq" <<'EOF'
-source: syslog
-listen_addr: 0.0.0.0
-listen_port: 514
-protocol: udp
-labels:
-  type: syslog
-EOF
-        _chg=1
-    fi
-
-    _par="$ROOTFS/etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml"
-    if ! grep -q 'ssh_failed-auth' "$_par" 2>/dev/null; then
-        cat > "$_par" <<'EOF'
-name: openwrt/dropbear-logs
-description: Parse OpenWrt non-PAM dropbear logs
-filter: evt.Parsed.program == 'dropbear'
-onsuccess: next_stage
-nodes:
-  - grok:
-      pattern: "Bad password attempt for '?%{DATA:username}'? from %{IP:source_ip}:%{INT:source_port}"
-      apply_on: message
-    statics:
-      - meta: log_type
-        value: ssh_failed-auth
-  - grok:
-      pattern: "Login attempt for nonexistent user %{GREEDYDATA:username} from %{IP:source_ip}:%{INT:source_port}"
-      apply_on: message
-    statics:
-      - meta: log_type
-        value: ssh_failed-auth
-  - grok:
-      pattern: "Exit before auth from <%{IP:source_ip}:%{INT:source_port}>"
-      apply_on: message
-    statics:
-      - meta: log_type
-        value: ssh_failed-auth
-  - grok:
-      pattern: "Password auth succeeded for '?%{DATA:username}'? from %{IP:source_ip}:%{INT:source_port}"
-      apply_on: message
-    statics:
-      - meta: log_type
-        value: ssh_auth_success
-  - grok:
-      pattern: "Pubkey auth succeeded for '?%{DATA:username}'? with key %{DATA:key_type} from %{IP:source_ip}:%{INT:source_port}"
-      apply_on: message
-    statics:
-      - meta: log_type
-        value: ssh_auth_success
-statics:
-  - meta: service
-    value: ssh
-  - meta: source_ip
-    expression: evt.Parsed.source_ip
-  - meta: username
-    expression: evt.Parsed.username
-EOF
-        _chg=1
-    fi
-
-    _wl="$ROOTFS/etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml"
-    if [ ! -s "$_wl" ]; then
-        cat > "$_wl" <<'EOF'
-name: openwrt/my-whitelist
-description: 'No whitelist configured - placeholder only'
-whitelist:
-  reason: placeholder, nothing is whitelisted
-  ip:
-    - 127.0.0.1
-  cidr:
-    - 240.0.0.0/4
-EOF
-        _chg=1
-    fi
-
-    if [ "$_chg" = "1" ]; then
-        log "[日志] 容器内已写入日志源：UDP 514 收 syslog + dropbear 解析器"
-        return 0
-    fi
-    log "[日志] 容器内日志源已在位（UDP 514 + dropbear 解析器）"
-    return 1
 }
 
 setup_container_dns() {
@@ -623,9 +371,7 @@ setup_container_dns() {
 
 baseline_valid() {
     [ -f "$STATE_FILE" ] || return 1
-    [ -d "$SNAP_ETC" ] || return 1
-    grep -q '^BOUNCER_NAME=' "$STATE_FILE" 2>/dev/null || return 1
-    grep -q '^API_URL=' "$STATE_FILE" 2>/dev/null || return 1
+    grep -q '^VER=' "$STATE_FILE" 2>/dev/null || return 1
     return 0
 }
 
@@ -819,7 +565,7 @@ main() {
 
     setup_container_dns || true
 
-    ensure_crowdsec_cfg || log "[配置] 配置保障未通过，自检会兜底"
+    ensure_trusted_ip || log "[配置] trusted_ips 保障未通过，自检会兜底"
 
     if [ -f /etc/config/crowdsec ]; then
         _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
@@ -888,9 +634,9 @@ main() {
     fi
 
     if [ "$R1" = "0" ] && [ "$FIRST_BOOT" = "1" ]; then
-        step3_backup; R3=$?
+        write_state_mark; R3=$?
     elif [ "$R1" = "0" ]; then
-        log "已有备份，跳过重复备份"
+        log "已有稳定态标记，跳过"
         R3=0
     else
         R3=1
@@ -903,7 +649,7 @@ main() {
     fi
 
     log "----- 汇总 -----"
-    log "容器+本地=$R1 console=$R2 备份=$R3"
+    log "容器+本地=$R1 console=$R2 标记=$R3"
 
     _final_key=""
     _final_sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)

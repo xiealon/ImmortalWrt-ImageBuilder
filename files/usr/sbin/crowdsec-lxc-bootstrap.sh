@@ -525,13 +525,11 @@ main() {
     setup_bridge
     prepare_container || { log "配置生成失败"; exit 1; }
 
-    # 步骤1：启动容器（没跑才拉起）
-    if ! ct_running; then
-        log "启动容器 $LXC_NAME"
-        lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
-        _wait_ct_running || { log "容器起不来"; exit 1; }
-        log "容器已启动"
-    fi
+    # 步骤1：启动容器（每次开机都拉起，already running 容错）
+    log "启动容器 $LXC_NAME"
+    lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null || true
+    _wait_ct_running || { log "容器起不来"; exit 1; }
+    log "容器已启动"
 
     # 步骤1：注册 bouncer（本地 api_key 缺失才建）
     _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)

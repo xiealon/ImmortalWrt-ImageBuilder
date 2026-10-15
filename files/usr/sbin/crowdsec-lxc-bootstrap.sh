@@ -12,7 +12,7 @@
 # 纯净镜像原则：镜像编译期只 apt 装 crowdsec，不写定制配置；
 # 网络/解析器/listen_uri/trusted_ips 等全部在本脚本运行期生成。
 # =============================================================================
-SCRIPT_VER="2026-10-16.30"
+SCRIPT_VER="2026-10-16.31"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -683,11 +683,12 @@ main() {
     setup_bridge
     prepare_container || { log "配置生成失败"; exit 1; }
 
-    # 步骤1：启动容器（每次开机都拉起，already running 容错）
+    # 步骤1：启动容器（每次开机无条件直接拉起，already running 容错）
+    # 关键：不要加 ct_running 判断！开机时机下 ct_running 不可靠（容器可能
+    # 处于半启动/时序错乱），误判"已在运行"会导致跳过启动、容器实际起不来。
+    # lxc-start 对 already running 只是报错，不影响已运行的容器，直接拉最稳。
     log "启动容器 $LXC_NAME"
-    if ! ct_running; then
-        lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1
-    fi
+    lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
     _wait_ct_running || { log "容器起不来"; exit 1; }
     log "容器已启动"
 

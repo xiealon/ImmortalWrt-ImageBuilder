@@ -685,7 +685,9 @@ main() {
 
     # 步骤1：启动容器（每次开机都拉起，already running 容错）
     log "启动容器 $LXC_NAME"
-    lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null || true
+    if ! ct_running; then
+        lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1
+    fi
     _wait_ct_running || { log "容器起不来"; exit 1; }
     log "容器已启动"
 

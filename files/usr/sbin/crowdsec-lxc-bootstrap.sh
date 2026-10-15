@@ -227,6 +227,29 @@ _cs_append_trusted_ip() {
     grep -qE "^[[:space:]]*-[[:space:]]*$_tip([[:space:]]|$)" "$_tf"
 }
 
+# 用 inspect -o json 精确读取某个 bouncer 的 last_pull 字段。
+# 每个 bouncer 有独立标记，不会被 bouncers list 的表格渲染干扰。
+bouncer_last_pull() {
+    _ct_env "$CSCLI bouncers inspect \"$BOUNCER_NAME\" -o json" 2>/dev/null \
+        | sed -n 's/.*"last_pull"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -n1
+}
+
+# bouncer 是否已成功拉取（last_pull 有真实时间戳即视为本地 API 链路全通）
+bouncer_pulling() {
+    _lp="$(bouncer_last_pull)"
+    [ -n "$_lp" ] && [ "$_lp" != "null" ]
+}
+
+# 远程 enroll 状态：用 cscli console status 判断（console enroll 无 inspect 子命令）。
+console_enroll_ok() {
+    _out="$(_ct_env "$CSCLI console status" 2>&1)"
+    [ -n "$_out" ] \
+        && printf '%s\n' "$_out" | grep -qiE "authenticated" \
+        && printf '%s\n' "$_out" | grep -qiE "enrolled" \
+        && ! printf '%s\n' "$_out" | grep -qiE "not registered|not enrolled|unauthorized|forbidden|invalid|revoked"
+}
+
 _ensure_bouncer_service() {
     if cs_active_on_host && nft_table_ready; then
         return 0
@@ -342,7 +365,6 @@ step1_local() {
 
     _api_url_want="http://${CONTAINER_IP}:${LAPI_PORT}/"
     _sec=""
-    _uci_key=""
     if [ -f /etc/config/crowdsec ]; then
         _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
         if [ -z "$_sec" ]; then
@@ -350,7 +372,6 @@ step1_local() {
             _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
         fi
         if [ -n "$_sec" ]; then
-            _uci_key="$(uci -q get "$_sec.api_key" 2>/dev/null)"
             uci set "$_sec.enabled=1"
             uci set "$_sec.api_url=$_api_url_want"
             uci set "$_sec.ipv4=1"
@@ -446,15 +467,15 @@ step1_local() {
 
     [ -n "$_sec" ] || { log "[步骤1] bouncer 段不存在，无法注册 api_key"; return 1; }
 
-    _need_reg=1
-    if [ -n "$_uci_key" ] && _ct_env "$CSCLI bouncers list" 2>/dev/null | grep -qw "$BOUNCER_NAME"; then
-        case "$_uci_key" in
-            *[!A-Za-z0-9+/=_-]*|*/*/*) _need_reg=1; log "[步骤1] 本地 api_key 格式异常，强制重注册" ;;
-            *) _need_reg=0; log "[步骤1] bouncer '$BOUNCER_NAME' 在册且本地 key 完整，跳过注册" ;;
-        esac
-    fi
-
-    if [ "$_need_reg" = "1" ]; then
+    # 关键改造：用「last_pull 是否成功」作为是否需要注册的判据，取代旧的
+    # 「本地有 key + bouncer 在册」判断。
+    # 原因：cscli bouncers inspect 不吐露已注册 key，无法比对本地 UCI key 与
+    # LAPI 已注册 key 是否一致；一旦固件重刷/容器重建导致 LAPI 侧换了新 key，
+    # 而 UCI 残留旧 key，旧的"跳过注册"判断会放过失配，导致 access forbidden。
+    if bouncer_pulling; then
+        log "[步骤1] 本地 API 正常：$BOUNCER_NAME last_pull=$(bouncer_last_pull)，跳过注册"
+    else
+        log "[步骤1] 本地 API 未就绪（last_pull 为空），执行「先删后加」重注册"
         if _ct_env "$CSCLI parsers remove crowdsecurity/whitelists --force" >/dev/null 2>&1; then
             _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
         fi
@@ -481,6 +502,30 @@ step1_local() {
     fi
 
     _ensure_bouncer_service
+
+    # 最终验证：等待 bouncer 真正从 LAPI 拉取成功（last_pull 有真实时间戳）。
+    _pull_ok=0
+    _k=0
+    while [ "$_k" -lt 6 ]; do
+        _k=$((_k+1))
+        if bouncer_pulling; then
+            _pull_ok=1
+            log "[步骤1] 验证通过：$BOUNCER_NAME last_pull=$(bouncer_last_pull)"
+            break
+        fi
+        log "[步骤1] bouncer 尚未拉取（第 $_k/6 次），等待 5s"
+        sleep 5
+    done
+    if [ "$_pull_ok" != "1" ]; then
+        log "[步骤1] 警告：bouncer 已注册但 last_pull 仍为空，本地 API 可能异常"
+    fi
+
+    # 远程 enroll 状态自检（cscli console status）
+    if console_enroll_ok; then
+        log "[步骤1] 远程 enroll 状态正常"
+    else
+        log "[步骤1] 远程 enroll 状态异常，步骤2 会尝试重新 enroll"
+    fi
 
     log "===== 步骤 1 完成 ====="
     return 0
@@ -758,25 +803,31 @@ EOF
 }
 
 setup_container_dns() {
+    # 容器 DNS 走宿主机网桥（BRIDGE_IP，默认 10.0.0.1）的 dnsmasq 统一解析，
+    # 避免直连公共 DNS 偶发 misbehaving。可在 /etc/config/custom_router_dns.txt 覆盖。
     _dns=""
     if [ -f /etc/config/custom_router_dns.txt ]; then
-        _dns=$(head -n1 /etc/config/custom_router_dns.txt | tr -d ' \t\r\n')
+        _dns=$(cat /etc/config/custom_router_dns.txt | tr '\n' ' ' | tr -d '\r')
     fi
-    [ -n "$_dns" ] || _dns='223.5.5.5'
+    if [ -z "$_dns" ] && [ -n "$BRIDGE_IP" ]; then
+        _dns="$BRIDGE_IP"
+    fi
+    [ -n "$_dns" ] || _dns='10.0.0.1'
     [ -d "$ROOTFS" ] || { log "[DNS] rootfs 未就绪，跳过 DNS 写入"; return 1; }
 
     _netfile="$ROOTFS/etc/systemd/network/10-eth0.network"
     if [ -f "$_netfile" ]; then
-        if grep -q '^DNS=' "$_netfile"; then
-            sed -i "s/^DNS=.*/DNS=${_dns}/" "$_netfile"
-        else
-            sed -i "/^\[Network\]/a DNS=${_dns}" "$_netfile"
-        fi
+        sed -i '/^[[:space:]]*DNS=/d' "$_netfile"
+        for _d in $_dns; do
+            sed -i "/^\[Network\]/a DNS=${_d}" "$_netfile"
+        done
     fi
 
     _resolv="$ROOTFS/etc/resolv.conf"
     rm -f "$_resolv" 2>/dev/null
-    echo "nameserver ${_dns}" > "$_resolv" 2>/dev/null
+    for _d in $_dns; do
+        echo "nameserver ${_d}" >> "$_resolv" 2>/dev/null
+    done
     chmod 644 "$_resolv" 2>/dev/null
     log "[DNS] 容器 DNS → ${_dns}"
     return 0

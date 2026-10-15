@@ -17,6 +17,9 @@ if ! mkdir "$LOCK" 2>/dev/null; then
     exit 0
 fi
 
-( /bin/sh "$BOOT" >>"$LOG" 2>&1; rmdir "$LOCK" 2>/dev/null ) &
+# 直接前台执行，脚本内部的 lxc-start -d 自己 daemonize，
+# 不再用 ( ... ) & 后台子 shell（那会导致 procd 回收子进程组时连带杀掉容器）。
+/bin/sh "$BOOT" >>"$LOG" 2>&1
+rmdir "$LOCK" 2>/dev/null
 
 exit 0

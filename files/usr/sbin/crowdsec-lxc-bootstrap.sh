@@ -12,7 +12,7 @@
 # 纯净镜像原则：镜像编译期只 apt 装 crowdsec，不写定制配置；
 # 网络/解析器/listen_uri/trusted_ips 等全部在本脚本运行期生成。
 # =============================================================================
-SCRIPT_VER="2026-10-15.24"
+SCRIPT_VER="2026-10-16.28"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -396,10 +396,54 @@ ensure_listen_uri() {
     return 1
 }
 
+# 关键：LAPI 启动前必须关掉 online_client，否则 crowdsec 启动时会强制
+# authenticate watcher 去 api.crowdsec.net 登录；容器 DNS 一旦不通（走
+# 宿主网桥 dnsmasq），就会 FATAL 崩溃循环，8080 永远起不来。
+# 注释掉 online_client 块后，本地 LAPI 独立工作；远程 enroll 用
+# cscli console enroll 单独建立凭据，二者互不影响。
+#
+# 注意（重要教训）：config.yaml 里有两处 credentials_path，语义完全不同：
+#   api.client.credentials_path  -> 指向 local_api_credentials.yaml（本地 LAPI，
+#                                    bouncer 靠它连，绝不能被注释，否则报
+#                                   "no API client section" 起不来）
+#   api.server.online_client.credentials_path -> 指向 online_api_credentials.yaml
+#                                   （中央 API，才是我们要关的）
+#
+# 正确做法：注释 online_client: 这一行 + 它下面缩进更深的 credentials_path
+# 子行（两者必须一起注释，否则子行悬空导致 YAML "value is not allowed"）。
+# 绝不去动 api.client 段（缩进较浅的）的 credentials_path。
+ensure_online_client_off() {
+    [ -f "$CROWDSEC_CFG" ] || { log "[配置] config.yaml 缺失"; return 1; }
+
+    # 用 sed 精确处理 online_client 块（busybox sed 支持 \1 反向引用）：
+    #   1) 注释 online_client 行本身
+    #   2) 注释紧随其后的 credentials_path 子行（缩进比 online_client 更深，
+    #      固定是 6 空格，即 "      credentials_path:"）
+    # 只动这两行，绝不影响 api.client 段（其 credentials_path 缩进是 4 空格）。
+    sed -i -E \
+        -e "s|^([[:space:]]*)online_client:.*|\\1# online_client: # Central API credentials disabled by bootstrap|" \
+        -e "s|^[[:space:]]{6}credentials_path:.*|      # credentials_path: /etc/crowdsec/online_api_credentials.yaml|" \
+        "$CROWDSEC_CFG" 2>/dev/null
+
+    # 反向修复：若 api.client 段的 credentials_path 被历史坏 sed 误注释，
+    # 必须恢复，否则 crowdsec 报 "no API client section" 起不来。
+    sed -i -E \
+        -e "/^[[:space:]]*client:/,/^[[:space:]]*server:/ s|^([[:space:]]*)#[[:space:]]*credentials_path:.*|\1credentials_path: /etc/crowdsec/local_api_credentials.yaml|" \
+        "$CROWDSEC_CFG" 2>/dev/null
+
+    if grep -qE "^[[:space:]]*# online_client:" "$CROWDSEC_CFG" 2>/dev/null; then
+        log "[配置] online_client 已注释，LAPI 不再强依赖中央 API 认证"
+        return 0
+    fi
+    log "[配置] online_client 注释失败"
+    return 1
+}
+
 setup_crowdsec_config() {
     setup_acquis || return 1
     ensure_listen_uri || return 1
     ensure_trusted_ip || return 1
+    ensure_online_client_off || return 1
     return 0
 }
 
@@ -413,9 +457,24 @@ prepare_container() {
 }
 
 # ---------- 本地 bouncer 注册 ----------
+# 注意：_ct_env 内部已经是 sh -c '...'，这里不能再给 $BOUNCER_NAME 加
+# 转义引号，否则名字会被多层 shell 剥离，cscli 收不到 name 参数，
+# 注册出来的 bouncer 名字会变成 "1"（-o raw 输出的 id 被误当名字）。
+# BOUNCER_NAME 默认 openwrt-fw，无空格/特殊字符，直接拼接是安全的。
 _bouncer_register_once() {
-    _ct_env "$CSCLI bouncers delete \"$BOUNCER_NAME\"" >/dev/null 2>&1 || true
-    _raw=$(_ct_env "$CSCLI bouncers add \"$BOUNCER_NAME\" -o raw" 2>&1)
+    # 先清理：删掉名字为 $BOUNCER_NAME 的旧记录，再删掉名字非法的残留记录
+    # （历史上引号 bug 会注册出 name="1" 的坏记录，若不清理会一直干扰）。
+    _ct_env "$CSCLI bouncers delete $BOUNCER_NAME" >/dev/null 2>&1 || true
+    _junk="$(_ct_env "$CSCLI bouncers list -o json" 2>/dev/null \
+             | grep -oE '"name":[[:space:]]*"[^"]*"' \
+             | sed -E 's/.*"name":[[:space:]]*"([^"]*)"/\1/' \
+             | grep -vx "$BOUNCER_NAME")"
+    for _jn in $_junk; do
+        _ct_env "$CSCLI bouncers delete \"$_jn\"" >/dev/null 2>&1 || true
+        log "[bouncer] 已清理残留坏记录 name=$_jn"
+    done
+
+    _raw=$(_ct_env "$CSCLI bouncers add $BOUNCER_NAME -o raw" 2>&1)
     _key=$(printf '%s\n' "$_raw" | sed -e 's/\r$//' \
            | grep -Eo '^[A-Za-z0-9+/=_-]{16,}$' | tail -n1)
     [ -n "$_key" ] || return 1
@@ -439,6 +498,58 @@ _ensure_bouncer_service() {
         log "[bouncer] 重启后仍未就绪"
     fi
     return 0
+}
+
+# 读取 LAPI 侧 bouncer 状态（cscli bouncers list -o json），判断本地
+# bouncer 是否真的拉取成功。返回 0 表示链路通，非 0 表示需要重注册。
+# 判据：存在 name == $BOUNCER_NAME 的记录，且该记录的 last_pull 非空。
+# 实现：cscli 的 json 输出每个 bouncer 对象是连续的多行，name 与 last_pull
+# 各自独占一行（缩进固定），因此用「遇到 name 行锁定当前对象 → 后续遇到
+# last_pull 行判断是否非空」的逐行状态机来匹配，避免同行贪婪匹配的坑。
+bouncer_pulling() {
+    _json="$(_ct_env "$CSCLI bouncers list -o json" 2>/dev/null)"
+    [ -n "$_json" ] || return 1
+
+    printf '%s\n' "$_json" | awk -v want="$BOUNCER_NAME" '
+        /"name":/ {
+            cur = $0
+            sub(/.*"name":[[:space:]]*"/, "", cur)
+            sub(/".*/, "", cur)
+            in_obj = (cur == want)
+        }
+        in_obj && /"last_pull":/ {
+            lp = $0
+            sub(/.*"last_pull":[[:space:]]*"/, "", lp)
+            sub(/".*/, "", lp)
+            if (lp != "") found = 1
+        }
+        END { exit (found ? 0 : 1) }
+    '
+}
+
+# 判断 LAPI 侧是否存在名为 $BOUNCER_NAME 的 bouncer（不管 last_pull）。
+bouncer_exists() {
+    _ct_env "$CSCLI bouncers list -o json" 2>/dev/null | grep -q "\"name\":[[:space:]]*\"$BOUNCER_NAME\""
+}
+
+# 本地 bouncer 注册 + 服务拉起 + 拉取验证的完整闭环。
+# 返回 0 表示 bouncer 已能正常拉取，非 0 表示重试后仍失败。
+_bouncer_heal() {
+    _max="${1:-3}"
+    _i=0
+    while [ "$_i" -lt "$_max" ]; do
+        _i=$((_i+1))
+        _bouncer_register_once || { log "[bouncer] 第 $_i/$_max 轮注册未拿到 key"; continue; }
+        _ensure_bouncer_service
+        _j=0
+        while [ "$_j" -lt 3 ]; do
+            _j=$((_j+1))
+            bouncer_pulling && { log "[bouncer] 已恢复拉取（第 $_i 轮注册）"; return 0; }
+            sleep 5
+        done
+        log "[bouncer] 第 $_i/$_max 轮注册后 last_pull 仍为空"
+    done
+    return 1
 }
 
 # ---------- 远程 console enroll ----------
@@ -531,7 +642,9 @@ main() {
     _wait_ct_running || { log "容器起不来"; exit 1; }
     log "容器已启动"
 
-    # 步骤1：注册 bouncer（本地 api_key 缺失才建）
+    # 步骤1：注册 bouncer（以「LAPI 侧 last_pull 是否成功」为判据，
+    # 而不是只看本地 UCI 有没有 key。避免 LAPI 侧记录错位/名字错成"1"
+    # 或 key 失配时，本地有 key 就盲目跳过，导致 bouncer 一直拉不到数据）
     _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
     if [ -z "$_sec" ]; then
         uci add crowdsec bouncer >/dev/null 2>&1
@@ -540,13 +653,7 @@ main() {
     if [ -z "$_sec" ]; then
         log "/etc/config/crowdsec 无 bouncer 段，bouncer 包未装进固件"
     else
-        if [ -z "$(uci -q get "$_sec.api_key" 2>/dev/null)" ]; then
-            log "本地 api_key 为空，注册 bouncer"
-            _bouncer_register_once || { log "注册 bouncer 失败"; exit 1; }
-            log "已写入本地 api（$_sec）"
-        else
-            log "本地 api 已存在，跳过注册"
-        fi
+        # 先固化 bouncer 的 api_url 等基础字段（幂等）
         uci -q set "$_sec.api_url=http://${CONTAINER_IP}:${LAPI_PORT}/"
         uci -q set "$_sec.enabled=1"
         uci -q set "$_sec.ipv4=1"
@@ -557,6 +664,14 @@ main() {
         uci -q del "$_sec.interface"
         uci add_list "$_sec.interface=br-lan"
         uci commit crowdsec
+
+        # 判据：LAPI 侧 bouncer 能否正常拉取（last_pull 有值）
+        if bouncer_pulling; then
+            log "本地 bouncer 链路已通（last_pull 有效），跳过注册"
+        else
+            log "bouncer 链路未通（name 错位或 last_pull 空），执行重注册"
+            _bouncer_heal 3 || { log "bouncer 重注册 3 轮仍失败，请检查 LAPI/8080"; exit 1; }
+        fi
         _ensure_bouncer_service
     fi
 

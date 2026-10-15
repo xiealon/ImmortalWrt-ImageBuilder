@@ -12,7 +12,7 @@
 # 纯净镜像原则：镜像编译期只 apt 装 crowdsec，不写定制配置；
 # 网络/解析器/listen_uri/trusted_ips 等全部在本脚本运行期生成。
 # =============================================================================
-SCRIPT_VER="2026-10-16.32"
+SCRIPT_VER="2026-10-16.33"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -684,12 +684,17 @@ main() {
     prepare_container || { log "配置生成失败"; exit 1; }
 
     # 步骤1：启动容器（每次开机无条件直接拉起）
-    # 关键教训：LXC 6.0.5 在 OpenWrt 上 lxc-start -d 不可靠（daemonize 后
-    # 容器进程被 procd 回收，导致 lxc-ls 显示 STOPPED）。改用 -F（前台）
-    # 放到后台运行，容器进程真正常驻。already running 时 -F 会报错，用
-    # 错误重定向 + || true 容错，不影响已运行的容器。
+    # 关键教训：LXC 6.0.5 在 OpenWrt 的 rc.local（procd）环境下，lxc-start -d
+    # 的 daemonize 不彻底，容器监控进程仍被 procd 追踪，rc.local 退出时被
+    # 连带回收，导致 lxc-ls 显示 STOPPED。改用 setsid 创建新会话彻底脱离
+    # procd 的进程组/会话追踪，容器进程才能真正常驻。
     log "启动容器 $LXC_NAME"
-    nohup lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -F >/dev/null 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+        setsid lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
+    else
+        # 无 setsid 时回退到 nohup + -F 后台（-F 前台模式实测能正常启动）
+        nohup lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -F >/dev/null 2>&1 &
+    fi
     _wait_ct_running || { log "容器起不来"; exit 1; }
     log "容器已启动"
 

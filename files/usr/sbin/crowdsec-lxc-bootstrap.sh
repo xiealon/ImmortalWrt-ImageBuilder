@@ -1,5 +1,18 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-15.23"
+# =============================================================================
+# /usr/sbin/crowdsec-lxc-bootstrap.sh
+# 由 /etc/rc.local 后台拉起，每次开机跑一遍，幂等安全。
+#
+# 步骤（线性，每步包在 if 内只验证自己的前置条件）：
+#   前置  容器 config 校验（缺失或与模板不一致才 reconcile）
+#   步骤1 解压镜像（仅首次）→ 生成配置 → 启动容器 → 注册 bouncer（本地，不联网）
+#   步骤2 控制台绑定 enroll（远程，联网；仅 console status 异常时才做）
+#   收尾  检查 nft 表
+#
+# 纯净镜像原则：镜像编译期只 apt 装 crowdsec，不写定制配置；
+# 网络/解析器/listen_uri/trusted_ips 等全部在本脚本运行期生成。
+# =============================================================================
+SCRIPT_VER="2026-10-15.24"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -8,8 +21,6 @@ ROOTFS="$LXC_PATH/$LXC_NAME/rootfs"
 CFG="$LXC_PATH/$LXC_NAME/config"
 TARBALL="${TARBALL:-$CS_HOME/lxc-ubuntu.tar.gz}"
 LEGACY_TARBALL="/opt/lxc-ubuntu.tar.gz"
-BASELINE="$CS_HOME/baseline"
-STATE_FILE="$BASELINE/STATE"
 LAPI_PORT="${LAPI_PORT:-8080}"
 BOUNCER_NAME="${BOUNCER_NAME:-openwrt-fw}"
 ENROLL_KEY_FILE="${ENROLL_KEY_FILE:-/etc/config/crowdsec_enroll_key.txt}"
@@ -41,8 +52,13 @@ ct() { timeout 30 lxc-attach -P "$LXC_PATH" -n "$LXC_NAME" -- "$@"; }
 ct_running() { lxc-ls -P "$LXC_PATH" --running 2>/dev/null | grep -qw "$LXC_NAME"; }
 ct_exists() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; }
 ct_pid() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>/dev/null | sed -n 's/^PID:[[:space:]]*//p' | head -n1; }
+_pgrep_bouncer() { pgrep -f "crowdsec-firewall-bouncer" >/dev/null 2>&1; }
+_ct_env() { ct sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; '"$1"; }
+
+cs_active_on_host() { _pgrep_bouncer; }
+nft_table_ready() { nft list table ip crowdsec >/dev/null 2>&1; }
+
 ct_force_stop() {
-    _pid="$(ct_pid)"
     ct_running || return 0
     lxc-stop -P "$LXC_PATH" -n "$LXC_NAME" -k >/dev/null 2>&1
     _i=0
@@ -53,16 +69,11 @@ ct_force_stop() {
             [ -n "$_pid" ] && kill -9 "$_pid" 2>/dev/null
             sleep 1
         fi
-        [ "$_i" -ge 24 ] && { log "[步骤1] 容器无法停止，跳过重建"; return 1; }
+        [ "$_i" -ge 24 ] && { log "容器无法停止，跳过重建"; return 1; }
         sleep $SLEEP
     done
     return 0
 }
-_pgrep_bouncer() { pgrep -f "crowdsec-firewall-bouncer" >/dev/null 2>&1; }
-_ct_env() { ct sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; '"$1"; }
-
-cs_active_on_host() { _pgrep_bouncer; }
-nft_table_ready() { nft list table ip crowdsec >/dev/null 2>&1; }
 
 _wait() {
     _wf="$1"; _wn="${2:-$MAX_WAIT}"
@@ -76,6 +87,7 @@ _wait() {
 }
 _wait_ct_running() { _wait ct_running 12; }
 
+# ---------- 网桥 / 防火墙 ----------
 setup_lxc_firewall() {
     _lsc_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
     _lan_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
@@ -158,6 +170,7 @@ setup_bridge() {
     setup_lxc_firewall
 }
 
+# ---------- 容器 config ----------
 write_cfg() {
     _dst="${1:-$CFG}"
     cat > "$_dst" <<EOF
@@ -196,23 +209,24 @@ apply_cfg() {
     ct_exists
 }
 
+# ---------- 镜像解压（仅首次） ----------
 rebuild_from_image() {
-    log "[步骤1] 尝试从镜像重建 rootfs：$TARBALL"
-    [ -f "$TARBALL" ] || { log "[步骤1] 镜像文件不存在，无法重建"; return 1; }
+    log "尝试从镜像解压 rootfs：$TARBALL"
+    [ -f "$TARBALL" ] || { log "镜像文件不存在，无法解压"; return 1; }
     ct_force_stop || return 1
     rm -rf "$ROOTFS" 2>/dev/null
     mkdir -p "$ROOTFS" || return 1
     if ( set -C; : > "$ROOTFS/.extracting" ) 2>/dev/null; then
         if tar -xzf "$TARBALL" -C "$ROOTFS"; then
             rm -f "$ROOTFS/.extracting"
-            log "[步骤1] 重建完成（$(du -sh "$ROOTFS" 2>/dev/null | cut -f1)）"
+            log "解压完成（$(du -sh "$ROOTFS" 2>/dev/null | cut -f1)）"
             return 0
         fi
         rm -f "$ROOTFS/.extracting"
-        log "[步骤1] 解压失败"
+        log "解压失败"
         return 1
     fi
-    log "[步骤1] 另一实例正在解压，等待完成"
+    log "另一实例正在解压，等待完成"
     _i=0
     while [ -f "$ROOTFS/.extracting" ]; do
         _i=$((_i+1)); [ "$_i" -ge $MAX_WAIT ] && break; sleep $SLEEP
@@ -220,6 +234,7 @@ rebuild_from_image() {
     [ -f "$CROWDSEC_CFG" ]
 }
 
+# ---------- 运行期生成配置 ----------
 ensure_trusted_ip() {
     [ -f "$CROWDSEC_CFG" ] || return 1
     [ -n "$BRIDGE_IP" ] || return 1
@@ -240,100 +255,6 @@ ensure_trusted_ip() {
     rm -f "$CROWDSEC_CFG.tmp" 2>/dev/null
     log "[配置] 补 trusted_ips 失败"
     return 1
-}
-
-bouncer_last_pull() {
-    _ct_env "$CSCLI bouncers inspect \"$BOUNCER_NAME\" -o json" 2>/dev/null \
-        | sed -n 's/.*"last_pull"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        | head -n1
-}
-
-bouncer_pulling() {
-    _lp="$(bouncer_last_pull)"
-    [ -n "$_lp" ] && [ "$_lp" != "null" ]
-}
-
-host_bouncer_ok() {
-    _yaml="/tmp/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
-    _log="/tmp/log/crowdsec-firewall-bouncer.log"
-    [ -f "$_yaml" ] || { log "[bouncer] 宿主机 bouncer 配置文件缺失: $_yaml"; return 1; }
-    grep -qE '^[[:space:]]*api_key:[[:space:]]*[A-Za-z0-9+/=_-]{16,}' "$_yaml" || { log "[bouncer] 宿主机 bouncer api_key 为空或非明文"; return 1; }
-    if [ -f "$_log" ]; then
-        grep -qiE "forbidden|unauthorized|connection refused|dial tcp|401|403" "$_log" && { log "[bouncer] 宿主机 bouncer 日志存在认证/连接错误"; return 1; }
-    fi
-    return 0
-}
-
-console_enroll_ok() {
-    _out="$(_ct_env "$CSCLI console status" 2>&1)"
-    [ -n "$_out" ] \
-        && printf '%s\n' "$_out" | grep -qiE "authenticated" \
-        && printf '%s\n' "$_out" | grep -qiE "enrolled" \
-        && ! printf '%s\n' "$_out" | grep -qiE "not registered|not enrolled|unauthorized|forbidden|invalid|revoked"
-}
-
-_ensure_bouncer_service() {
-    if cs_active_on_host && nft_table_ready; then
-        return 0
-    fi
-    service crowdsec-firewall-bouncer enable 2>/dev/null
-    service crowdsec-firewall-bouncer restart 2>/dev/null
-    sleep 3
-    if cs_active_on_host && nft_table_ready; then
-        log "[bouncer] 已生效"
-    else
-        log "[bouncer] 重启后仍未就绪"
-    fi
-    return 0
-}
-
-write_state_mark() {
-    _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
-    _key=""
-    [ -n "$_sec" ] && _key="$(uci -q get "$_sec.api_key" 2>/dev/null)"
-    [ -n "$_key" ] || { log "[标记] api_key 为空，不写稳定态标记"; return 1; }
-
-    mkdir -p "$BASELINE" 2>/dev/null || { log "[标记] 无法创建 $BASELINE"; return 1; }
-    cat > "$STATE_FILE" <<EOF
-VER=$SCRIPT_VER
-TIME=$(date '+%F %T')
-CONTAINER=$LXC_NAME
-CONTAINER_IP=$CONTAINER_IP
-BRIDGE_IP=$BRIDGE_IP
-LAPI_PORT=$LAPI_PORT
-API_URL=$(uci -q get "$_sec.api_url" 2>/dev/null)
-UCI_SECTION=$_sec
-ENROLL_KEY=$( [ -f "$ENROLL_KEY_FILE" ] && head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n' )
-EOF
-    log "[标记] 稳定态标记已写入 $STATE_FILE"
-    return 0
-}
-
-mount_cgroup() {
-    if mountpoint -q /sys/fs/cgroup 2>/dev/null; then
-        log "[准备] cgroup 已挂载"
-        return 0
-    fi
-    mkdir -p /sys/fs/cgroup
-    if mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null; then
-        log "[准备] cgroup2 已挂载"
-    else
-        log "[准备] cgroup2 挂载失败（可能内核已挂载或不支持）"
-    fi
-    return 0
-}
-
-setup_syslog_forward() {
-    [ -n "$CONTAINER_IP" ] || return 0
-    uci set system.@system[0].log_ip="${CONTAINER_IP}"
-    uci set system.@system[0].log_port='514'
-    uci set system.@system[0].log_proto='udp'
-    uci -q set system.@system[0].log_remote='1'
-    uci -q set system.@system[0].cronloglevel='5'
-    uci commit system
-    /etc/init.d/log restart >/dev/null 2>&1
-    log "[日志] 宿主 syslog 已外发至 ${CONTAINER_IP}:514/udp"
-    return 0
 }
 
 _container_dns() {
@@ -493,13 +414,7 @@ prepare_container() {
     return 0
 }
 
-baseline_valid() {
-    [ -f "$STATE_FILE" ] || return 1
-    grep -q '^VER=' "$STATE_FILE" 2>/dev/null || return 1
-    return 0
-}
-
-
+# ---------- 本地 bouncer 注册 ----------
 _bouncer_register_once() {
     _ct_env "$CSCLI bouncers delete \"$BOUNCER_NAME\"" >/dev/null 2>&1 || true
     _raw=$(_ct_env "$CSCLI bouncers add \"$BOUNCER_NAME\" -o raw" 2>&1)
@@ -513,86 +428,28 @@ _bouncer_register_once() {
     return 0
 }
 
-_bouncer_heal() {
-    _max="${1:-5}"
-    _i=0
-    while [ "$_i" -lt "$_max" ]; do
-        _i=$((_i+1))
-        if _bouncer_register_once; then
-            _ensure_bouncer_service
-            _j=0
-            while [ "$_j" -lt 3 ]; do
-                _j=$((_j+1))
-                bouncer_pulling && { log "[自愈] bouncer 已恢复拉取（第 $_i 轮注册）"; return 0; }
-                sleep 5
-            done
-            log "[自愈] 第 $_i/$_max 轮重注册后 last_pull 仍为空"
-        else
-            log "[自愈] 第 $_i/$_max 轮注册未拿到 key"
-        fi
-    done
-    return 1
-}
-
-diag_bouncer() {
-    log "[诊断] ---- bouncer 异常排查 ----"
-
-    log "[诊断] 1) 解析器："
-    _ct_env "$CSCLI parsers list -o json 2>/dev/null | grep -c '\"name\"'" 2>/dev/null \
-        | sed 's/^/  parsers 数量: /'
-    _ct_env "[ -f /etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml ] && echo '  openwrt-dropbear.yaml 在位' || echo '  openwrt-dropbear.yaml 缺失'" 2>/dev/null
-
-    log "[诊断] 2) 宿主机（openwrt）网络："
-    if ip link show lxcbr0 >/dev/null 2>&1; then
-        echo "  lxcbr0 存在: $(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)"
-    else
-        echo "  lxcbr0 缺失"
+_ensure_bouncer_service() {
+    if cs_active_on_host && nft_table_ready; then
+        return 0
     fi
-
-    log "[诊断] 3) LXC 容器网络："
-    _ct_env "ip -4 addr show eth0 2>/dev/null | sed -n 's/.*inet \\([0-9.]*\\)\\/.*/  eth0: \\1/p'" 2>/dev/null
-
-    log "[诊断] 4) LAPI 端口 $LAPI_PORT："
-    if _ct_env "timeout 5 bash -c '</dev/tcp/${CONTAINER_IP}/${LAPI_PORT}'" 2>/dev/null; then
-        echo "  ${CONTAINER_IP}:${LAPI_PORT} 可连"
+    service crowdsec-firewall-bouncer enable 2>/dev/null
+    service crowdsec-firewall-bouncer restart 2>/dev/null
+    sleep 3
+    if cs_active_on_host && nft_table_ready; then
+        log "[bouncer] 已生效"
     else
-        echo "  ${CONTAINER_IP}:${LAPI_PORT} 不通"
+        log "[bouncer] 重启后仍未就绪"
     fi
-
-    log "[诊断] 5) bouncer 状态："
-    _ct_env "$CSCLI bouncers list" 2>/dev/null | sed 's/^/  /'
-
-    log "[诊断] 6) 宿主机 bouncer 配置文件："
-    _yaml="/tmp/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
-    if [ -f "$_yaml" ]; then
-        grep -E '^[[:space:]]*(api_url|api_key):' "$_yaml" | sed 's/^/  /'
-    else
-        echo "  缺失: $_yaml"
-    fi
-
-    log "[诊断] 7) 宿主机 bouncer 日志（末 5 行）："
-    _log="/tmp/log/crowdsec-firewall-bouncer.log"
-    if [ -f "$_log" ]; then
-        tail -5 "$_log" | sed 's/^/  /'
-    else
-        echo "  缺失: $_log"
-    fi
-    log "[诊断] ---- 排查结束 ----"
-}
-
-self_check() {
-    SELF_CT=0; SELF_PULL=0; SELF_CONS=0; SELF_ALL=0
-
-    ct_running && SELF_CT=1
-    bouncer_pulling && SELF_PULL=1
-    console_enroll_ok && SELF_CONS=1
-
-    [ "$SELF_CT" = "1" ] && [ "$SELF_PULL" = "1" ] && [ "$SELF_CONS" = "1" ] && SELF_ALL=1
-
-    log "[自检] 容器=$([ "$SELF_CT" = "1" ] && echo 运行 || echo 停止)"
-    log "[自检] bouncer last_pull=$([ "$SELF_PULL" = "1" ] && echo 正常 || echo 空)"
-    log "[自检] console status=$([ "$SELF_CONS" = "1" ] && echo 正常 || echo 异常)"
     return 0
+}
+
+# ---------- 远程 console enroll ----------
+console_enroll_ok() {
+    _out="$(_ct_env "$CSCLI console status" 2>&1)"
+    [ -n "$_out" ] \
+        && printf '%s\n' "$_out" | grep -qiE "authenticated" \
+        && printf '%s\n' "$_out" | grep -qiE "enrolled" \
+        && ! printf '%s\n' "$_out" | grep -qiE "not registered|not enrolled|unauthorized|forbidden|invalid|revoked"
 }
 
 re_enroll() {
@@ -600,12 +457,8 @@ re_enroll() {
 
     _enroll_key=""
     [ -f "$ENROLL_KEY_FILE" ] && _enroll_key="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
-    if [ -z "$_enroll_key" ] && [ -f "$STATE_FILE" ]; then
-        _enroll_key="$(sed -n 's/^ENROLL_KEY=//p' "$STATE_FILE" | head -n1 | tr -d ' \t\r\n')"
-        [ -n "$_enroll_key" ] && log "[自愈] 注册码文件为空，使用备份中的注册码"
-    fi
     if [ -z "$_enroll_key" ]; then
-        log "[自愈] 无注册码（文件与备份均无），放弃 re-enroll"
+        log "[自愈] 无注册码，放弃 re-enroll"
         return 1
     fi
 
@@ -640,141 +493,92 @@ re_enroll() {
     return 1
 }
 
+# ---------- 主流程 ----------
 main() {
     log "===== crowdsec-lxc-bootstrap v$SCRIPT_VER 开始（容器 $LXC_NAME）====="
 
+    # 旧镜像路径迁移
     if [ ! -f "$TARBALL" ] && [ -f "$LEGACY_TARBALL" ]; then
         mkdir -p "$CS_HOME" 2>/dev/null && mv -f "$LEGACY_TARBALL" "$TARBALL" 2>/dev/null \
             && log "镜像已从 $LEGACY_TARBALL 迁移到 $TARBALL"
     fi
 
-    mount_cgroup
-    setup_syslog_forward
-
-    if baseline_valid; then
-        FIRST_BOOT=0
-        log "判定文件齐全，非首次开机"
-    else
-        FIRST_BOOT=1
-        log "判定文件缺失，认定为第一次开机"
-    fi
-
+    # 无镜像且无 rootfs，本机不带 CrowdSec，跳过
     if [ ! -f "$TARBALL" ] && [ ! -f "$CROWDSEC_CFG" ]; then
         log "无镜像且无 rootfs，本机不带 CrowdSec，跳过"
         exit 0
     fi
 
-    if ! ct_exists || [ ! -f "$CROWDSEC_CFG" ]; then
-        log "容器或 rootfs 未就绪，从镜像重建"
-        rebuild_from_image || { log "镜像重建失败"; exit 1; }
+    # 步骤0：config 就绪（缺失才写）
+    mkdir -p "$LXC_PATH/$LXC_NAME" 2>/dev/null
+    if [ ! -f "$CFG" ]; then
+        write_cfg
+        log "已写入容器 config"
+    fi
+    apply_cfg || { log "config 无法解析，放弃"; exit 1; }
+
+    # 步骤1：解压镜像（仅首次，rootfs 无 crowdsec 时）
+    if [ ! -f "$CROWDSEC_CFG" ]; then
+        log "rootfs 未就绪，从镜像解压"
+        rebuild_from_image || { log "镜像解压失败"; exit 1; }
     fi
 
+    # 步骤1：生成配置（运行期，幂等）
+    setup_bridge
+    prepare_container || { log "配置生成失败"; exit 1; }
+
+    # 步骤1：启动容器（没跑才拉起）
     if ! ct_running; then
-        setup_bridge
-        prepare_container || true
-        if ! lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null || ! _wait_ct_running; then
-            log "容器起不来，用镜像重建后重试"
-            rebuild_from_image && prepare_container || true
-            lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
-            _wait_ct_running || { log "重建后仍起不来"; exit 1; }
-        fi
+        log "启动容器 $LXC_NAME"
+        lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
+        _wait_ct_running || { log "容器起不来"; exit 1; }
         log "容器已启动"
     fi
 
-    prepare_container || true
-
-    if [ -f /etc/config/crowdsec ]; then
+    # 步骤1：注册 bouncer（本地 api_key 缺失才建）
+    _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    if [ -z "$_sec" ]; then
+        uci add crowdsec bouncer >/dev/null 2>&1
         _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
-        if [ -z "$_sec" ]; then
-            uci add crowdsec bouncer >/dev/null 2>&1
-            _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
-        fi
-        if [ -n "$_sec" ]; then
-            uci set "$_sec.enabled=1"
-            uci set "$_sec.api_url=http://${CONTAINER_IP}:${LAPI_PORT}/"
-            uci set "$_sec.ipv4=1"
-            uci set "$_sec.ipv6=0"
-            uci set "$_sec.deny_action=drop"
-            uci set "$_sec.filter_input=1"
-            uci set "$_sec.filter_forward=1"
-            uci -q del "$_sec.interface"
-            uci add_list "$_sec.interface=br-lan"
-            uci commit crowdsec
-            log "[配置] bouncer 段已预填（api_url=http://${CONTAINER_IP}:${LAPI_PORT}/）"
-        fi
+    fi
+    if [ -z "$_sec" ]; then
+        log "/etc/config/crowdsec 无 bouncer 段，bouncer 包未装进固件"
     else
-        log "[配置] /etc/config/crowdsec 不存在，bouncer 包未装进固件"
+        if [ -z "$(uci -q get "$_sec.api_key" 2>/dev/null)" ]; then
+            log "本地 api_key 为空，注册 bouncer"
+            _bouncer_register_once || { log "注册 bouncer 失败"; exit 1; }
+            log "已写入本地 api（$_sec）"
+        else
+            log "本地 api 已存在，跳过注册"
+        fi
+        uci -q set "$_sec.api_url=http://${CONTAINER_IP}:${LAPI_PORT}/"
+        uci -q set "$_sec.enabled=1"
+        uci -q set "$_sec.ipv4=1"
+        uci -q set "$_sec.ipv6=0"
+        uci -q set "$_sec.deny_action=drop"
+        uci -q set "$_sec.filter_input=1"
+        uci -q set "$_sec.filter_forward=1"
+        uci -q del "$_sec.interface"
+        uci add_list "$_sec.interface=br-lan"
+        uci commit crowdsec
+        _ensure_bouncer_service
     fi
 
-    self_check
-
-    if [ "$SELF_ALL" = "1" ]; then
-        log "三项自检全部通过，跳过修复流程"
-        R1=0; R2=0
-    else
-        if [ "$SELF_CT" = "0" ]; then
-            log "容器仍未运行，重建"
-            rebuild_from_image && prepare_container || true
-            lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
-            _wait_ct_running || { log "重建后仍起不来"; exit 1; }
-        fi
-
-        if [ "$SELF_PULL" = "0" ]; then
-            log "bouncer 未拉取，进入自愈"
-            diag_bouncer
-            if host_bouncer_ok; then
-                log "宿主机 bouncer 配置/日志正常，仅重注册恢复"
-                if _bouncer_heal 5; then
-                    :
-                else
-                    log "重注册 5 轮仍失败，判定本地 API 链路损坏，用镜像重建"
-                    rebuild_from_image && prepare_container || true
-                    lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
-                    _wait_ct_running || { log "重建后仍起不来"; exit 1; }
-                    _bouncer_register_once || true
-                    _ensure_bouncer_service
-                fi
-            else
-                log "宿主机 bouncer 配置/日志异常，用镜像重建"
-                rebuild_from_image && prepare_container || true
-                lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
-                _wait_ct_running || { log "重建后仍起不来"; exit 1; }
-                _bouncer_register_once || true
-                _ensure_bouncer_service
-            fi
-        fi
-
-        self_check
-        [ "$SELF_CT" = "1" ] && [ "$SELF_PULL" = "1" ] && R1=0 || R1=1
-        [ "$SELF_CONS" = "1" ] && R2=0 || R2=1
-    fi
-
-    if [ "$R1" = "0" ] && [ "$FIRST_BOOT" = "1" ]; then
-        write_state_mark; R3=$?
-    elif [ "$R1" = "0" ]; then
-        log "已有稳定态标记，跳过"
-        R3=0
-    else
-        R3=1
-    fi
-
-    if [ "$R2" = "0" ]; then
-        :
+    # 步骤2：enroll（仅 console status 异常时）
+    if console_enroll_ok; then
+        log "console 状态正常，跳过 enroll"
     else
         re_enroll || log "console 自愈未成功（无注册码或 enroll 失败），下次开机再试"
     fi
 
-    log "----- 汇总 -----"
-    log "容器+本地=$R1 console=$R2 标记=$R3"
-
-    _final_key=""
-    _final_sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
-    [ -n "$_final_sec" ] && _final_key="$(uci -q get "$_final_sec.api_key" 2>/dev/null)"
-    if [ -z "$_final_key" ]; then
-        log "终局检查失败：api_key 仍为空"
-        exit 1
+    # 收尾：nft 表检查
+    sleep 3
+    if nft_table_ready; then
+        log "nftables crowdsec 表已建立，链路打通"
+    else
+        log "未看到 nft crowdsec 表，检查 bouncer 日志"
     fi
-    log "终局检查通过：api_key 已就绪（$R1$R2$R3）"
+    log "引导结束"
     exit 0
 }
 

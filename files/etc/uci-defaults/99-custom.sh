@@ -161,7 +161,7 @@ fi
 CS_HOME='/etc/crowdsec'
 if [ -d "$CS_HOME" ] || [ -f "$CS_HOME/lxc-ubuntu.tar.gz" ] || [ -d /srv/lxc/ubuntu/rootfs ]; then
     mkdir -p "$CS_HOME" 2>/dev/null
-    for _keep in "$CS_HOME/baseline" "$CS_HOME/lxc-ubuntu.tar.gz"; do
+    for _keep in "$CS_HOME/lxc-ubuntu.tar.gz"; do
         grep -q "^$_keep" /etc/sysupgrade.conf 2>/dev/null \
             || echo "$_keep" >> /etc/sysupgrade.conf 2>/dev/null
     done

@@ -167,6 +167,8 @@ setup_bridge() {
 write_cfg() {
     _dst="${1:-$CFG}"
     cat > "$_dst" <<EOF
+lxc.start.auto = 1
+lxc.start.order = 10
 lxc.arch = amd64
 lxc.include = /usr/share/lxc/config/common.conf
 lxc.rootfs.path = dir:$ROOTFS
@@ -340,32 +342,160 @@ setup_syslog_forward() {
     return 0
 }
 
-setup_container_dns() {
+_container_dns() {
     _dns=""
     if [ -f /etc/config/custom_router_dns.txt ]; then
         _dns=$(cat /etc/config/custom_router_dns.txt | tr '\n' ' ' | tr -d '\r')
     fi
-    if [ -z "$_dns" ] && [ -n "$BRIDGE_IP" ]; then
-        _dns="$BRIDGE_IP"
-    fi
+    [ -n "$_dns" ] || _dns="$BRIDGE_IP"
     [ -n "$_dns" ] || _dns='10.0.0.1'
-    [ -d "$ROOTFS" ] || { log "[DNS] rootfs 未就绪，跳过 DNS 写入"; return 1; }
+    printf '%s' "$_dns"
+}
 
+setup_container_network() {
+    [ -d "$ROOTFS" ] || { log "[网络] rootfs 未就绪"; return 1; }
+    _dns="$(_container_dns)"
     _netfile="$ROOTFS/etc/systemd/network/10-eth0.network"
-    if [ -f "$_netfile" ]; then
-        sed -i '/^[[:space:]]*DNS=/d' "$_netfile"
-        for _d in $_dns; do
-            sed -i "/^\[Network\]/a DNS=${_d}" "$_netfile"
-        done
-    fi
+    mkdir -p "$(dirname "$_netfile")" 2>/dev/null
+    cat > "$_netfile" <<EOF
+[Match]
+Name=eth0
 
+[Network]
+Address=${CONTAINER_IP}/24
+Gateway=${BRIDGE_IP}
+DNS=${_dns}
+EOF
+    log "[网络] 容器静态 IP ${CONTAINER_IP}/24 网关 ${BRIDGE_IP} DNS ${_dns}"
+    return 0
+}
+
+setup_container_boot() {
+    [ -d "$ROOTFS" ] || { log "[自启] rootfs 未就绪"; return 1; }
+    _wants="$ROOTFS/etc/systemd/system/multi-user.target.wants"
+    mkdir -p "$_wants" 2>/dev/null
+    [ -f "$ROOTFS/lib/systemd/system/systemd-networkd.service" ] \
+        && ln -sf /lib/systemd/system/systemd-networkd.service "$_wants/systemd-networkd.service" 2>/dev/null
+    [ -f "$ROOTFS/lib/systemd/system/crowdsec.service" ] \
+        && ln -sf /lib/systemd/system/crowdsec.service "$_wants/crowdsec.service" 2>/dev/null
+    echo "crowdsec" > "$ROOTFS/etc/hostname" 2>/dev/null
+    : > "$ROOTFS/etc/machine-id" 2>/dev/null
+    log "[自启] networkd + crowdsec 软链已建，hostname/machine-id 已初始化"
+    return 0
+}
+
+setup_resolv() {
+    [ -d "$ROOTFS" ] || { log "[DNS] rootfs 未就绪"; return 1; }
+    _dns="$(_container_dns)"
     _resolv="$ROOTFS/etc/resolv.conf"
     rm -f "$_resolv" 2>/dev/null
-    for _d in $_dns; do
-        echo "nameserver ${_d}" >> "$_resolv" 2>/dev/null
-    done
+    echo "nameserver ${_dns}" > "$_resolv" 2>/dev/null
     chmod 644 "$_resolv" 2>/dev/null
-    log "[DNS] 容器 DNS → ${_dns}"
+    log "[DNS] 容器 resolv.conf → ${_dns}"
+    return 0
+}
+
+setup_acquis() {
+    [ -d "$ROOTFS/etc/crowdsec" ] || { log "[配置] rootfs 内无 crowdsec"; return 1; }
+    mkdir -p "$ROOTFS/etc/crowdsec/acquis.d" \
+             "$ROOTFS/etc/crowdsec/parsers/s01-parse" \
+             "$ROOTFS/etc/crowdsec/parsers/s02-enrich" 2>/dev/null
+
+    _acq="$ROOTFS/etc/crowdsec/acquis.d/router.yaml"
+    cat > "$_acq" <<'EOF'
+source: syslog
+listen_addr: 0.0.0.0
+listen_port: 514
+protocol: udp
+labels:
+  type: syslog
+EOF
+
+    _par="$ROOTFS/etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml"
+    cat > "$_par" <<'EOF'
+name: openwrt/dropbear-logs
+description: Parse OpenWrt non-PAM dropbear logs
+filter: evt.Parsed.program == 'dropbear'
+onsuccess: next_stage
+nodes:
+  - grok:
+      pattern: "Bad password attempt for '?%{DATA:username}'? from %{IP:source_ip}:%{INT:source_port}"
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: ssh_failed-auth
+  - grok:
+      pattern: "Login attempt for nonexistent user %{GREEDYDATA:username} from %{IP:source_ip}:%{INT:source_port}"
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: ssh_failed-auth
+  - grok:
+      pattern: "Exit before auth from <%{IP:source_ip}:%{INT:source_port}>"
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: ssh_failed-auth
+  - grok:
+      pattern: "Password auth succeeded for '?%{DATA:username}'? from %{IP:source_ip}:%{INT:source_port}"
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: ssh_auth_success
+  - grok:
+      pattern: "Pubkey auth succeeded for '?%{DATA:username}'? with key %{DATA:key_type} from %{IP:source_ip}:%{INT:source_port}"
+      apply_on: message
+    statics:
+      - meta: log_type
+        value: ssh_auth_success
+statics:
+  - meta: service
+    value: ssh
+  - meta: source_ip
+    expression: evt.Parsed.source_ip
+  - meta: username
+    expression: evt.Parsed.username
+EOF
+
+    _wl="$ROOTFS/etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml"
+    cat > "$_wl" <<'EOF'
+name: openwrt/my-whitelist
+description: 'No whitelist configured - placeholder only'
+whitelist:
+  reason: placeholder, nothing is whitelisted
+  ip:
+    - 127.0.0.1
+  cidr:
+    - 240.0.0.0/4
+EOF
+    log "[配置] 解析器 + 日志源 + 白名单已写入"
+    return 0
+}
+
+ensure_listen_uri() {
+    [ -f "$CROWDSEC_CFG" ] || { log "[配置] config.yaml 缺失"; return 1; }
+    grep -qE "^[[:space:]]*listen_uri:[[:space:]]*['\"]?0\.0\.0\.0:${LAPI_PORT}" "$CROWDSEC_CFG" 2>/dev/null \
+        && { log "[配置] listen_uri 已就绪 0.0.0.0:${LAPI_PORT}"; return 0; }
+    sed -i -E "s|^([[:space:]]*listen_uri:)[[:space:]]*.*|\\1 0.0.0.0:${LAPI_PORT}|" "$CROWDSEC_CFG" 2>/dev/null
+    grep -qE "^[[:space:]]*listen_uri:[[:space:]]*['\"]?0\.0\.0\.0:${LAPI_PORT}" "$CROWDSEC_CFG" 2>/dev/null \
+        && { log "[配置] listen_uri 已改为 0.0.0.0:${LAPI_PORT}"; return 0; }
+    log "[配置] listen_uri 覆盖失败"
+    return 1
+}
+
+setup_crowdsec_config() {
+    setup_acquis || return 1
+    ensure_listen_uri || return 1
+    ensure_trusted_ip || return 1
+    return 0
+}
+
+prepare_container() {
+    setup_container_network || return 1
+    setup_container_boot || return 1
+    setup_resolv || return 1
+    setup_crowdsec_config || return 1
+    apply_cfg || return 1
     return 0
 }
 
@@ -552,20 +682,17 @@ main() {
 
     if ! ct_running; then
         setup_bridge
-        setup_container_dns || true
-        apply_cfg || true
+        prepare_container || true
         if ! lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null || ! _wait_ct_running; then
             log "容器起不来，用镜像重建后重试"
-            rebuild_from_image && apply_cfg && setup_container_dns || true
+            rebuild_from_image && prepare_container || true
             lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
             _wait_ct_running || { log "重建后仍起不来"; exit 1; }
         fi
         log "容器已启动"
     fi
 
-    setup_container_dns || true
-
-    ensure_trusted_ip || log "[配置] trusted_ips 保障未通过，自检会兜底"
+    prepare_container || true
 
     if [ -f /etc/config/crowdsec ]; then
         _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
@@ -598,7 +725,7 @@ main() {
     else
         if [ "$SELF_CT" = "0" ]; then
             log "容器仍未运行，重建"
-            rebuild_from_image && apply_cfg && setup_container_dns || true
+            rebuild_from_image && prepare_container || true
             lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
             _wait_ct_running || { log "重建后仍起不来"; exit 1; }
         fi
@@ -612,7 +739,7 @@ main() {
                     :
                 else
                     log "重注册 5 轮仍失败，判定本地 API 链路损坏，用镜像重建"
-                    rebuild_from_image && apply_cfg && setup_container_dns || true
+                    rebuild_from_image && prepare_container || true
                     lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
                     _wait_ct_running || { log "重建后仍起不来"; exit 1; }
                     _bouncer_register_once || true
@@ -620,7 +747,7 @@ main() {
                 fi
             else
                 log "宿主机 bouncer 配置/日志异常，用镜像重建"
-                rebuild_from_image && apply_cfg && setup_container_dns || true
+                rebuild_from_image && prepare_container || true
                 lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
                 _wait_ct_running || { log "重建后仍起不来"; exit 1; }
                 _bouncer_register_once || true

@@ -15,24 +15,20 @@
 #   systemd 启动时会踩 overlayfs 的 copy-up / capability 坑。落在可写层最稳。
 #
 # 产物：files/etc/crowdsec/lxc-ubuntu.tar.gz（CS_HOME，与 99-custom.sh / bootstrap 对齐）
+#
+# 纯净镜像原则：本脚本只装包（apt install crowdsec），不写任何定制配置。
+# 网络(静态IP/DNS)、systemd 自启、CrowdSec 配置(解析器/日志源/listen_uri/trusted_ips)
+# 全部由运行期 /usr/sbin/crowdsec-lxc-bootstrap.sh 在容器启动前生成。
 # =============================================================================
 set -euo pipefail
 
 UBUNTU_BASE_URL="${UBUNTU_BASE_URL:-https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-amd64.tar.gz}"
-CONTAINER_IP="${CONTAINER_IP:-10.0.0.10}"   # 容器固定 IP，要和 99-custom.sh 一致
-BRIDGE_IP="${BRIDGE_IP:-10.0.0.1}"          # lxcbr0 网桥 IP，同时是容器网关
-CT_DNS="${CT_DNS:-${BRIDGE_IP:-10.0.0.1}}"   # 容器 DNS 默认走宿主机网桥（dnsmasq），运行时可由 bootstrap 按 txt 覆盖
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 归拢到 files/etc/crowdsec/ —— 与 99-custom.sh、bootstrap 脚本里的 CS_HOME 保持一致
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/files/etc/crowdsec}"
 WORK="${WORK:-/tmp/lxc-ubuntu-build}"
 R="$WORK/rootfs"
-
-# 容器网段（trusted_ips 白名单要用，不能写死 10.0.0.0/24 —— 用户可在 Actions 改容器 IP）
-CS_NET="$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')"
-
-echo "==> 目标容器 IP=${CONTAINER_IP}  网桥 IP=${BRIDGE_IP}  容器网段=${CS_NET}"
 
 # ---------- 1. 下载并展开 ubuntu-base ----------
 rm -rf "$WORK"
@@ -93,134 +89,7 @@ rm -rf /var/lib/apt/lists/*
 '
 sudo rm -f "$R/usr/sbin/policy-rc.d"
 
-# ---------- 4. 容器网络：静态 IP（不走 DHCP，IP 永不漂移）----------
-sudo mkdir -p "$R/etc/systemd/network" "$R/etc/systemd/system/multi-user.target.wants"
-sudo tee "$R/etc/systemd/network/10-eth0.network" >/dev/null <<EOF
-[Match]
-Name=eth0
-
-[Network]
-Address=${CONTAINER_IP}/24
-Gateway=${BRIDGE_IP}
-EOF
-
-# 开机自启 networkd + crowdsec（chroot 里 systemctl enable 不可用，手动建软链）
-if [ -f "$R/lib/systemd/system/systemd-networkd.service" ]; then
-    sudo ln -sf /lib/systemd/system/systemd-networkd.service \
-        "$R/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
-fi
-if [ -f "$R/lib/systemd/system/crowdsec.service" ]; then
-    sudo ln -sf /lib/systemd/system/crowdsec.service \
-        "$R/etc/systemd/system/multi-user.target.wants/crowdsec.service"
-fi
-
-# resolv.conf 不在这里写 —— 统一放到第 6.2 步「打包前」处理，
-# 那里会先 rm -f 再 tee，确保它不是软链接而是 rootfs 内的实体文件。
-echo "crowdsec" | sudo tee "$R/etc/hostname" >/dev/null
-# 清空 machine-id，让每台路由器首次开机各自生成，避免多机同 ID
-: | sudo tee "$R/etc/machine-id" >/dev/null
-
-# ---------- 5. CrowdSec 配置 ----------
-sudo mkdir -p "$R/etc/crowdsec/acquis.d" \
-              "$R/etc/crowdsec/parsers/s01-parse" \
-              "$R/etc/crowdsec/parsers/s02-enrich"
-
-# 5.1 + 5.2  改 config.yaml：LAPI 对外监听 + trusted_ips 白名单
-#     ⚠️ 这两件事都交给 Python 脚本做，绝不能用 awk/sed 盲改 YAML：
-#       - trusted_ips: 的缩进在不同 crowdsec 版本里不一样（master 是 4 空格 key + 6 空格列表项，
-#         旧版是 2+4），写死缩进会产出 "bad indentation of a sequence entry"
-#         → 容器内 crowdsec 起不来 → LAPI 永不就绪 → bouncer 的 api_key 永远为空
-#       - 某些版本的 config.yaml 里 trusted_ips 整段被注释掉，正则根本匹配不到，
-#         awk 会静默什么都不做 → 构建"成功"但打出一个 LAPI 绑死 127.0.0.1 的包
-#       - sed 的反向引用在 GNU/BSD 之间语法不一致（\g<1> 只有部分实现支持），
-#         写错会把整行替换成字面量
-#     所以统一用 shell/_patch-crowdsec-config.py：解析 → 改 → 重新解析验证。
-#     分级明确：listen_uri 改不动 → 退出码 1（真致命）；trusted_ips 处理不了 → 只警告
-#     （bouncer 走 api_key 认证，trusted_ips 是保险不是必需，不该让整个构建失败）。
-CS_CFG="$R/etc/crowdsec/config.yaml"
-sudo python3 "$REPO_ROOT/shell/_patch-crowdsec-config.py" "$CS_CFG" "$BRIDGE_IP" "$CS_NET" \
-    || { echo "!! config.yaml 处理失败（listen_uri 未改成 0.0.0.0），abort"; exit 1; }
-
-# 兜底复验：YAML 必须能解析
-sudo python3 -c "import yaml; yaml.safe_load(open('$CS_CFG'))" \
-    || { echo "!! config.yaml 语法被改坏，abort"; exit 1; }
-echo "==> config.yaml 校验通过（listen_uri=0.0.0.0 + YAML 语法）"
-
-# 5.3 日志源：UDP 514 收路由器 syslog
-sudo tee "$R/etc/crowdsec/acquis.d/router.yaml" >/dev/null <<'EOF'
-source: syslog
-listen_addr: 0.0.0.0
-listen_port: 514
-protocol: udp
-labels:
-  type: syslog
-EOF
-
-# 5.4 dropbear 解析器（hub 自带那条只认 PAM 文案，OpenWrt 是非 PAM，必须自己写）
-#     这里是在 .sh 文件里用 heredoc 写盘，缩进不会被吃掉，比网页复制粘贴可靠
-sudo tee "$R/etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml" >/dev/null <<'EOF'
-name: openwrt/dropbear-logs
-description: Parse OpenWrt non-PAM dropbear logs
-filter: evt.Parsed.program == 'dropbear'
-onsuccess: next_stage
-nodes:
-  - grok:
-      pattern: "Bad password attempt for '?%{DATA:username}'? from %{IP:source_ip}:%{INT:source_port}"
-      apply_on: message
-    statics:
-      - meta: log_type
-        value: ssh_failed-auth
-  - grok:
-      pattern: "Login attempt for nonexistent user %{GREEDYDATA:username} from %{IP:source_ip}:%{INT:source_port}"
-      apply_on: message
-    statics:
-      - meta: log_type
-        value: ssh_failed-auth
-  - grok:
-      pattern: "Exit before auth from <%{IP:source_ip}:%{INT:source_port}>"
-      apply_on: message
-    statics:
-      - meta: log_type
-        value: ssh_failed-auth
-  - grok:
-      pattern: "Password auth succeeded for '?%{DATA:username}'? from %{IP:source_ip}:%{INT:source_port}"
-      apply_on: message
-    statics:
-      - meta: log_type
-        value: ssh_auth_success
-  - grok:
-      pattern: "Pubkey auth succeeded for '?%{DATA:username}'? with key %{DATA:key_type} from %{IP:source_ip}:%{INT:source_port}"
-      apply_on: message
-    statics:
-      - meta: log_type
-        value: ssh_auth_success
-statics:
-  - meta: service
-    value: ssh
-  - meta: source_ip
-    expression: evt.Parsed.source_ip
-  - meta: username
-    expression: evt.Parsed.username
-EOF
-
-# 5.5 白名单占位（等于不白名单任何 IP）
-sudo tee "$R/etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml" >/dev/null <<'EOF'
-name: openwrt/my-whitelist
-description: 'No whitelist configured - placeholder only'
-whitelist:
-  reason: placeholder, nothing is whitelisted
-  ip:
-    - 127.0.0.1
-  cidr:
-    - 240.0.0.0/4
-EOF
-
-# 5.6 校验：必须是 3，少一条说明规则写坏了
-N=$(grep -c 'value: ssh_failed-auth' "$R/etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml")
-echo "==> 解析器校验 ssh_failed-auth 条数 = ${N}（应为 3）"
-[ "$N" -eq 3 ] || { echo "!! 解析器写入异常"; exit 1; }
-
-# ---------- 6. 打包 ----------
+# ---------- 打包 ----------
 # 注意：hub 的 crowdsecurity/whitelists 只能在容器跑起来后用 cscli 删除，
 #       放到开机引导脚本里做（这里 cscli 连不上 LAPI）。
 
@@ -243,14 +112,7 @@ done
 [ -z "$LEFT" ] || { echo "!! 以下挂载点仍未卸载:$LEFT"; exit 1; }
 echo "    已卸载干净"
 
-# ---- 6.2 resolv.conf 必须是普通文件 ----
-# 宿主机的 /etc/resolv.conf 有可能是个指向 /run/systemd/... 的软链接，
-# 那样 tee 会顺着链接写出去。这里先删掉再重建，确保它在 rootfs 内落地成实体文件。
-sudo rm -f "$R/etc/resolv.conf"
-for _d in $CT_DNS; do echo "nameserver ${_d}"; done | sudo tee "$R/etc/resolv.conf" >/dev/null
-[ -f "$R/etc/resolv.conf" ] || { echo "!! resolv.conf 写入失败"; exit 1; }
-
-# ---- 6.3 打包 ----
+# ---- 打包 ----
 # 排除虚拟/临时文件系统：**内容**不要，但**目录本身**要保留
 # （只写 './proc' 会把目录也排掉；'./proc/*' 才是留空目录的建议写法，
 #  容器启动时 systemd 需要这些空目录作为挂载点）

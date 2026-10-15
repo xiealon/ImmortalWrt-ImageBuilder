@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-15.22"
+SCRIPT_VER="2026-10-15.23"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -58,8 +58,6 @@ _wait() {
     return 0
 }
 _wait_ct_running() { _wait ct_running 12; }
-_wait_ping() { _wp() { ping -c1 -W2 "$CONTAINER_IP" >/dev/null 2>&1; }; _wait _wp; }
-_wait_bridge() { _wb() { ip link show lxcbr0 >/dev/null 2>&1; }; _wait _wb; }
 
 net_online() {
     _ct_env '[ -x /bin/ping ] && { ping -c1 -W3 223.5.5.5 >/dev/null 2>&1 || ping -c1 -W3 119.29.29.29 >/dev/null 2>&1; } && exit 0
@@ -336,279 +334,66 @@ repair_crowdsec_cfg() {
     return 2
 }
 
-step1_local() {
-    log "===== 步骤 1：建容器 + 本地 API + bouncer ====="
+# 配置保障：容器起来后、自检前执行一次，确保容器内 crowdsec 配置正确。
+# 涵盖 baseline 同步、config.yaml 修复、日志源、listen_uri、trusted_ips、场景库。
+ensure_crowdsec_cfg() {
+    [ -f "$CROWDSEC_CFG" ] || { log "[配置] 容器内无 config.yaml，镜像不完整"; return 1; }
 
-    _image=0; [ -f "$TARBALL" ] && _image=1
-    _rootfs=0; [ -f "$CROWDSEC_CFG" ] && _rootfs=1
-
-    if [ "$_image" = "0" ] && [ "$_rootfs" = "0" ]; then
-        log "[步骤1] 无镜像且无 rootfs，本机不带 CrowdSec，跳过"
-        return 1
-    fi
-
-    if [ "$_rootfs" = "0" ]; then
-        rebuild_from_image || { log "[步骤1] 首次解压失败"; return 1; }
-    fi
-
-    if ! apply_cfg; then
-        log "[步骤1] 重写容器 config"
-        mkdir -p "$LXC_PATH/$LXC_NAME" 2>/dev/null
-        apply_cfg || { log "[步骤1] config 仍无法解析"; return 1; }
-    else
-        log "[步骤1] 容器 config 正常"
-    fi
-
-    setup_bridge
-
-    setup_container_dns || log "[步骤1] 启动前 DNS 写入失败，容器可能无外网解析"
-
-    _api_url_want="http://${CONTAINER_IP}:${LAPI_PORT}/"
-    _sec=""
-    if [ -f /etc/config/crowdsec ]; then
-        _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
-        if [ -z "$_sec" ]; then
-            uci add crowdsec bouncer >/dev/null 2>&1
-            _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
-        fi
-        if [ -n "$_sec" ]; then
-            uci set "$_sec.enabled=1"
-            uci set "$_sec.api_url=$_api_url_want"
-            uci set "$_sec.ipv4=1"
-            uci set "$_sec.ipv6=0"
-            uci set "$_sec.deny_action=drop"
-            uci set "$_sec.filter_input=1"
-            uci set "$_sec.filter_forward=1"
-            uci -q del "$_sec.interface"
-            uci add_list "$_sec.interface=br-lan"
-            uci commit crowdsec
-            log "[步骤1] bouncer 段已预填（api_url=$_api_url_want）"
-        fi
-    else
-        log "[步骤1] /etc/config/crowdsec 不存在，bouncer 包未装进固件"
-    fi
-
-    if ct_running; then
-        log "[步骤1] 容器已在运行"
-    else
-        log "[步骤1] 启动容器"
-        if ! lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null || ! _wait_ct_running; then
-            log "[步骤1] 容器起不来，重建后重试"
-            if rebuild_from_image && apply_cfg; then
-                setup_container_dns || true
-                lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
-                _wait_ct_running || { log "[步骤1] 重建后仍起不来"; return 1; }
-            else
-                log "[步骤1] 重建失败"
-                return 1
-            fi
-        fi
-        log "[步骤1] 容器已启动"
-    fi
-
+    # 非首次开机：用备份校正容器内配置
     if [ "$FIRST_BOOT" = "0" ]; then
         sync_from_baseline; _sr=$?
         if [ "$_sr" = "0" ]; then
-            log "[步骤1] 配置与备份一致"
+            log "[配置] 配置与备份一致"
         else
-            log "[步骤1] 配置已按备份校正"
+            log "[配置] 配置已按备份校正"
             _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
             sleep 3
         fi
-    else
-        log "[步骤1] 首次开机无备份，跳过一致性校验"
     fi
 
-    [ -f "$CROWDSEC_CFG" ] || { log "[步骤1] 容器内无 /etc/crowdsec/config.yaml，镜像不完整"; return 1; }
-
     _cs_restart=0
+
     repair_crowdsec_cfg; _rp=$?
     if [ "$_rp" = "0" ]; then
-        log "[步骤1] config.yaml 已修复，重启 crowdsec 生效"
+        log "[配置] config.yaml 已修复"
         _cs_restart=1
     elif [ "$_rp" = "2" ]; then
-        log "[步骤1] config.yaml 仍不可解析，注册会失败"
+        log "[配置] config.yaml 仍不可解析，注册会失败"
     fi
 
     setup_acquis && _cs_restart=1
 
     if grep -qE "^[[:space:]]*listen_uri:[[:space:]]*['\"]?0\.0\.0\.0:$LAPI_PORT" "$CROWDSEC_CFG" 2>/dev/null; then
-        log "[步骤1] LAPI 已对外监听 0.0.0.0:$LAPI_PORT"
+        log "[配置] LAPI 已对外监听 0.0.0.0:$LAPI_PORT"
     else
-        log "[步骤1] listen_uri 不对，覆盖为 0.0.0.0:$LAPI_PORT"
+        log "[配置] listen_uri 不对，覆盖为 0.0.0.0:$LAPI_PORT"
         sed -i -E "s|^([[:space:]]*listen_uri:)[[:space:]]*.*|\\1 0.0.0.0:${LAPI_PORT}|" "$CROWDSEC_CFG" 2>/dev/null
         _cs_restart=1
     fi
 
     if [ -z "$BRIDGE_IP" ]; then
-        log "[步骤1] 未取到网桥 IP，跳过 trusted_ips 校正"
+        log "[配置] 未取到网桥 IP，跳过 trusted_ips 校正"
     elif grep -qE "^[[:space:]]*-[[:space:]]*$BRIDGE_IP([[:space:]]|$)" "$CROWDSEC_CFG" 2>/dev/null; then
-        log "[步骤1] trusted_ips 已含 $BRIDGE_IP"
+        log "[配置] trusted_ips 已含 $BRIDGE_IP"
     else
-        log "[步骤1] trusted_ips 未含 $BRIDGE_IP，补上"
-        _cs_append_trusted_ip "$BRIDGE_IP" && _cs_restart=1 || log "[步骤1] 补 trusted_ips 失败"
+        log "[配置] trusted_ips 未含 $BRIDGE_IP，补上"
+        _cs_append_trusted_ip "$BRIDGE_IP" && _cs_restart=1 || log "[配置] 补 trusted_ips 失败"
     fi
 
     if [ "$_cs_restart" = "1" ]; then
         _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
-        log "[步骤1] 已重启 crowdsec 使覆盖生效"
+        log "[配置] 已重启 crowdsec 使覆盖生效"
     fi
-
-    log "[步骤1] 配置已写入，直接注册 bouncer"
 
     _ncoll=$(_ct_env "$CSCLI collections list -o json 2>/dev/null | grep -c '\"name\"'")
     if [ "${_ncoll:-0}" -gt 0 ] 2>/dev/null; then
-        log "[步骤1] 场景库就绪（$_ncoll 个 collection）"
+        log "[配置] 场景库就绪（$_ncoll 个 collection）"
     else
-        log "[步骤1] 场景库为空，后台补齐（不阻塞本地流程）"
+        log "[配置] 场景库为空，后台补齐（不阻塞本地流程）"
         ( _ct_env "$CSCLI hub update >/dev/null 2>&1"
           _ct_env "$CSCLI hub upgrade >/dev/null 2>&1" ) &
     fi
 
-    [ -n "$_sec" ] || { log "[步骤1] bouncer 段不存在，无法注册 api_key"; return 1; }
-
-    # 关键改造：用「last_pull 是否成功」作为是否需要注册的判据，取代旧的
-    # 「本地有 key + bouncer 在册」判断。
-    # 原因：cscli bouncers inspect 不吐露已注册 key，无法比对本地 UCI key 与
-    # LAPI 已注册 key 是否一致；一旦固件重刷/容器重建导致 LAPI 侧换了新 key，
-    # 而 UCI 残留旧 key，旧的"跳过注册"判断会放过失配，导致 access forbidden。
-    if bouncer_pulling; then
-        log "[步骤1] 本地 API 正常：$BOUNCER_NAME last_pull=$(bouncer_last_pull)，跳过注册"
-    else
-        log "[步骤1] 本地 API 未就绪（last_pull 为空），执行「先删后加」重注册"
-        if _ct_env "$CSCLI parsers remove crowdsecurity/whitelists --force" >/dev/null 2>&1; then
-            _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
-        fi
-
-        _key=""
-        _i=0
-        while [ "$_i" -lt 20 ]; do
-            _i=$((_i+1))
-            _ct_env "$CSCLI bouncers delete \"$BOUNCER_NAME\"" >/dev/null 2>&1 || true
-            _raw=$(_ct_env "$CSCLI bouncers add \"$BOUNCER_NAME\" -o raw" 2>&1)
-            _key=$(printf '%s\n' "$_raw" | sed -e 's/\r$//' \
-                   | grep -Eo '^[A-Za-z0-9+/=_-]{16,}$' | tail -n1)
-            [ -n "$_key" ] && break
-            log "[步骤1] 第 $_i 次注册未拿到 key，5 秒后重试"
-            printf '%s\n' "$_raw" | grep -v '^[[:space:]]*$' | head -n5 \
-                | while IFS= read -r _l; do log "[步骤1] cscli> $_l"; done
-            sleep 5
-        done
-        [ -n "$_key" ] || { log "[步骤1] 注册 bouncer 失败（cscli 不可用）"; return 1; }
-
-        uci set "$_sec.api_key=$_key"
-        uci commit crowdsec
-        log "[步骤1] bouncer 注册成功，api_key 已写入 $_sec"
-    fi
-
-    _ensure_bouncer_service
-
-    # 最终验证：等待 bouncer 真正从 LAPI 拉取成功（last_pull 有真实时间戳）。
-    _pull_ok=0
-    _k=0
-    while [ "$_k" -lt 6 ]; do
-        _k=$((_k+1))
-        if bouncer_pulling; then
-            _pull_ok=1
-            log "[步骤1] 验证通过：$BOUNCER_NAME last_pull=$(bouncer_last_pull)"
-            break
-        fi
-        log "[步骤1] bouncer 尚未拉取（第 $_k/6 次），等待 5s"
-        sleep 5
-    done
-    if [ "$_pull_ok" != "1" ]; then
-        log "[步骤1] 警告：bouncer 已注册但 last_pull 仍为空，本地 API 可能异常"
-    fi
-
-    # 远程 enroll 状态自检（cscli console status）
-    if console_enroll_ok; then
-        log "[步骤1] 远程 enroll 状态正常"
-    else
-        log "[步骤1] 远程 enroll 状态异常，步骤2 会尝试重新 enroll"
-    fi
-
-    log "===== 步骤 1 完成 ====="
-    return 0
-}
-
-step2_enroll() {
-    log "===== 步骤 2：远程 enroll ====="
-
-    _enroll_key=""
-    [ -f "$ENROLL_KEY_FILE" ] && _enroll_key="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
-    _cred_file="$ROOTFS/etc/crowdsec/online_api_credentials.yaml"
-
-    if ! net_online; then
-        log "[步骤2] 外网不通，本轮跳过 enroll（下次开机再试）"
-        return 1
-    fi
-
-    _status() {
-        _ct_env '[ -s /etc/crowdsec/online_api_credentials.yaml ] || exit 1
-                  /usr/bin/cscli console status 2>&1' 2>/dev/null
-    }
-
-    _out=$(_status); _rc=$?
-
-    if [ "$_rc" = "0" ] && [ -n "$_out" ]; then
-        _capi=0; _enroll=0
-        if printf '%s\n' "$_out" | grep -qiE "unauthorized|forbidden|invalid|revoked"; then
-            :
-        else
-            printf '%s\n' "$_out" | grep -qiE "Central API.*authenticated" && _capi=1
-            if ! printf '%s\n' "$_out" | grep -qiE "not enrolled"; then
-                printf '%s\n' "$_out" | grep -qiE "[Ee]nrolled" && _enroll=1
-            fi
-        fi
-        if [ "$_capi" = "1" ] && [ "$_enroll" = "1" ]; then
-            log "[步骤2] CAPI 已认证 + 已 enroll，均有效"
-            return 0
-        fi
-        log "[步骤2] CAPI=$([ "$_capi" = "1" ] && echo 已认证 || echo 未认证)  enroll=$([ "$_enroll" = "1" ] && echo 已绑定 || echo 未绑定)"
-    else
-        log "[步骤2] 无凭据或 console status 异常，需要 enroll"
-    fi
-
-    if [ -z "$_enroll_key" ]; then
-        log "[步骤2] 未配置注册码，跳过（写入 $ENROLL_KEY_FILE 后下次开机生效）"
-        return 1
-    fi
-
-    _bak=""
-    if [ -s "$_cred_file" ]; then
-        _bak="$_cred_file.bak"
-        mv -f "$_cred_file" "$_bak" 2>/dev/null || true
-    fi
-
-    if ! _ct_env "/usr/bin/cscli console enroll $_enroll_key >/dev/null 2>&1"; then
-        [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
-        log "[步骤2] enroll 执行失败（注册码未消耗），下次开机重试"
-        return 1
-    fi
-
-    _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
-    _ct_env '/usr/bin/cscli console enable --all >/dev/null 2>&1' || true
-
-    _i=0; _ok=1
-    while [ "$_i" -lt 6 ]; do
-        _i=$((_i+1))
-        _o2=$(_status); _r2=$?
-        if [ "$_r2" = "0" ] && [ -n "$_o2" ] \
-           && ! printf '%s\n' "$_o2" | grep -qiE "not registered|not enrolled|unauthorized|forbidden|invalid|revoked"; then
-            _ok=0; break
-        fi
-        sleep 5
-    done
-
-    if [ "$_ok" = "0" ]; then
-        log "[步骤2] 控制台绑定已提交（请在 app.crowdsec.net 点 Accept）"
-    else
-        [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
-        log "[步骤2] enroll 复检未通过，已回滚旧凭据"
-        return 1
-    fi
-
-    log "===== 步骤 2 完成 ====="
     return 0
 }
 
@@ -833,32 +618,156 @@ setup_container_dns() {
     return 0
 }
 
-early_start() {
-    if ct_running; then
-        log "[启动] 容器已在运行"
-        return 0
-    fi
-    [ -f "$CROWDSEC_CFG" ] || { log "[启动] rootfs 未就绪，暂不启动"; return 1; }
-    setup_bridge
-    if ! apply_cfg; then
-        log "[启动] config 无法解析，暂不启动"
-        return 1
-    fi
-    lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null || { log "[启动] 启动命令失败"; return 1; }
-    if _wait_ct_running; then
-        log "[启动] 容器已提前启动"
-        return 0
-    fi
-    log "[启动] 提前启动超时"
-    return 1
-}
-
 baseline_valid() {
     [ -f "$STATE_FILE" ] || return 1
     [ -d "$SNAP_ETC" ] || return 1
     grep -q '^BOUNCER_NAME=' "$STATE_FILE" 2>/dev/null || return 1
     grep -q '^API_URL=' "$STATE_FILE" 2>/dev/null || return 1
     return 0
+}
+
+# =============================================================================
+# 自检与自愈
+# =============================================================================
+
+# 单次注册 bouncer：删除旧 key → 重新 add → 把新 key 写回 UCI。
+# 成功返回 0 并（在 caller 侧）拿到 key；失败返回 1。
+_bouncer_register_once() {
+    _ct_env "$CSCLI bouncers delete \"$BOUNCER_NAME\"" >/dev/null 2>&1 || true
+    _raw=$(_ct_env "$CSCLI bouncers add \"$BOUNCER_NAME\" -o raw" 2>&1)
+    _key=$(printf '%s\n' "$_raw" | sed -e 's/\r$//' \
+           | grep -Eo '^[A-Za-z0-9+/=_-]{16,}$' | tail -n1)
+    [ -n "$_key" ] || return 1
+    _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    [ -n "$_sec" ] || return 1
+    uci set "$_sec.api_key=$_key"
+    uci commit crowdsec
+    return 0
+}
+
+# bouncer 自愈：反复「先删后加」重注册，直到 last_pull 有值或次数用尽。
+# 参数 $1 为最大重试次数（默认 5）。
+# 返回 0=last_pull 就绪；1=仍未就绪。
+_bouncer_heal() {
+    _max="${1:-5}"
+    _i=0
+    while [ "$_i" -lt "$_max" ]; do
+        _i=$((_i+1))
+        if _bouncer_register_once; then
+            _ensure_bouncer_service
+            _j=0
+            while [ "$_j" -lt 3 ]; do
+                _j=$((_j+1))
+                bouncer_pulling && { log "[自愈] bouncer 已恢复拉取（第 $_i 轮注册）"; return 0; }
+                sleep 5
+            done
+            log "[自愈] 第 $_i/$_max 轮重注册后 last_pull 仍为空"
+        else
+            log "[自愈] 第 $_i/$_max 轮注册未拿到 key"
+        fi
+    done
+    return 1
+}
+
+# 诊断 bouncer 异常：逐项查解析器 / 宿主机网络 / 容器网络 / 端口。
+# 纯诊断，不改状态；把结论打进日志。
+diag_bouncer() {
+    log "[诊断] ---- bouncer 异常排查 ----"
+
+    log "[诊断] 1) 解析器："
+    _ct_env "$CSCLI parsers list -o json 2>/dev/null | grep -c '\"name\"'" 2>/dev/null \
+        | sed 's/^/  parsers 数量: /'
+    _ct_env "[ -f /etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml ] && echo '  openwrt-dropbear.yaml 在位' || echo '  openwrt-dropbear.yaml 缺失'" 2>/dev/null
+
+    log "[诊断] 2) 宿主机（openwrt）网络："
+    if ip link show lxcbr0 >/dev/null 2>&1; then
+        echo "  lxcbr0 存在: $(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)"
+    else
+        echo "  lxcbr0 缺失"
+    fi
+
+    log "[诊断] 3) LXC 容器网络："
+    _ct_env "ip -4 addr show eth0 2>/dev/null | sed -n 's/.*inet \\([0-9.]*\\)\\/.*/  eth0: \\1/p'" 2>/dev/null
+
+    log "[诊断] 4) LAPI 端口 $LAPI_PORT："
+    if _ct_env "timeout 5 bash -c '</dev/tcp/${CONTAINER_IP}/${LAPI_PORT}'" 2>/dev/null; then
+        echo "  ${CONTAINER_IP}:${LAPI_PORT} 可连"
+    else
+        echo "  ${CONTAINER_IP}:${LAPI_PORT} 不通"
+    fi
+
+    log "[诊断] 5) bouncer 状态："
+    _ct_env "$CSCLI bouncers list" 2>/dev/null | sed 's/^/  /'
+    log "[诊断] ---- 排查结束 ----"
+}
+
+# 三项自检，输出到全局变量（供 main 分流用）。
+# 自检项：
+#   SELF_CT    = 1 容器运行中
+#   SELF_PULL  = 1 bouncer last_pull 有值
+#   SELF_CONS  = 1 console status 正常
+#   SELF_ALL   = 1 三项全过
+self_check() {
+    SELF_CT=0; SELF_PULL=0; SELF_CONS=0; SELF_ALL=0
+
+    ct_running && SELF_CT=1
+    bouncer_pulling && SELF_PULL=1
+    console_enroll_ok && SELF_CONS=1
+
+    [ "$SELF_CT" = "1" ] && [ "$SELF_PULL" = "1" ] && [ "$SELF_CONS" = "1" ] && SELF_ALL=1
+
+    log "[自检] 容器=$([ "$SELF_CT" = "1" ] && echo 运行 || echo 停止)"
+    log "[自检] bouncer last_pull=$([ "$SELF_PULL" = "1" ] && echo 正常 || echo 空)"
+    log "[自检] console status=$([ "$SELF_CONS" = "1" ] && echo 正常 || echo 异常)"
+    return 0
+}
+
+# 用注册码文件重新 enroll（console 状态错误时的自愈）。
+# 复用 step2 的 enroll 核心，但独立可调；无注册码时仅提示。
+re_enroll() {
+    log "[自愈] console 状态异常，尝试用注册码重新 enroll"
+
+    if ! net_online; then
+        log "[自愈] 外网不通，本轮跳过 re-enroll（下次开机再试）"
+        return 1
+    fi
+
+    _enroll_key=""
+    [ -f "$ENROLL_KEY_FILE" ] && _enroll_key="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
+    if [ -z "$_enroll_key" ]; then
+        log "[自愈] 未配置注册码（$ENROLL_KEY_FILE 为空），无法 re-enroll"
+        return 1
+    fi
+
+    _cred_file="$ROOTFS/etc/crowdsec/online_api_credentials.yaml"
+    _bak=""
+    if [ -s "$_cred_file" ]; then
+        _bak="$_cred_file.bak"
+        mv -f "$_cred_file" "$_bak" 2>/dev/null || true
+    fi
+
+    if ! _ct_env "/usr/bin/cscli console enroll $_enroll_key >/dev/null 2>&1"; then
+        [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
+        log "[自愈] re-enroll 执行失败（注册码未消耗），下次开机重试"
+        return 1
+    fi
+
+    _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
+    _ct_env '/usr/bin/cscli console enable --all >/dev/null 2>&1' || true
+
+    _i=0
+    while [ "$_i" -lt 6 ]; do
+        _i=$((_i+1))
+        if console_enroll_ok; then
+            log "[自愈] re-enroll 成功，console 状态恢复正常"
+            return 0
+        fi
+        sleep 5
+    done
+
+    [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
+    log "[自愈] re-enroll 复检未通过，已回滚旧凭据"
+    return 1
 }
 
 main() {
@@ -870,37 +779,116 @@ main() {
     fi
 
     mount_cgroup
-
     setup_syslog_forward
 
-    setup_container_dns || log "[DNS] 此处跳过（rootfs 未就绪），步骤1 解压后会写入"
-
-    early_start || log "[启动] 首次拉起容器未成功，后续步骤会继续处理"
-
+    # ---------- 首次开机判定：无容器 / 无 rootfs → 从镜像新建 ----------
     if baseline_valid; then
         FIRST_BOOT=0
-        log "判定文件齐全，进入核对流程"
+        log "判定文件齐全，非首次开机"
     else
         FIRST_BOOT=1
-        log "判定文件缺失，认定为第一次开机，从头完整构建"
+        log "判定文件缺失，认定为第一次开机"
     fi
 
-    R1=1
-    _step1_try=0
-    while [ "$_step1_try" -lt 3 ]; do
-        step1_local; R1=$?
-        [ "$R1" = "0" ] && break
-        _step1_try=$((_step1_try+1))
-        log "步骤1 未通过（第 $_step1_try/3 次），$SLEEP 秒后重试整个步骤1"
-        sleep $SLEEP
-    done
+    # 无镜像且无 rootfs：本机根本不带 CrowdSec，直接退出
+    if [ ! -f "$TARBALL" ] && [ ! -f "$CROWDSEC_CFG" ]; then
+        log "无镜像且无 rootfs，本机不带 CrowdSec，跳过"
+        exit 0
+    fi
 
-    if [ "$R1" = "0" ]; then
-        step2_enroll; R2=$?
+    # 容器不存在 / rootfs 未就绪 → 从镜像重建（首次开机或 rootfs 丢失）
+    if ! ct_exists || [ ! -f "$CROWDSEC_CFG" ]; then
+        log "容器或 rootfs 未就绪，从镜像重建"
+        rebuild_from_image || { log "镜像重建失败"; exit 1; }
+    fi
+
+    # 容器未运行 → 尝试拉起；起不来 → rebuild
+    if ! ct_running; then
+        setup_bridge
+        setup_container_dns || true
+        apply_cfg || true
+        if ! lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null || ! _wait_ct_running; then
+            log "容器起不来，用镜像重建后重试"
+            rebuild_from_image && apply_cfg && setup_container_dns || true
+            lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
+            _wait_ct_running || { log "重建后仍起不来"; exit 1; }
+        fi
+        log "容器已启动"
+    fi
+
+    # 容器起来了，写一次 DNS（幂等，确保走宿主机 dnsmasq）
+    setup_container_dns || true
+
+    # 配置保障：容器内 config.yaml / 日志源 / listen_uri / trusted_ips / 场景库
+    ensure_crowdsec_cfg || log "[配置] 配置保障未通过，自检会兜底"
+
+    # 确保 bouncer 段存在并预填 api_url（不碰 api_key）
+    if [ -f /etc/config/crowdsec ]; then
+        _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+        if [ -z "$_sec" ]; then
+            uci add crowdsec bouncer >/dev/null 2>&1
+            _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+        fi
+        if [ -n "$_sec" ]; then
+            uci set "$_sec.enabled=1"
+            uci set "$_sec.api_url=http://${CONTAINER_IP}:${LAPI_PORT}/"
+            uci set "$_sec.ipv4=1"
+            uci set "$_sec.ipv6=0"
+            uci set "$_sec.deny_action=drop"
+            uci set "$_sec.filter_input=1"
+            uci set "$_sec.filter_forward=1"
+            uci -q del "$_sec.interface"
+            uci add_list "$_sec.interface=br-lan"
+            uci commit crowdsec
+            log "[配置] bouncer 段已预填（api_url=http://${CONTAINER_IP}:${LAPI_PORT}/）"
+        fi
     else
-        R2=1
+        log "[配置] /etc/config/crowdsec 不存在，bouncer 包未装进固件"
     fi
 
+    # ---------- 三项自检 ----------
+    self_check
+
+    # 全过 → 直接跳过修复，进备份
+    if [ "$SELF_ALL" = "1" ]; then
+        log "三项自检全部通过，跳过修复流程"
+        R1=0; R2=0
+    else
+        # 容器起不来（理论上上面已处理，这里是兜底）
+        if [ "$SELF_CT" = "0" ]; then
+            log "容器仍未运行，重建"
+            rebuild_from_image && apply_cfg && setup_container_dns || true
+            lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
+            _wait_ct_running || { log "重建后仍起不来"; exit 1; }
+        fi
+
+        # bouncer last_pull 空 → 诊断 + 重试自愈，仍失败才 rebuild
+        if [ "$SELF_PULL" = "0" ]; then
+            log "bouncer 未拉取，进入自愈"
+            diag_bouncer
+            if ! _bouncer_heal 5; then
+                log "bouncer 自愈 5 轮仍失败，判定本地 API 链路损坏，用镜像重建"
+                rebuild_from_image && apply_cfg && setup_container_dns || true
+                lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d 2>/dev/null
+                _wait_ct_running || { log "重建后仍起不来"; exit 1; }
+                # 重建后重新注册一次
+                _bouncer_register_once || true
+                _ensure_bouncer_service
+            fi
+        fi
+
+        # console status 异常 → 用注册码文件重新 enroll
+        if [ "$SELF_CONS" = "0" ]; then
+            re_enroll || log "console 自愈未成功（可能是外网不通或无注册码），下次开机再试"
+        fi
+
+        # 复检
+        self_check
+        [ "$SELF_CT" = "1" ] && [ "$SELF_PULL" = "1" ] && R1=0 || R1=1
+        [ "$SELF_CONS" = "1" ] && R2=0 || R2=1
+    fi
+
+    # ---------- 备份（保持原有逻辑，未改动） ----------
     if [ "$R1" = "0" ]; then
         step3_backup; R3=$?
     else
@@ -908,7 +896,7 @@ main() {
     fi
 
     log "----- 汇总 -----"
-    log "步骤1容器+本地=$R1 步骤2enroll=$R2 步骤3备份=$R3"
+    log "容器+本地=$R1 console=$R2 备份=$R3"
 
     _final_key=""
     _final_sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)

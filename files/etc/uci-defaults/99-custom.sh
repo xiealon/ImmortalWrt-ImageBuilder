@@ -181,19 +181,4 @@ else
     echo "跳过 aria2：未检测到 /aria2 目录或 aria2 未安装" >>$LOGFILE
 fi
 
-# 容器自启：启用固件原生 lxc-auto 启动项（若脚本存在），并写入 UCI 配置。
-# 即使某些精简固件未默认 enable lxc-auto，也在这里兜底生成 S99lxc-auto。
-if [ -x /etc/init.d/lxc-auto ]; then
-    /etc/init.d/lxc-auto enable 2>/dev/null
-    echo "已启用 /etc/init.d/lxc-auto" >>$LOGFILE
-fi
-# 写入 lxc-auto 的 UCI 配置（幂等：已有 container 段则跳过）
-if ! uci -q get lxc-auto.@container[0] >/dev/null 2>&1; then
-    uci -q add lxc-auto container >/dev/null 2>&1
-    uci -q set lxc-auto.@container[-1].name='ubuntu'
-    uci -q set lxc-auto.@container[-1].timeout='300'
-    uci -q commit lxc-auto
-    echo "已写入 /etc/config/lxc-auto（自启 ubuntu 容器）" >>$LOGFILE
-fi
-
 exit 0

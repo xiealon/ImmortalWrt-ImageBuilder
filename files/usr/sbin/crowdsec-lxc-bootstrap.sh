@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.59"
+SCRIPT_VER="2026-10-16.60"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -569,6 +569,12 @@ bouncer_exists() {
     _ct_env "$CSCLI bouncers list" 2>/dev/null | grep -qE "^[[:space:]]*${BOUNCER_NAME}[[:space:]]"
 }
 
+_restart_bouncer_service() {
+    service crowdsec-firewall-bouncer enable 2>/dev/null
+    service crowdsec-firewall-bouncer restart 2>/dev/null
+    return 0
+}
+
 _bouncer_heal() {
     _max="${1:-3}"
     _i=0
@@ -576,6 +582,7 @@ _bouncer_heal() {
         _i=$((_i+1))
         _wait_lapi_ready 90 || true
         _bouncer_register_once || { log "[bouncer] 第 $_i/$_max 轮注册未拿到 key"; continue; }
+        _restart_bouncer_service
         _ensure_bouncer_service
         _j=0
         while [ "$_j" -lt 3 ]; do

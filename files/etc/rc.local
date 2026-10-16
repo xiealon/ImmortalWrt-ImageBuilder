@@ -20,8 +20,5 @@ fi
 /bin/sh "$BOOT" >>"$LOG" 2>&1
 rmdir "$LOCK" 2>/dev/null
 
-if [ -d /srv/lxc/ubuntu/rootfs ]; then
-    setsid lxc-start -P /srv/lxc -n ubuntu -d >/dev/null 2>&1 || true
-fi
 
 exit 0

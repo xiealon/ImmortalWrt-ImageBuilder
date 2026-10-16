@@ -72,4 +72,22 @@ crowdsec的初次运行需要时间自动进行初始化安装，无需网络也
 - 两个 90s 是 LAPI 就绪闸门（`_wait_lapi_ready`），超时只告警不退出；注册本身零等待，成败交验证窗口判定
 - `BOUNCER_PULL_MAX_AGE=600s` 是 last_pull **陈旧阈值**（超龄未更新才判失效），不是任何地方的等待
 
+# mosdns 与容器 DNS（redirect 开启后容器解析失败的排查）
+
+固件里 mosdns 默认开了两个开关（`files/etc/uci-defaults/99-custom.sh`）：`redirect=1` 和 `local_dns_redirect=1`。它们对容器 DNS 的影响是**源码级**的（luci-app-mosdns init 脚本）：
+
+| 开关 | 实际动作 | 对容器的意义 |
+|---|---|---|
+| `redirect=1` | dnsmasq 被改成 `server=127.0.0.1#5335` + `noresolv=1` + `cachesize=0`，dnsmasq 继续听 53，把所有查询转给 mosdns | 容器 DNS=10.0.0.1 的查询走 dnsmasq → mosdns，**这条路本来就是通的** |
+| `local_dns_redirect=1` | 加 nft 规则 `inet mosdns prerouting: udp dport 53 redirect to :5335`，**所有** UDP 53 流量（不管目的地是路由器还是外网 DNS）统统改投本机 5335 的 mosdns | 容器在 `custom_router_dns.txt` 里填任何公网 DNS 都会被拉回来，**填了也白填**；且多了一条对 lxcbr0 流量的劫持依赖 |
+
+排查顺序（从现象反推）：
+
+1. **超时无响应** → 查 mosdns 监听：`netstat -lnp | grep 5335` 必须是 `0.0.0.0:5335`（不能只听 127.0.0.1，劫持包目标是 10.0.0.1:5335）；再查 lxc 防火墙区 input 是否为 ACCEPT（引导脚本 `setup_lxc_firewall` 默认已建，手动改过防火墙的注意）
+2. **还是不通** → A/B 二分：`uci set mosdns.config.local_dns_redirect='0' && uci commit mosdns && /etc/init.d/mosdns restart`，容器恢复即说明是劫持规则对 lxcbr0 的副作用，保持关闭即可（容器 DNS 本来就该走 dnsmasq 路径，不需要劫持）
+3. **解析错/被污染** → 查 mosdns 分流规则：上游用 IP 形式（固件默认 223.5.5.5/119.29.29.29），别用域名形式的 DoH 上游（自身解析可能成环）
+4. **内网域名（\*.lan/hostname）解析失败** → `forward_local` 指向 dnsmasq:53，而 redirect=1 又把 dnsmasq 全部转回 mosdns:5335，**成环**。此场景建议只开 `redirect=1`、关掉 `local_dns_redirect`
+
+推荐配置：容器 DNS 保持默认 `10.0.0.1`（`custom_router_dns.txt` 留空，引导脚本 `_container_dns()` 自动回落桥 IP），mosdns 只开 `redirect=1`；确需"矫正硬编码 DNS 的设备"再开 `local_dns_redirect`，但须确认监听在 `0.0.0.0:5335` 且 lxc 区放行。
+
 # 最后，感谢每一位项目贡献者。

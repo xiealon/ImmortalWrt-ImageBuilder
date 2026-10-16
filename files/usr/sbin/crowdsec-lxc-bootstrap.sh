@@ -12,7 +12,7 @@
 # 纯净镜像原则：镜像编译期只 apt 装 crowdsec，不写定制配置；
 # 网络/解析器/listen_uri/trusted_ips 等全部在本脚本运行期生成。
 # =============================================================================
-SCRIPT_VER="2026-10-16.35"
+SCRIPT_VER="2026-10-16.36"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -692,7 +692,15 @@ main() {
     if [ -x /etc/init.d/lxc-auto ]; then
         /etc/init.d/lxc-auto start >/dev/null 2>&1 || true
     fi
-    _wait_ct_running || { log "容器起不来"; exit 1; }
+    # 冗余防护：开机时 lxc-auto 可能被中断或未生效，容器没起来时再重试一次
+    # lxc-auto（仍走同一条路径，不直接 lxc-start，避免两套机制打架）。
+    if ! _wait_ct_running; then
+        log "lxc-auto 首启未拉起，重试 lxc-auto"
+        if [ -x /etc/init.d/lxc-auto ]; then
+            /etc/init.d/lxc-auto start >/dev/null 2>&1 || true
+        fi
+        _wait_ct_running || { log "容器起不来"; exit 1; }
+    fi
     log "容器已启动"
 
     # 步骤1.5：配置宿主机系统日志 → 容器 CrowdSec（514/udp）

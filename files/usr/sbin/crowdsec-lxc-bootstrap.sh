@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.60"
+SCRIPT_VER="2026-10-16.61"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -572,6 +572,7 @@ bouncer_exists() {
 _restart_bouncer_service() {
     service crowdsec-firewall-bouncer enable 2>/dev/null
     service crowdsec-firewall-bouncer restart 2>/dev/null
+    sleep 12
     return 0
 }
 

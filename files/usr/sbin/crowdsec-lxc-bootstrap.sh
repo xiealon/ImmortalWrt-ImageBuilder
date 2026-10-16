@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.55"
+SCRIPT_VER="2026-10-16.56"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -758,14 +758,8 @@ main() {
     fi
 
     if [ -x /etc/init.d/lxc-auto ]; then
-        /etc/init.d/lxc-auto enable >/dev/null 2>&1 || true
-        if ! uci -q get lxc-auto.@container[0] >/dev/null 2>&1; then
-            uci -q add lxc-auto container >/dev/null 2>&1 || true
-            uci -q set lxc-auto.@container[-1].name="$LXC_NAME" >/dev/null 2>&1 || true
-            uci -q set lxc-auto.@container[-1].timeout='300' >/dev/null 2>&1 || true
-            uci -q commit lxc-auto >/dev/null 2>&1 || true
-            log "已补写 lxc-auto UCI 配置（自启 $LXC_NAME）"
-        fi
+        /etc/init.d/lxc-auto disable >/dev/null 2>&1 || true
+        log "已禁用 lxc-auto 开机自启（容器启动由本脚本直接负责，v.56 起弃用 lxc-auto）"
     fi
 
     log "启动容器 $LXC_NAME"

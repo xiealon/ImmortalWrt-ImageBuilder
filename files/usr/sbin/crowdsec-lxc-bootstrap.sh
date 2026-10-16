@@ -708,27 +708,36 @@ re_enroll() {
         mv -f "$_cred_file" "$_bak" 2>/dev/null || true
     fi
 
+    # 修改：注册到 CAPI（写入 online_api 凭据），失败即还原，不残留
     if ! _ct_env "/usr/bin/cscli console enroll $_enroll_key >/dev/null 2>&1"; then
         [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
         log "[自愈] re-enroll 执行失败（注册码未消耗），下次开机重试"
         return 1
     fi
-
     _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
-    _ct_env '/usr/bin/cscli console enable --all >/dev/null 2>&1' || true
+
+    # 放出：启用 online_api 拉取 CAPI 情报 —— 与「修改凭据」同级的事务防护
+    # 失败即回滚凭据并退出，绝不吞错误、绝不留下半死的 online_api
+    if ! _ct_env '/usr/bin/cscli console enable --all >/dev/null 2>&1'; then
+        log "[自愈] console enable 失败，回滚凭据，不放出 CAPI"
+        [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
+        return 1
+    fi
 
     _i=0
     while [ "$_i" -lt 6 ]; do
         _i=$((_i+1))
         if console_enroll_ok; then
-            log "[自愈] re-enroll 成功，console 状态恢复正常"
+            log "[自愈] re-enroll 成功，console 状态恢复正常，CAPI 已放出"
             return 0
         fi
         sleep 5
     done
 
+    # 复检未通过：收回 CAPI 放出 + 回滚凭据，避免留下半死的 online_api
+    log "[自愈] re-enroll 复检未通过，收回 CAPI 放出并回滚凭据"
+    _ct_env '/usr/bin/cscli console disable --all >/dev/null 2>&1' || true
     [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
-    log "[自愈] re-enroll 复检未通过，已回滚旧凭据"
     return 1
 }
 

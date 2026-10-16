@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.52"
+SCRIPT_VER="2026-10-16.53"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -283,7 +283,7 @@ ensure_trusted_ip() {
 _container_dns() {
     _dns=""
     if [ -f /etc/config/custom_router_dns.txt ]; then
-        _dns=$(cat /etc/config/custom_router_dns.txt | tr '\n' ' ' | tr -d '\r')
+        _dns=$(tr -d '\r' < /etc/config/custom_router_dns.txt | tr '\n' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     fi
     [ -n "$_dns" ] || _dns="$BRIDGE_IP"
     [ -n "$_dns" ] || _dns='10.0.0.1'
@@ -493,6 +493,18 @@ _bouncer_uci_apply() {
     return 0
 }
 
+_wait_lapi_ready() {
+    _max="${1:-90}"
+    _i=0
+    while [ "$_i" -lt "$_max" ]; do
+        _i=$((_i+1))
+        _ct_env "$CSCLI bouncers list -o json" >/dev/null 2>&1 && return 0
+        [ $((_i % 15)) -eq 0 ] && log "等待容器内 crowdsec LAPI 就绪（已等 ${_i}s）"
+        sleep 1
+    done
+    return 1
+}
+
 _bouncer_register_once() {
     _ct_env "$CSCLI bouncers delete $BOUNCER_NAME" >/dev/null 2>&1 || true
     _junk="$(_ct_env "$CSCLI bouncers list -o json" 2>/dev/null \
@@ -560,6 +572,7 @@ _bouncer_heal() {
     _i=0
     while [ "$_i" -lt "$_max" ]; do
         _i=$((_i+1))
+        _wait_lapi_ready 90 || true
         _bouncer_register_once || { log "[bouncer] 第 $_i/$_max 轮注册未拿到 key"; continue; }
         _ensure_bouncer_service
         _j=0
@@ -579,6 +592,7 @@ _crowdsec_repair() {
     setup_crowdsec_config || log "[修复] 容器侧配置校验未完全通过，继续后续步骤"
     _bouncer_uci_apply || log "[修复] 路由器侧 bouncer 配置异常，继续后续步骤"
 
+    _wait_lapi_ready 90 || log "[修复] LAPI 未就绪，仍尝试注册"
     _bouncer_register_once || { log "[修复] 重新注册 bouncer 失败（拿不到 key）"; return 1; }
 
     _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
@@ -748,6 +762,9 @@ main() {
         _wait_ct_running || { log "容器起不来"; exit 1; }
     fi
     log "容器已启动"
+
+    log "等待容器内 crowdsec LAPI 就绪"
+    _wait_lapi_ready 90 || log "警告：LAPI 90 秒未就绪，bouncer 注册可能失败"
 
     setup_log_forward
 

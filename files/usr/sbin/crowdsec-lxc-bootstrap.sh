@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.57"
+SCRIPT_VER="2026-10-16.58"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -601,7 +601,19 @@ _bouncer_heal() {
 }
 
 _crowdsec_repair() {
-    log "[修复] last pull 失败，开始修复：验证文件 → 对齐 bouncer → 刷新两端 → 重验"
+    log "[修复] last pull 失败，开始修复：容器级施救 → 验证文件 → 对齐 bouncer → 刷新两端 → 重验"
+
+    if ! ct_running; then
+        log "[修复] 容器未运行，先做启动施救（不重建，失败交回上层）"
+        _ct_revive 0 || { log "[修复] 容器起不来，放弃本条修复"; return 1; }
+    elif ! _ct_env 'hostname -I 2>/dev/null' | grep -q "$CONTAINER_IP"; then
+        log "[修复] 容器在运行但无 IP $CONTAINER_IP，重写网络配置并重启容器"
+        setup_container_network || true
+        setup_resolv || true
+        ct_force_stop || true
+        lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
+        _wait_ct_running || { log "[修复] 重启后容器未起来，放弃本条修复"; return 1; }
+    fi
 
     setup_crowdsec_config || log "[修复] 容器侧配置校验未完全通过，继续后续步骤"
     _bouncer_uci_apply || log "[修复] 路由器侧 bouncer 配置异常，继续后续步骤"
@@ -732,7 +744,8 @@ _mount_systemd_cgroup() {
 }
 
 _ct_revive() {
-    log "[施救] 容器两次启动未拉起，进入启动修复链"
+    _rb="${1:-1}"
+    log "[施救] 容器启动修复链（补挂 cgroup → 重写 config 重启 → 验活）"
 
     _mount_systemd_cgroup
 
@@ -745,9 +758,12 @@ _ct_revive() {
         return 0
     fi
 
-    log "[施救] 重写 config 仍无效，判定 rootfs 损坏，重建重装"
-    _crowdsec_rebuild || { log "[施救] 重建失败，引导终止"; return 1; }
-    return 0
+    if [ "$_rb" = "1" ]; then
+        log "[施救] 重写 config 仍无效，判定 rootfs 损坏，重建重装"
+        _crowdsec_rebuild || { log "[施救] 重建失败，引导终止"; return 1; }
+        return 0
+    fi
+    return 1
 }
 
 main() {

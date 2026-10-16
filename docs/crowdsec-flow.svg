@@ -201,8 +201,8 @@
   <text x="272" y="1492" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑨.c</tspan> bouncer_pulling() 判据：name 匹配 + last_pull 非空</text>
   <line x1="460.0" y1="1500" x2="460.0" y2="1512" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
   <rect x="260" y="1512" width="400" height="38" rx="6" class="sml"/>
-  <text x="272" y="1528" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑨.d</tspan> v.55：last_pull 距现在 &gt; BOUNCER_PULL_MAX_AGE（默认 600s）也判失</text>
-  <text x="272" y="1542" class="ndl">效——堵 LAPI 僵死盲区</text>
+  <text x="272" y="1528" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑨.d</tspan> v.55：陈旧阈值 BOUNCER_PULL_MAX_AGE=600s（阈值非等待）——last_pu</text>
+  <text x="272" y="1542" class="ndl">ll 超龄未更新也判失效，堵 LAPI 僵死盲区</text>
   <line x1="460.0" y1="1550" x2="460.0" y2="1562" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
   <rect x="260" y="1562" width="400" height="38" rx="6" class="sml"/>
   <text x="272" y="1578" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑨.e</tspan> 失效 → _bouncer_heal 2 轮（删旧+注册→容器内重启 crowdsec+路由器</text>

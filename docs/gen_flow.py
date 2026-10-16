@@ -189,7 +189,7 @@ steps = [
         "固化 UCI bouncer 字段：api_url=http://10.0.0.10:8080/、enabled=1、ipv4=1；失败 → 跳过注册块，直落 ⑩",
         "v.53：每轮注册前 _wait_lapi_ready，等 LAPI 就绪再 cscli bouncers add；add 失败 → ⑨.e 下一轮",
         "bouncer_pulling() 判据：name 匹配 + last_pull 非空",
-        "v.55：last_pull 距现在 > BOUNCER_PULL_MAX_AGE（默认 600s）也判失效——堵 LAPI 僵死盲区",
+        "v.55：陈旧阈值 BOUNCER_PULL_MAX_AGE=600s（阈值非等待）——last_pull 超龄未更新也判失效，堵 LAPI 僵死盲区",
         "失效 → _bouncer_heal 2 轮（删旧+注册→容器内重启 crowdsec+路由器重启 bouncer 两端刷新→等 60s 验证）",
         "2 轮未通 → _crowdsec_repair：容器级施救 → 配置校验 → UCI 对齐 → 重注册 → 重启两端 → 重验（见三节）",
     ]),

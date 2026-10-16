@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.39"
+SCRIPT_VER="2026-10-16.51"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -47,9 +47,18 @@ nft_table_ready() { nft list table ip crowdsec >/dev/null 2>&1; }
 
 _protect_file() {
     [ -f "$1" ] || return 0
-    if command -v chattr >/dev/null 2>&1; then
-        chattr +i "$1" 2>/dev/null || true
+    if ! command -v chattr >/dev/null 2>&1; then
+        log "警告：系统无 chattr 命令，$1 无法加 +i 保护"
+        return 0
     fi
+    chattr +i "$1" 2>/dev/null || true
+    if command -v lsattr >/dev/null 2>&1; then
+        if lsattr -d "$1" 2>/dev/null | awk '{print $1}' | grep -q 'i'; then
+            return 0
+        fi
+        log "警告：$1 加 +i 失败（文件系统可能不支持 immutable），该文件未受保护"
+    fi
+    return 0
 }
 _unprotect_file() {
     [ -f "$1" ] || return 0
@@ -60,24 +69,36 @@ _unprotect_file() {
 protect_key_files() {
     _protect_file "$TARBALL"
     _protect_file "$ENROLL_KEY_FILE"
+    _protect_file "$_SELF"
+    _protect_file "/etc/rc.local"
+    _protect_file "/etc/init.d/lxc-auto"
 }
 
 
 ct_force_stop() {
     ct_running || return 0
-    lxc-stop -P "$LXC_PATH" -n "$LXC_NAME" -k >/dev/null 2>&1
-    _i=0
-    while ct_running; do
-        _i=$((_i+1))
-        if [ "$_i" -ge 12 ]; then
-            _pid="$(ct_pid)"
-            [ -n "$_pid" ] && kill -9 "$_pid" 2>/dev/null
-            sleep 1
-        fi
-        [ "$_i" -ge 24 ] && { log "容器无法停止，跳过重建"; return 1; }
-        sleep $SLEEP
+    _r=0
+    while [ "$_r" -lt 3 ]; do
+        _r=$((_r+1))
+        lxc-stop -P "$LXC_PATH" -n "$LXC_NAME" -k >/dev/null 2>&1
+        _i=0
+        while ct_running; do
+            _i=$((_i+1))
+            if [ "$_i" -ge 12 ]; then
+                _pid="$(ct_pid)"
+                [ -n "$_pid" ] && kill -9 "$_pid" 2>/dev/null
+                sleep 1
+            fi
+            [ "$_i" -ge 24 ] && break
+            sleep 2
+        done
+        ct_running || return 0
+        [ "$_r" -ge 3 ] && break
+        log "第 $_r 轮强制停止未成功，继续停止（最多 3 轮）"
+        sleep 2
     done
-    return 0
+    log "容器 3 轮强制停止仍未停止"
+    return 1
 }
 
 _wait() {
@@ -470,8 +491,6 @@ setup_crowdsec_config() {
     setup_acquis || return 1
     ensure_listen_uri || return 1
     ensure_trusted_ip || return 1
-    # 注意：CAPI(online_client) 的「屏蔽/放出」不再在配置生成阶段无脑执行，
-    # 改由 main 按「首次/恢复 vs 后续重启」两种模式显式控制（见 main 末尾）。
     return 0
 }
 
@@ -481,6 +500,26 @@ prepare_container() {
     setup_resolv || return 1
     setup_crowdsec_config || return 1
     apply_cfg || return 1
+    return 0
+}
+
+_bouncer_uci_apply() {
+    _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    if [ -z "$_sec" ]; then
+        uci add crowdsec bouncer >/dev/null 2>&1
+        _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    fi
+    [ -n "$_sec" ] || { log "/etc/config/crowdsec 无 bouncer 段，bouncer 包未装进固件"; return 1; }
+    uci -q set "$_sec.api_url=http://${CONTAINER_IP}:${LAPI_PORT}/"
+    uci -q set "$_sec.enabled=1"
+    uci -q set "$_sec.ipv4=1"
+    uci -q set "$_sec.ipv6=0"
+    uci -q set "$_sec.deny_action=drop"
+    uci -q set "$_sec.filter_input=1"
+    uci -q set "$_sec.filter_forward=1"
+    uci -q del "$_sec.interface"
+    uci add_list "$_sec.interface=br-lan"
+    uci commit crowdsec
     return 0
 }
 
@@ -564,44 +603,57 @@ _bouncer_heal() {
     return 1
 }
 
-_crowdsec_diagnose() {
-    if _ct_env "crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1"; then
-        :
-    else
-        log "[诊断] config.yaml 校验失败（status≠0），判定文件/配置损坏，需重装"
-        return 0
-    fi
+_crowdsec_repair() {
+    log "[修复] last pull 失败，开始修复：验证文件 → 对齐 bouncer → 刷新两端 → 重验"
 
-    _log="$(_ct_env "tail -n 200 /var/log/crowdsec.log 2>/dev/null")"
-    [ -z "$_log" ] && _log="$(_ct_env "journalctl -u crowdsec --no-pager -n 100 2>/dev/null")"
-    if [ -z "$_log" ]; then
-        log "[诊断] 无 crowdsec 日志可取，保守判定为不重装"
-        return 1
-    fi
+    setup_crowdsec_config || log "[修复] 容器侧配置校验未完全通过，继续后续步骤"
+    _bouncer_uci_apply || log "[修复] 路由器侧 bouncer 配置异常，继续后续步骤"
 
-    if printf '%s\n' "$_log" | grep -qiE "no API client section|no such file|malformed|yaml.*error|sqlite|corrupt|invalid config|credentials.*not found"; then
-        log "[诊断] 日志命中文件损坏类关键词，判定需重装"
-        return 0
-    fi
+    _bouncer_register_once || { log "[修复] 重新注册 bouncer 失败（拿不到 key）"; return 1; }
 
-    if printf '%s\n' "$_log" | grep -qiE "connection refused|lookup|DNS|authenticate watcher|timeout|dial"; then
-        log "[诊断] 日志命中网络/连接类关键词，判定为网络问题，不重装"
-        return 1
-    fi
+    _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
+    service crowdsec-firewall-bouncer enable 2>/dev/null
+    service crowdsec-firewall-bouncer restart 2>/dev/null
 
-    log "[诊断] 无法明确判定根因，保守不重装"
+    _i=0
+    while [ "$_i" -lt 6 ]; do
+        _i=$((_i+1))
+        bouncer_pulling && { log "[修复] last_pull 已恢复，链路修复成功"; return 0; }
+        sleep 5
+    done
+    log "[修复] 重验后 last_pull 仍为空，修复无效"
     return 1
 }
 
 _crowdsec_rebuild() {
-    log "[重装] 判定容器文件损坏，执行 rootfs 重装"
-    if ! rebuild_from_image; then
-        log "[重装] rootfs 重装失败"
+    if [ "${CS_REBUILT:-0}" = "1" ]; then
+        log "[重装] 本次开机已重建过一次，不再重建（防止重启循环）"
         return 1
     fi
-    prepare_container || { log "[重装] 重装后配置生成失败"; return 1; }
-    log "[重装] rootfs 重装完成，配置已重建"
-    return 0
+    [ -n "$_SELF" ] || { log "[重装] 拿不到脚本自身路径，放弃重建"; return 1; }
+    log "[重装] 判定容器文件损坏：强制停止容器 → 删除容器 → 从脚本第一步重新开始"
+    ct_force_stop || { log "[重装] 容器 3 轮强制停止仍失败，放弃重建"; return 1; }
+    rm -rf "$ROOTFS" 2>/dev/null
+    if [ -f "$CROWDSEC_CFG" ]; then
+        log "[重装] rootfs 删除不彻底，强制删除残留文件"
+        ct_force_stop || true
+        if ct_running; then
+            _pid="$(ct_pid)"
+            if [ "$_pid" -gt 0 ] 2>/dev/null; then kill -9 "$_pid" 2>/dev/null; fi
+        fi
+        for _m in $(mount 2>/dev/null | awk -v r="$ROOTFS" '$3 ~ "^"r {print $3}'); do
+            umount -l "$_m" 2>/dev/null
+        done
+        chattr -R -i "$ROOTFS" 2>/dev/null || find "$ROOTFS" -exec chattr -i {} + 2>/dev/null
+        rm -rf "$ROOTFS" 2>/dev/null
+    fi
+    if [ -f "$CROWDSEC_CFG" ]; then
+        log "[重装] rootfs 仍有残留，放弃重建（避免重跑误判为后续重启）"
+        return 1
+    fi
+    export CS_REBUILT=1
+    log "[重装] rootfs 已删除，重新执行脚本（走首次/恢复流程重装）"
+    exec /bin/sh "$_SELF"
 }
 
 console_enroll_ok() {
@@ -664,8 +716,6 @@ re_enroll() {
     return 1
 }
 
-# 统一 enroll 入口：仅在 CAPI 已「放出」（online_client 取消注释）后调用，
-# 满足「enroll 的步骤在放出屏蔽之后」。若 console 已正常则跳过。
 _try_enroll() {
     if console_enroll_ok; then
         log "[enroll] console 已注册且正常，跳过 enroll"
@@ -690,8 +740,6 @@ main() {
         exit 0
     fi
 
-    # 模式判定：此刻 rootfs 内 config.yaml 不存在 → 本次为「首次 / 恢复」
-    # （含彻底删除容器后重建）。已存在则为「后续重启」。
     _recovering=false
     [ -f "$CROWDSEC_CFG" ] || _recovering=true
 
@@ -710,9 +758,6 @@ main() {
     setup_bridge
     prepare_container || { log "配置生成失败"; exit 1; }
 
-    # 首次 / 恢复容器：安装前「直接屏蔽」CAPI（online_client off，使用屏蔽相同代码），
-    # 让 LAPI 干净独立启动，避免中央 API 认证导致崩溃循环。
-    # 后续重启模式不在此屏蔽——重启仅在 last pull 验证失败后才屏蔽（见末尾 CAPI 段）。
     if [ "$_recovering" = true ]; then
         ensure_online_client_off || log "[CAPI] 屏蔽(off)失败，继续"
     fi
@@ -743,89 +788,31 @@ main() {
 
     setup_log_forward
 
-    # ---------- bouncer 注册（安装步骤的一部分，幂等） ----------
-    _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
-    if [ -z "$_sec" ]; then
-        uci add crowdsec bouncer >/dev/null 2>&1
-        _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
-    fi
-    if [ -z "$_sec" ]; then
-        log "/etc/config/crowdsec 无 bouncer 段，bouncer 包未装进固件"
-    else
-        uci -q set "$_sec.api_url=http://${CONTAINER_IP}:${LAPI_PORT}/"
-        uci -q set "$_sec.enabled=1"
-        uci -q set "$_sec.ipv4=1"
-        uci -q set "$_sec.ipv6=0"
-        uci -q set "$_sec.deny_action=drop"
-        uci -q set "$_sec.filter_input=1"
-        uci -q set "$_sec.filter_forward=1"
-        uci -q del "$_sec.interface"
-        uci add_list "$_sec.interface=br-lan"
-        uci commit crowdsec
-
+    if _bouncer_uci_apply; then
         if bouncer_pulling; then
             log "本地 bouncer 链路已通（last_pull 有效），跳过注册"
         else
             log "bouncer 链路未通（name 错位或 last_pull 空），执行重注册"
-            _bouncer_heal 3 || log "bouncer 重注册 3 轮未全通，随下方 CAPI/LAPI 判定处理"
+            _bouncer_heal 3 || log "bouncer 重注册 3 轮未全通，随下方 CAPI 段修复处理"
         fi
         _ensure_bouncer_service
     fi
 
-    # ===================== CAPI 屏蔽 / 放出 + enroll =====================
-    # 判据：LAPI 侧 bouncer 的 last_pull 是否有数据（bouncer_pulling）。
-    if bouncer_pulling; then _lapi_ok=true; else _lapi_ok=false; fi
-
-    if [ "$_recovering" = true ]; then
-        # 首次 / 恢复容器：安装前已「直接屏蔽」(online_client off)。
-        # 安装结束验证 LAPI Last Pull 有数据 → 解除屏蔽（放出，使用屏蔽相同代码）。
-        if [ "$_lapi_ok" = true ]; then
-            ensure_online_client_on || log "[CAPI] 放出失败，CAPI 维持屏蔽"
-            log "[CAPI] 安装完成且 LAPI 健康，已解除屏蔽（放出 online_client）"
-            _try_enroll
-        else
-            # 首次就拉不通：保持屏蔽，按流程诊断根因，损坏则重建
-            ensure_online_client_off || true
-            log "[CAPI] 首次安装后 LAPI 无 last pull，保持屏蔽并诊断"
-            if _crowdsec_diagnose; then
-                _crowdsec_rebuild || { log "[CAPI] rootfs 重装失败，放弃"; exit 1; }
-                if bouncer_pulling; then
-                    ensure_online_client_on || true
-                    _try_enroll
-                else
-                    log "[CAPI] 重建后 LAPI 仍无 last pull，保持屏蔽"; exit 1
-                fi
-            else
-                log "[CAPI] 诊断为非文件损坏（网络/服务），保持屏蔽，请检查 LAPI/8080"; exit 1
-            fi
-        fi
+    if bouncer_pulling; then
+        ensure_online_client_on || log "[CAPI] 放出失败，CAPI 维持屏蔽"
+        log "[CAPI] LAPI 健康（last_pull 有效），已放出 online_client"
+        _try_enroll
     else
-        # 后续重启：都会验证 last pull；只有失败后 才屏蔽
-        if [ "$_lapi_ok" = true ]; then
-            # 正常：不屏蔽。放出 CAPI（幂等）后按需 enroll（enroll 在放出之后）
-            ensure_online_client_on || true
+        ensure_online_client_off || true
+        log "[CAPI] last pull 失败，已屏蔽 online_client"
+        if _crowdsec_repair; then
+            ensure_online_client_on || log "[CAPI] 放出失败，CAPI 维持屏蔽"
+            log "[CAPI] 修复成功，LAPI 链路恢复，已放出 online_client"
             _try_enroll
         else
-            # last pull 验证失败 → 屏蔽（使用屏蔽相同代码）
-            ensure_online_client_off || true
-            log "[CAPI] 重启检测到 last pull 失败，已屏蔽 online_client"
-            # 按照流程查看日志等
-            if _crowdsec_diagnose; then
-                # 文件损坏 → 重建：确定重建则不再额外放出，重装后重新走验证/放出
-                log "[CAPI] 诊断判定损坏，重建容器"
-                _crowdsec_rebuild || { log "[CAPI] rootfs 重装失败，放弃"; exit 1; }
-                if bouncer_pulling; then
-                    ensure_online_client_on || true
-                    _try_enroll
-                else
-                    log "[CAPI] 重建后 LAPI 仍无 last pull，保持屏蔽"; exit 1
-                fi
-            else
-                # 网络/服务问题 → 放出屏蔽 + enroll（enroll 在放出之后）
-                ensure_online_client_on || true
-                log "[CAPI] 判定网络/服务问题，已放出屏蔽"
-                _try_enroll
-            fi
+            log "[CAPI] 修复无效，重建容器"
+            _crowdsec_rebuild || { log "[CAPI] 重建未执行/失败，放弃"; exit 1; }
+            log "[CAPI] 重建后脚本未重跑（异常），保持屏蔽"; exit 1
         fi
     fi
 

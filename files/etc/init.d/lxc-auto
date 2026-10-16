@@ -17,7 +17,7 @@ start_container() {
         config_get name "$cfg" name
         config_list_foreach "$cfg" command run_command
         if [ -n "$name" ]; then
-                /usr/bin/lxc-start -n "$name"
+                /usr/bin/lxc-start -n "$name" -d
         fi
 }
 

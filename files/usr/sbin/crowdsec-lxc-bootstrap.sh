@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.51"
+SCRIPT_VER="2026-10-16.52"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -44,36 +44,6 @@ _ct_env() { ct sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 
 cs_active_on_host() { _pgrep_bouncer; }
 nft_table_ready() { nft list table ip crowdsec >/dev/null 2>&1; }
-
-_protect_file() {
-    [ -f "$1" ] || return 0
-    if ! command -v chattr >/dev/null 2>&1; then
-        log "警告：系统无 chattr 命令，$1 无法加 +i 保护"
-        return 0
-    fi
-    chattr +i "$1" 2>/dev/null || true
-    if command -v lsattr >/dev/null 2>&1; then
-        if lsattr -d "$1" 2>/dev/null | awk '{print $1}' | grep -q 'i'; then
-            return 0
-        fi
-        log "警告：$1 加 +i 失败（文件系统可能不支持 immutable），该文件未受保护"
-    fi
-    return 0
-}
-_unprotect_file() {
-    [ -f "$1" ] || return 0
-    if command -v chattr >/dev/null 2>&1; then
-        chattr -i "$1" 2>/dev/null || true
-    fi
-}
-protect_key_files() {
-    _protect_file "$TARBALL"
-    _protect_file "$ENROLL_KEY_FILE"
-    _protect_file "$_SELF"
-    _protect_file "/etc/rc.local"
-    _protect_file "/etc/init.d/lxc-auto"
-}
-
 
 ct_force_stop() {
     ct_running || return 0
@@ -644,7 +614,6 @@ _crowdsec_rebuild() {
         for _m in $(mount 2>/dev/null | awk -v r="$ROOTFS" '$3 ~ "^"r {print $3}'); do
             umount -l "$_m" 2>/dev/null
         done
-        chattr -R -i "$ROOTFS" 2>/dev/null || find "$ROOTFS" -exec chattr -i {} + 2>/dev/null
         rm -rf "$ROOTFS" 2>/dev/null
     fi
     if [ -f "$CROWDSEC_CFG" ]; then
@@ -733,8 +702,6 @@ main() {
             && log "镜像已从 $LEGACY_TARBALL 迁移到 $TARBALL"
     fi
 
-    protect_key_files
-
     if [ ! -f "$TARBALL" ] && [ ! -f "$CROWDSEC_CFG" ]; then
         log "无镜像且无 rootfs，本机不带 CrowdSec，跳过"
         exit 0
@@ -773,15 +740,11 @@ main() {
         fi
     fi
 
-    log "启动容器 $LXC_NAME（经 lxc-auto）"
-    if [ -x /etc/init.d/lxc-auto ]; then
-        /etc/init.d/lxc-auto start >/dev/null 2>&1 || true
-    fi
+    log "启动容器 $LXC_NAME"
+    lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
     if ! _wait_ct_running; then
-        log "lxc-auto 首启未拉起，重试 lxc-auto"
-        if [ -x /etc/init.d/lxc-auto ]; then
-            /etc/init.d/lxc-auto start >/dev/null 2>&1 || true
-        fi
+        log "首启未拉起，重试 lxc-start -d"
+        lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
         _wait_ct_running || { log "容器起不来"; exit 1; }
     fi
     log "容器已启动"

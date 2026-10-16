@@ -42,4 +42,34 @@ crowdsec的初次运行需要时间自动进行初始化安装，无需网络也
 - 脚本本体：[files/usr/sbin/crowdsec-lxc-bootstrap.sh](files/usr/sbin/crowdsec-lxc-bootstrap.sh)
 - 图源文件：[docs/crowdsec-flow.svg](docs/crowdsec-flow.svg)，改图用生成器 [docs/gen_flow.py](docs/gen_flow.py)（python3 gen_flow.py）
 
+## 从开机到放出的时间线（v.62）
+
+引导脚本每次开机由 rc.local 触发。下表把每一段的**等待性质**写明白（都是上限，条件满足立即通过）：
+
+| 阶段 | 代码位置 | 等待性质 | 上限 |
+|---|---|---|---|
+| rc.local 触发 → 判锁/查镜像 | main 开头 | 无等待；镜像和 rootfs 都无 → exit 0 跳过 | 0s |
+| 写容器 config / 解压 rootfs（仅首次/恢复） | ③④ | 无 sleep；强停旧容器 + tar 解压，耗时看镜像大小 | 分钟级 |
+| 运行期配置（网桥/网络/采集/监听/UCI） | ⑤⑧ | 纯文件 + uci 操作，无 sleep | 秒级 |
+| 启动容器 | ⑦ | lxc-start -d 后轮询 `ct_running`（`_wait_ct_running`，12×5s） | **≤60s** |
+| 等容器内 LAPI 就绪 | ⑦ | 每秒查 `cscli bouncers list`，通了立即返回；容器停了立即中止 | **≤90s** |
+| bouncer 链路检查 | ⑨ | `bouncer_pulling()` 直接判定，无等待 | 0s |
+| 健康路径：放出 + enroll + nft 检查 | ⑩⑪ | `sleep 3` 后查 nft 表；未注册时 enroll 复检 6×5s | 3s（+30s） |
+
+**健康重启通常 1 分钟内走完前 6 行**（等容器几秒 + 等 LAPI 十几到几十秒）。
+
+失效路径（last_pull 空/错位/陈旧）继续加时：
+
+| 阶段 | 等待构成 | 上限 |
+|---|---|---|
+| heal 每轮（最多 2 轮） | 等 LAPI ≤90s → 注册（不 sleep，失败立即下一轮）→ 容器内重启 crowdsec → 再等 LAPI ≤90s → 重启路由器 bouncer + sleep 12 → **此后才计 60s 验证窗口**（12×5s 查 last_pull） | ≤90+90+12+60s/轮 |
+| repair（heal 2 轮不过） | 容器施救/重启（等容器 ≤60s）→ 配置校验 → 等 LAPI ≤90s → 重注册 → 重启两端 → 6×5s 重验 | ≤60+90+30s |
+| 重建（repair 不过） | 强停容器（最多 3 轮）→ 删 rootfs → `exec` 重跑脚本（CS_REBUILT=1 限一次），从时间线第一步重走 | 全流程重来 |
+
+三个关键点：
+
+- **60s 验证窗口从哪开始计**：不是开机、不是容器起来、不是注册成功，而是本轮 heal 里「重启路由器 bouncer + sleep 12」**完成之后**才开始 12×5s 倒计时——bouncer 没重启完，last_pull 本来就不会动，提前计时只会误判
+- 两个 90s 是 LAPI 就绪闸门（`_wait_lapi_ready`），超时只告警不退出；注册本身零等待，成败交验证窗口判定
+- `BOUNCER_PULL_MAX_AGE=600s` 是 last_pull **陈旧阈值**（超龄未更新才判失效），不是任何地方的等待
+
 # 最后，感谢每一位项目贡献者。

@@ -127,27 +127,47 @@ def small_box(x, y, w, label, body, wrapw, color="#4a5568"):
         text(x+12, y+16+14*j, lines[j], "ndl")
     return h
 
+# ==================== 顶部：开机起算时间线 ====================
+parts.append('  <rect x="14" y="66" width="652" height="58" rx="7" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>')
+text(24, 80, "开机起算 · 引导时间线（最坏等待；健康重启通常 <1 分钟走完前三步）", "sub")
+_tl = [
+    ("rc.local", "触发 bootstrap", "node"),
+    ("等容器 RUNNING", "≤60s（12×5s）", "nodeBlue"),
+    ("等 LAPI 就绪", "≤90s（1s 轮询）", "nodeBlue"),
+    ("bouncer 检查", "0s 直接判定", "node"),
+    ("heal 每轮 ×2", "≤90+90+12+60s", "nodeOrange"),
+    ("repair→重建", "30s→exec 重跑", "nodeRed"),
+]
+_tw, _th, _gap, _tx = 96, 32, 12.8, 20
+for _i, (_t1, _t2, _cls) in enumerate(_tl):
+    rect(_tx, 88, _tw, _th, _cls)
+    text(_tx + _tw/2, 101, _t1, "nt")
+    text(_tx + _tw/2, 113, _t2, "nd")
+    if _i < len(_tl) - 1:
+        line(_tx + _tw, 104, _tx + _tw + _gap, 104, w=1.4)
+    _tx += _tw + _gap
+
 # ==================== 一、开机自启链路 ====================
-text(20, 78, "一、开机自启链路（v.56 起弃用 lxc-auto，只剩一条路径）", "sub")
-rect(20, 90, 120, 46, "nodeOrange");  text(80, 109, "开机", "nt");  text(80, 125, "procd 启动", "nd")
-line(140, 113, 164, 113, w=1.8)
-rect(164, 90, 150, 46, "node");  text(239, 108, "/etc/rc.local", "nt");  text(239, 124, "判锁+检查镜像", "nd")
-line(314, 113, 338, 113, w=1.8)
-rect(338, 90, 150, 46, "node");  text(413, 108, "bootstrap 脚本", "nt");  text(413, 124, "/usr/sbin/...sh", "mono")
-line(488, 113, 512, 113, w=1.8)
-rect(512, 90, 150, 46, "nodeBlue");  text(587, 108, "lxc-start -d", "nt");  text(587, 124, "-n ubuntu -d", "mono")
+text(20, 140, "一、开机自启链路（v.56 起弃用 lxc-auto，只剩一条路径）", "sub")
+rect(20, 152, 120, 46, "nodeOrange");  text(80, 171, "开机", "nt");  text(80, 187, "procd 启动", "nd")
+line(140, 175, 164, 175, w=1.8)
+rect(164, 152, 150, 46, "node");  text(239, 170, "/etc/rc.local", "nt");  text(239, 186, "判锁+检查镜像", "nd")
+line(314, 175, 338, 175, w=1.8)
+rect(338, 152, 150, 46, "node");  text(413, 170, "bootstrap 脚本", "nt");  text(413, 186, "/usr/sbin/...sh", "mono")
+line(488, 175, 512, 175, w=1.8)
+rect(512, 152, 150, 46, "nodeBlue");  text(587, 170, "lxc-start -d", "nt");  text(587, 186, "-n ubuntu -d", "mono")
 
 det1 = [
     "procd boot 阶段执行 /etc/rc.local → mkdir 锁防重入 → 检查镜像 tarball 或 rootfs；都无 → bootstrap exit 0 跳过（本机不带 CS）",
     "/bin/sh /usr/sbin/crowdsec-lxc-bootstrap.sh >> 日志；bootstrap 先 disable lxc-auto（幂等，失败不阻断）",
     "挂 systemd cgroup（幂等）→ lxc-start -P /srv/lxc -n ubuntu -d → 容器 RUNNING；两次起不来 → _ct_revive 施救（二.⑦）",
 ]
-dy1 = 152
+dy1 = 214
 db = dy1
 for i, d in enumerate(det1):
     h = small_box(20 + i*210, dy1, 200, f"一.{chr(97+i)}", d, 17, "#2b6cb0")
     db = max(db, dy1 + h)
-line(413, 136, 413, dy1)
+line(413, 198, 413, dy1)
 
 # ==================== 二、bootstrap 脚本流程 ====================
 sec2_top = db + 52

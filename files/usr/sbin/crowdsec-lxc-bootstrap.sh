@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.63"
+SCRIPT_VER="2026-10-16.64"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -705,10 +705,24 @@ re_enroll() {
     fi
 
     _cred_file="$ROOTFS/etc/crowdsec/online_api_credentials.yaml"
+
+    # cscli console enroll 的加载前提：online_api_credentials.yaml 必须已存在
+    # （由 cscli capi register 创建）。v.62 及更早先把它 mv 走再 enroll，
+    # 文件不在场 → enroll 在配置加载阶段就秒退，脚本 enroll 从来不可能成功
+    if [ ! -s "$_cred_file" ]; then
+        log "[enroll] online_api_credentials.yaml 缺失，先 cscli capi register 注册 CAPI 凭据"
+        if ! _capi_reg_out="$(_ct_env "$CSCLI capi register" 2>&1)"; then
+            log "[enroll] capi register 失败：$(printf '%s' "$_capi_reg_out" | tr '\n' ' ' | cut -c1-300)"
+            return 1
+        fi
+        log "[enroll] capi register 成功，凭据已写入 online_api_credentials.yaml"
+    fi
+
+    # 备份现有凭据用 cp 不用 mv：enroll 要求文件在场，移走必然秒退（v.62 的坑）
     _bak=""
     if [ -s "$_cred_file" ]; then
         _bak="$_cred_file.bak"
-        mv -f "$_cred_file" "$_bak" 2>/dev/null || true
+        cp -f "$_cred_file" "$_bak" 2>/dev/null || _bak=""
     fi
 
     # enroll 输出不再吞：秒退时日志里能看到 cscli 的真实报错

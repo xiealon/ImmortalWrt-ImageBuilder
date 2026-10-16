@@ -31,7 +31,7 @@ crowdsec的初次运行需要时间自动进行初始化安装，无需网络也
 **注意 3
 防火墙里面的NAT规则LXC-SNAT不要动它，它会在编译时会自动修改对应IP地址到出接口的IP。
 
-# crowdsec 引导流程图（v.63）
+# crowdsec 引导流程图（v.64）
 每次开机 rc.local 触发引导脚本后的完整执行链路：**左=大步骤框，右=小步骤框（①.a 式编号）**，含每个小步骤失效后的去向。
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)
@@ -42,7 +42,7 @@ crowdsec的初次运行需要时间自动进行初始化安装，无需网络也
 - 脚本本体：[files/usr/sbin/crowdsec-lxc-bootstrap.sh](files/usr/sbin/crowdsec-lxc-bootstrap.sh)
 - 图源文件：[docs/crowdsec-flow.svg](docs/crowdsec-flow.svg)，改图用生成器 [docs/gen_flow.py](docs/gen_flow.py)（python3 gen_flow.py）
 
-## 从开机到放出的时间线（v.63）
+## 从开机到放出的时间线（v.64）
 
 引导脚本每次开机由 rc.local 触发。下表把每一段的**等待性质**写明白（都是上限，条件满足立即通过）：
 
@@ -77,6 +77,11 @@ enroll 判定（v.63 起简化）：
 - 开机判定**只看 Enrolled**：`cscli console status` 的 Enrolled 行不是否定态（`not enrolled`/`false`）就算已注册。**authenticated 不查**——`cscli console enroll` 后必须先到网页端 app.crowdsec.net 点 Accept enroll，之前本来就是未 authenticated，拿它当开机判据只会每次误判异常、反复重注册
 - enroll 前先等 `api.crowdsec.net` 可解析（≤30s 墙钟、每秒一探、就绪即止），治开机时 DNS/mosdns 未就绪导致的**秒退**；enroll 命令的输出和 `cscli capi status` 都写进日志，失败有据可查
 - 注册码**固定有效、不消耗**，反复 enroll 无代价；enroll 成功后等网页端 Accept 即可，无需脚本干预
+
+enroll 前置条件（v.64 起修正，源码级实锤）：
+
+- `cscli console enroll` 的加载链（`require.LAPI`→`LoadAPIServer`，1.4～1.8 各版一致）**要求 `online_api_credentials.yaml` 已存在**，否则 enroll 在配置加载阶段就秒退，报 `failed to load Local API: loading online client credentials: ... no such file`。该文件由 **`cscli capi register`** 创建（生成机器 ID+密码→注册 CAPI→写文件），官方安装流程里它先于 enroll
+- 因此脚本在 enroll 前检查该文件，**缺失时先跑 `cscli capi register`** 再 enroll；备份凭据用 `cp` 不用 `mv`——v.62 及更早先 `mv` 走再 enroll，文件不在场等于必然秒退，**脚本 enroll 从来不可能成功**（错误还被 `>/dev/null 2>&1` 吞掉，表现为"手动能注册、脚本必失败"）
 
 # mosdns 与容器 DNS（redirect 开启后容器解析失败的排查）
 

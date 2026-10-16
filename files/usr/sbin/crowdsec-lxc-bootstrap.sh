@@ -12,7 +12,7 @@
 # 纯净镜像原则：镜像编译期只 apt 装 crowdsec，不写定制配置；
 # 网络/解析器/listen_uri/trusted_ips 等全部在本脚本运行期生成。
 # =============================================================================
-SCRIPT_VER="2026-10-16.34"
+SCRIPT_VER="2026-10-16.35"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -683,23 +683,16 @@ main() {
     setup_bridge
     prepare_container || { log "配置生成失败"; exit 1; }
 
-    # 步骤1：启动容器（交给固件原生 lxc-auto 管理，避免与 procd 会话冲突）
+    # 步骤1：启动容器（统一委托给固件原生 lxc-auto，脚本自身不再直接 lxc-start）
     # 教训：自定义脚本在 procd（rc.local）环境下用 setsid/nohup 启动容器，
     # 都无法可靠常驻——容器会被 procd 回收或与 lxc-auto 的原生 autostart
-    # 机制打架（日志里网卡反复接入/断开）。最终改用 /etc/init.d/lxc-auto
-    # 这一 OpenWrt 原生启动项：它读 /etc/config/lxc-auto 的 UCI 配置，
-    # 由 procd 正式托管，开机/关机自动 start/stop，最可靠。
+    # 机制打架（日志里网卡反复接入/断开）。最终只保留 lxc-auto 这一条启动
+    # 路径：它读 /etc/config/lxc-auto 的 UCI 配置，由 procd 正式托管，最可靠。
     log "启动容器 $LXC_NAME（经 lxc-auto）"
     if [ -x /etc/init.d/lxc-auto ]; then
         /etc/init.d/lxc-auto start >/dev/null 2>&1 || true
     fi
-    # 兜底：lxc-auto 未配置或未生效时，直接 lxc-start（不带 -d，前台守护由
-    # lxc 自身 monitor 进程负责，不会被子 shell 回收）。
-    if ! _wait_ct_running; then
-        log "lxc-auto 未拉起，回退直接 lxc-start"
-        lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
-        _wait_ct_running || { log "容器起不来"; exit 1; }
-    fi
+    _wait_ct_running || { log "容器起不来"; exit 1; }
     log "容器已启动"
 
     # 步骤1.5：配置宿主机系统日志 → 容器 CrowdSec（514/udp）

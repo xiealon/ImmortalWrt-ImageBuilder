@@ -1,0 +1,16 @@
+# 这些文件最终要跑在路由器（Linux）上，必须是 LF。
+# 在 Windows 上贡献代码时，缺了这份文件 git 会把它们转成 CRLF，
+# 开机脚本会直接报 ": bad interpreter"。
+* text=auto eol=lf
+
+*.sh        text eol=lf
+files/**    text eol=lf
+shell/**    text eol=lf
+*.config    text eol=lf
+*.conf      text eol=lf
+
+# 二进制 / 压缩包不要碰
+*.gz        binary
+*.tar.gz    binary
+*.img       binary
+*.img.gz    binary

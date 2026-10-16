@@ -1,0 +1,318 @@
+name: Build 25.12.x x86-64
+
+on:
+  workflow_dispatch:
+    inputs:
+      luci_version:
+        description: "选择luci版本"
+        required: false
+        default: "25.12.1"
+        type: choice
+        options:
+          - 25.12.0
+          - 25.12.1
+      custom_router_ip:
+        description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
+        required: true
+        default: "192.168.3.201"
+      custom_router_netmask:
+        description: "子网掩码，留空默认 255.255.255.0。非 /24 时必须在下面显式填网关"
+        required: false
+      custom_router_gateway:
+        description: "网关地址，留空则自动取管理地址同网段的首个地址(如 192.168.100.1)。非 /24 网段请务必手填"
+        required: false
+      custom_router_dns:
+        description: "DNS 地址，留空则跟随网关"
+        required: false
+      custom_container_ip:
+        description: "CrowdSec 容器固定 IP，留空默认 10.0.0.10（须与网桥 IP 同 /24 网段；编译期写入容器 rootfs，开机由引导脚本建网桥）"
+        required: false
+        default: "10.0.0.10"
+      custom_bridge_ip:
+        description: "lxcbr0 网桥 IP，留空默认 10.0.0.1；同时作为容器的网关和 DNS（掩码固定 255.255.255.0）。网桥/接口由开机引导脚本按此值创建"
+        required: false
+        default: "10.0.0.1"
+      profile:
+        description: '选择软件包空间大小'
+        required: true
+        type: choice
+        default: '4G'
+        options:
+          - '1G'
+          - '2G'
+          - '3G'
+          - '4G'
+      enable_store:
+        description: "集成 store 商店"
+        required: false
+        type: boolean
+        default: true
+      include_docker:
+        description: |
+          是否编译 Docker 插件
+        required: true
+        default: 'yes'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+      include_crowdsec:
+        description: "内置 CrowdSec 安全容器（Ubuntu LXC，开机自动建容器+对接 bouncer，需选 2G 以上空间）"
+        required: false
+        default: 'yes'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+      include_iso:
+        description: "额外生成 ISO 安装器（复用 build-iso 流程）"
+        required: false
+        default: 'no'
+        type: choice
+        options:
+          - 'yes'
+          - 'no'
+      crowdsec_enroll_key:
+        description: "CrowdSec 控制台注册密钥（app.crowdsec.net 的 enrollment key）；留空则不开通账号绑定。仅 include_crowdsec=yes 时生效"
+        required: false
+        default: ''
+        type: password
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set executable permissions
+        run: chmod +x ${{ github.workspace }}/x86-64/build25.sh
+
+      - name: Validate CrowdSec build parameters
+        env:
+          CS_INCLUDE_IN: ${{ inputs.include_crowdsec }}
+          CS_KEY: ${{ inputs.crowdsec_enroll_key }}
+          CS_PROFILE: ${{ inputs.profile }}
+          CS_CT_IP_IN: ${{ inputs.custom_container_ip }}
+          CS_BRIDGE_IP_IN: ${{ inputs.custom_bridge_ip }}
+        run: |
+          CS_INCLUDE=no
+          CS_ENROLL=no
+
+          if [ "$CS_INCLUDE_IN" != "yes" ]; then
+            echo "❎ include_crowdsec=no，本轮不构建 CrowdSec 容器"
+            if [ -n "$CS_KEY" ]; then
+              echo "::warning::已填写 crowdsec_enroll_key 但 include_crowdsec=no，密钥不会写入固件、账号绑定不生效"
+            fi
+          else
+            case "$CS_PROFILE" in
+              2G|3G|4G|10G)
+                CS_INCLUDE=yes
+                if [ -n "$CS_KEY" ]; then
+                  CS_ENROLL=yes
+                  echo "✅ include_crowdsec=yes，已提供注册密钥，将开通控制台账号绑定"
+                else
+                  echo "✅ include_crowdsec=yes，未提供注册密钥，跳过账号绑定（本地 bouncer/LAPI 功能不受影响）"
+                fi
+                ;;
+              *)
+                echo "::error::include_crowdsec=yes 但 profile=$CS_PROFILE 空间不足（CrowdSec 容器需 2G 以上 rootfs），已自动跳过 CrowdSec 容器构建，其余部分照常"
+                ;;
+            esac
+          fi
+
+          if [ "$CS_ENROLL" = "yes" ]; then
+            CUSTOM="${{ github.workspace }}/custom"
+            mkdir -p "$CUSTOM"
+            printf '%s\n' "$CS_KEY" > "$CUSTOM/crowdsec_enroll_key.txt"
+            echo "已写入注册密钥 → custom/crowdsec_enroll_key.txt"
+          fi
+
+          CUSTOM="${{ github.workspace }}/custom"
+          mkdir -p "$CUSTOM"
+          _cs_valid_ip() {
+              printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+              for _o in $(printf '%s' "$1" | tr '.' ' '); do
+                  [ "$_o" -ge 0 ] 2>/dev/null && [ "$_o" -le 255 ] 2>/dev/null || return 1
+              done
+              return 0
+          }
+          _cs_net24() { echo "$1" | awk -F. '{print $1"."$2"."$3}'; }
+          [ -n "$CS_CT_IP_IN" ]     || CS_CT_IP_IN='10.0.0.10'
+          [ -n "$CS_BRIDGE_IP_IN" ] || CS_BRIDGE_IP_IN='10.0.0.1'
+          if ! _cs_valid_ip "$CS_CT_IP_IN"; then
+              echo "::error::custom_container_ip=$CS_CT_IP_IN 不是合法 IPv4，已回退默认 10.0.0.10"
+              CS_CT_IP_IN='10.0.0.10'
+          fi
+          if ! _cs_valid_ip "$CS_BRIDGE_IP_IN"; then
+              echo "::error::custom_bridge_ip=$CS_BRIDGE_IP_IN 不是合法 IPv4，已回退默认 10.0.0.1"
+              CS_BRIDGE_IP_IN='10.0.0.1'
+          fi
+          if [ "$(_cs_net24 "$CS_CT_IP_IN")" != "$(_cs_net24 "$CS_BRIDGE_IP_IN")" ]; then
+              echo "::error::容器 IP($CS_CT_IP_IN) 与网桥 IP($CS_BRIDGE_IP_IN) 不在同一 /24 网段（掩码固定 24 位），已回退默认 10.0.0.10 / 10.0.0.1"
+              CS_CT_IP_IN='10.0.0.10'; CS_BRIDGE_IP_IN='10.0.0.1'
+          fi
+          if [ "$CS_CT_IP_IN" = "$CS_BRIDGE_IP_IN" ]; then
+              echo "::error::容器 IP 不能与网桥 IP 相同($CS_CT_IP_IN)，已回退默认 10.0.0.10 / 10.0.0.1"
+              CS_CT_IP_IN='10.0.0.10'; CS_BRIDGE_IP_IN='10.0.0.1'
+          fi
+          printf '%s\n' "$CS_CT_IP_IN"     > "$CUSTOM/custom_container_ip.txt"
+          printf '%s\n' "$CS_BRIDGE_IP_IN" > "$CUSTOM/custom_bridge_ip.txt"
+          echo "CS_CT_IP=$CS_CT_IP_IN"       >> $GITHUB_ENV
+          echo "CS_BRIDGE_IP=$CS_BRIDGE_IP_IN" >> $GITHUB_ENV
+          echo "容器网络: IP=$CS_CT_IP_IN 网关/DNS=$CS_BRIDGE_IP_IN 掩码=255.255.255.0（已写 custom/*.txt）"
+
+          echo "CS_INCLUDE=$CS_INCLUDE" >> $GITHUB_ENV
+          echo "CS_ENROLL=$CS_ENROLL" >> $GITHUB_ENV
+          echo "校验结果: CS_INCLUDE=$CS_INCLUDE CS_ENROLL=$CS_ENROLL"
+
+      - name: Save Router Network Config into OpenWrt files
+        run: |
+          CUSTOM="${{ github.workspace }}/custom"
+          mkdir -p "$CUSTOM"
+
+          echo "${{ github.event.inputs.custom_router_ip      }}" > "$CUSTOM/custom_router_ip.txt"
+          echo "${{ github.event.inputs.custom_router_netmask  }}" > "$CUSTOM/custom_router_netmask.txt"
+          echo "${{ github.event.inputs.custom_router_gateway  }}" > "$CUSTOM/custom_router_gateway.txt"
+          echo "${{ github.event.inputs.custom_router_dns      }}" > "$CUSTOM/custom_router_dns.txt"
+
+          echo "已写入: IP=$(cat "$CUSTOM/custom_router_ip.txt")"
+          echo "        掩码=[$(tr -d '\r\n' < "$CUSTOM/custom_router_netmask.txt")]"
+          echo "        网关=[$(tr -d '\r\n' < "$CUSTOM/custom_router_gateway.txt")]"
+          echo "        DNS=[$(tr -d '\r\n' < "$CUSTOM/custom_router_dns.txt")]"
+
+
+      - name: Enable Store integration
+        run: |
+          if [ "${{ github.event.inputs.enable_store }}" == "true" ]; then
+            echo 'CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-store"' >> shell/apk-custom-packages.sh
+            echo "✅ 已追加 luci-app-store"
+          else
+            echo "❎ 未启用 luci-app-store"
+          fi
+
+      - name: Prepare CrowdSec LXC rootfs
+        if: env.CS_INCLUDE == 'yes'
+        run: |
+          chmod +x shell/prepare-crowdsec-rootfs.sh
+          sudo env CONTAINER_IP="${CS_CT_IP:-10.0.0.10}" BRIDGE_IP="${CS_BRIDGE_IP:-10.0.0.1}" \
+               bash shell/prepare-crowdsec-rootfs.sh
+          echo "容器 rootfs 体积："
+          ls -lh files/etc/crowdsec/lxc-ubuntu.tar.gz
+          echo "⚠️ 若下一步 make image 报空间不足，请把 profile 调到 2G 或更大"
+
+      - name: Build ImmortalWrt-x86-64-efi 25.12.x
+        run: |
+          profile="${{ github.event.inputs.profile }}"
+          case "$profile" in
+            1G)
+              ROOTFS_SIZE=1024
+              ;;
+            2G)
+              ROOTFS_SIZE=2048
+              ;;
+            3G)
+              ROOTFS_SIZE=3072
+              ;;
+            4G)
+              ROOTFS_SIZE=4096
+              ;;
+          esac
+          echo "ROOTFS_SIZE=$ROOTFS_SIZE" >> $GITHUB_ENV
+          include_docker="${{ github.event.inputs.include_docker }}"
+          luci_version="${{ github.event.inputs.luci_version }}"
+          echo "Building for rootfs_size: $profile"
+          docker run --rm -i \
+            --user root \
+            -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
+            -v "${{ github.workspace }}/files:/home/build/immortalwrt/files" \
+            -v "${{ github.workspace }}/custom:/home/build/immortalwrt/files/etc/config" \
+            -v "${{ github.workspace }}/x86-64/imm25.config:/home/build/immortalwrt/.config" \
+            -v "${{ github.workspace }}/shell:/home/build/immortalwrt/shell" \
+            -v "${{ github.workspace }}/x86-64/build25.sh:/home/build/immortalwrt/build.sh" \
+            -e PROFILE=$ROOTFS_SIZE \
+            -e INCLUDE_DOCKER=$include_docker \
+          immortalwrt/imagebuilder:x86-64-openwrt-${luci_version} /bin/bash /home/build/immortalwrt/build.sh
+
+
+      - name: Create info
+        run: |
+          cat > ${{ github.workspace }}/router-info.md <<EOF
+          ## 📡 路由器后台信息
+          - 🏠 **后台地址**: ${{ github.event.inputs.custom_router_ip }}
+          - 👤 **用户名**: root
+          - 🔑 **密码**: 无
+          EOF
+
+          if [ "${{ github.event.inputs.include_docker }}" == "yes" ]; then
+            extra_content="#### 默认带docker"
+            echo -e "\n$extra_content" >> ${{ github.workspace }}/router-info.md
+          else
+            echo -e "\n#### 不带docker" >> ${{ github.workspace }}/router-info.md
+          fi
+
+      - name: Upload ImmortWrt as release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: Autobuild-x86-64
+          body_path: ${{ github.workspace }}/router-info.md
+          files: |
+            ${{ github.workspace }}/bin/targets/x86/64/*squashfs-combined-efi.img.gz
+          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 复制固件到根目录
+        run: |
+          cp ${{ github.workspace }}/bin/targets/x86/64/*squashfs-combined-efi.img.gz ${{ github.workspace }}
+
+      - name: 上传固件到 artifact (for ISO generation)
+        uses: actions/upload-artifact@v6
+        with:
+          name: firmware-img
+          path: |
+            *.img.gz
+
+  build_installer_iso:
+    runs-on: ubuntu-22.04
+    needs: build
+    if: ${{ (github.event.inputs.include_iso || inputs.include_iso || 'no') == 'yes' }}
+    env:
+      ISO_VER: "${{ github.event.inputs.luci_version || inputs.luci_version }}"
+
+    steps:
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: firmware-img
+
+      - name: 同步 img-installer 项目 准备制作ISO
+        run: |
+          git clone https://github.com/xiealon/img-installer.git
+          cd img-installer
+
+      - name: Set executable permissions for scripts
+        run: |
+          chmod +x "${{ github.workspace }}/img-installer/custom.sh"
+          chmod +x "${{ github.workspace }}/img-installer/supportFiles/custom/build.sh"
+
+      - name: 制作 25.12.x ISO
+        run: |
+          firmware_file=$(ls *squashfs-combined-efi.img.gz)
+          cd img-installer
+          bash autobuild/autobuild.sh "../$firmware_file"
+          if [ ! -f "output/custom-installer-x86_64-${ISO_VER}.iso" ]; then
+            mv output/custom-installer-x86_64.iso "output/custom-installer-x86_64-${ISO_VER}.iso"
+          fi
+
+      - name: 上传 ISO 到 Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: "Custom-Installer-x86_64-ISO"
+          body_path: "${{ github.workspace }}/img-installer/autobuild/info.md"
+          files: |
+            img-installer/output/custom-installer-x86_64-${{ env.ISO_VER }}.iso
+          token: "${{ secrets.GITHUB_TOKEN }}"

@@ -17,9 +17,12 @@ if ! mkdir "$LOCK" 2>/dev/null; then
     exit 0
 fi
 
-# 直接前台执行，脚本内部的 lxc-start -d 自己 daemonize，
+# 直接前台执行，脚本内部的 lxc-start 自己 daemonize，
 # 不再用 ( ... ) & 后台子 shell（那会导致 procd 回收子进程组时连带杀掉容器）。
 /bin/sh "$BOOT" >>"$LOG" 2>&1
 rmdir "$LOCK" 2>/dev/null
+
+# 容器开机自启已交由固件原生 /etc/init.d/lxc-auto 管理（读 /etc/config/lxc-auto），
+# 这里不再重复拉起，避免与 lxc-auto 的原生 autostart 机制打架。
 
 exit 0

@@ -728,8 +728,15 @@ re_enroll() {
     while [ "$_i" -lt 6 ]; do
         _i=$((_i+1))
         if console_enroll_ok; then
-            log "[自愈] re-enroll 成功，console 状态恢复正常，CAPI 已放出"
-            return 0
+            # 修改后校验配置合法性（-t），报错则视为修改不干净，回滚
+            if _ct_env "crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1"; then
+                log "[自愈] re-enroll 成功，console 状态正常，CAPI 已放出，配置校验(-t)通过"
+                return 0
+            fi
+            log "[自愈] re-enroll 复检通过但配置校验(-t)报错，收回 CAPI 放出并回滚凭据"
+            _ct_env '/usr/bin/cscli console disable --all >/dev/null 2>&1' || true
+            [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
+            return 1
         fi
         sleep 5
     done

@@ -12,7 +12,7 @@
 # 纯净镜像原则：镜像编译期只 apt 装 crowdsec，不写定制配置；
 # 网络/解析器/listen_uri/trusted_ips 等全部在本脚本运行期生成。
 # =============================================================================
-SCRIPT_VER="2026-10-16.37"
+SCRIPT_VER="2026-10-16.38"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -57,6 +57,29 @@ _ct_env() { ct sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 
 cs_active_on_host() { _pgrep_bouncer; }
 nft_table_ready() { nft list table ip crowdsec >/dev/null 2>&1; }
+
+# ---------- 关键文件防误删（chattr +i 不可变属性） ----------
+# 把宿主机上的「镜像」「注册码」设为不可变，防止他人/脚本误删。
+# 注意：chattr +i 后即使 root 直接 rm 也会 Operation not permitted，
+# 必须先 chattr -i 解锁。脚本内部需要写/删这些文件时，会先临时解锁。
+_protect_file() {
+    [ -f "$1" ] || return 0
+    if command -v chattr >/dev/null 2>&1; then
+        chattr +i "$1" 2>/dev/null || true
+    fi
+}
+_unprotect_file() {
+    [ -f "$1" ] || return 0
+    if command -v chattr >/dev/null 2>&1; then
+        chattr -i "$1" 2>/dev/null || true
+    fi
+}
+# 保护镜像 + 注册码两个关键文件
+protect_key_files() {
+    _protect_file "$TARBALL"
+    _protect_file "$ENROLL_KEY_FILE"
+}
+
 
 ct_force_stop() {
     ct_running || return 0
@@ -599,6 +622,66 @@ _bouncer_heal() {
     return 1
 }
 
+# ---------- 容器内 CrowdSec 健康诊断（决定是否重装 rootfs） ----------
+# bouncer 连续注册失败后调用，通过「配置校验 + 日志关键词」判断根因：
+#   返回 0 = 判定为「文件/配置损坏」，应重装容器
+#   返回 1 = 判定为「网络/服务未就绪」，不应重装（重试或修网络即可）
+# 依据：之前实机排查的经验结论——
+#   - journalctl 在容器里常 No journal files（journald 未持久化），
+#     因此日志主要靠 /var/log/crowdsec.log。
+#   - crowdsec -c config.yaml -t 是配置校验的黄金命令，失败即配置损坏。
+#   - 文件损坏类 FATAL 关键词：no API client section / no such file /
+#     malformed / yaml / corrupt / sqlite 等。
+#   - 网络类关键词（不重装）：connection refused / lookup / DNS /
+#     authenticate watcher（online API 连不上，属网络非文件损坏）。
+_crowdsec_diagnose() {
+    # 1) 配置校验：config.yaml 能否通过 -t 测试
+    if _ct_env "crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1"; then
+        :
+    else
+        log "[诊断] config.yaml 校验失败（status≠0），判定文件/配置损坏，需重装"
+        return 0
+    fi
+
+    # 2) 拉取日志（/var/log/crowdsec.log 为主，journalctl 兜底）
+    _log="$(_ct_env "tail -n 200 /var/log/crowdsec.log 2>/dev/null")"
+    [ -z "$_log" ] && _log="$(_ct_env "journalctl -u crowdsec --no-pager -n 100 2>/dev/null")"
+    if [ -z "$_log" ]; then
+        log "[诊断] 无 crowdsec 日志可取，保守判定为不重装"
+        return 1
+    fi
+
+    # 3) 文件损坏类关键词 → 重装
+    if printf '%s\n' "$_log" | grep -qiE "no API client section|no such file|malformed|yaml.*error|sqlite|corrupt|invalid config|credentials.*not found"; then
+        log "[诊断] 日志命中文件损坏类关键词，判定需重装"
+        return 0
+    fi
+
+    # 4) 网络类关键词 → 不重装
+    if printf '%s\n' "$_log" | grep -qiE "connection refused|lookup|DNS|authenticate watcher|timeout|dial"; then
+        log "[诊断] 日志命中网络/连接类关键词，判定为网络问题，不重装"
+        return 1
+    fi
+
+    # 5) 无法判定 → 保守不重装
+    log "[诊断] 无法明确判定根因，保守不重装"
+    return 1
+}
+
+# 重装 rootfs（从宿主机镜像重新解压），返回 0 成功。
+# 注意：只删 rootfs 目录，不动宿主机镜像/注册码文件。
+_crowdsec_rebuild() {
+    log "[重装] 判定容器文件损坏，执行 rootfs 重装"
+    if ! rebuild_from_image; then
+        log "[重装] rootfs 重装失败"
+        return 1
+    fi
+    # 重装后重建运行期配置（网络/解析器/listen_uri/trusted_ips）
+    prepare_container || { log "[重装] 重装后配置生成失败"; return 1; }
+    log "[重装] rootfs 重装完成，配置已重建"
+    return 0
+}
+
 # ---------- 远程 console enroll ----------
 console_enroll_ok() {
     _out="$(_ct_env "$CSCLI console status" 2>&1)"
@@ -653,11 +736,15 @@ re_enroll() {
 main() {
     log "===== crowdsec-lxc-bootstrap v$SCRIPT_VER 开始（容器 $LXC_NAME）====="
 
-    # 旧镜像路径迁移
+    # 旧镜像路径迁移（迁移前临时解锁目标，防止 chattr +i 阻碍写入）
     if [ ! -f "$TARBALL" ] && [ -f "$LEGACY_TARBALL" ]; then
+        _unprotect_file "$TARBALL"
         mkdir -p "$CS_HOME" 2>/dev/null && mv -f "$LEGACY_TARBALL" "$TARBALL" 2>/dev/null \
             && log "镜像已从 $LEGACY_TARBALL 迁移到 $TARBALL"
     fi
+
+    # 关键文件防误删：镜像 + 注册码设为不可变（chattr +i）
+    protect_key_files
 
     # 无镜像且无 rootfs，本机不带 CrowdSec，跳过
     if [ ! -f "$TARBALL" ] && [ ! -f "$CROWDSEC_CFG" ]; then
@@ -747,7 +834,23 @@ main() {
             log "本地 bouncer 链路已通（last_pull 有效），跳过注册"
         else
             log "bouncer 链路未通（name 错位或 last_pull 空），执行重注册"
-            _bouncer_heal 3 || { log "bouncer 重注册 3 轮仍失败，请检查 LAPI/8080"; exit 1; }
+            if ! _bouncer_heal 3; then
+                log "bouncer 重注册 3 轮仍失败，进入诊断"
+                # 诊断根因：配置校验 + 日志关键词，判定是否文件损坏
+                if _crowdsec_diagnose; then
+                    # 判定文件损坏 → 重装 rootfs → 再重试注册
+                    if _crowdsec_rebuild; then
+                        log "[重装] 重装完成，再次尝试 bouncer 注册"
+                        _bouncer_heal 3 || { log "重装后 bouncer 注册仍失败，请检查 LAPI/8080"; exit 1; }
+                    else
+                        log "rootfs 重装失败，放弃，请检查 LAPI/8080"
+                        exit 1
+                    fi
+                else
+                    log "诊断判定非文件损坏（网络/服务未就绪），不重装，请检查 LAPI/8080"
+                    exit 1
+                fi
+            fi
         fi
         _ensure_bouncer_service
     fi

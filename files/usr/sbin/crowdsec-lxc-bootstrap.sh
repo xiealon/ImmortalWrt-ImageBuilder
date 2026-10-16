@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.61"
+SCRIPT_VER="2026-10-16.62"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -577,21 +577,24 @@ _restart_bouncer_service() {
 }
 
 _bouncer_heal() {
-    _max="${1:-3}"
+    _max="${1:-2}"
     _i=0
     while [ "$_i" -lt "$_max" ]; do
         _i=$((_i+1))
         _wait_lapi_ready 90 || true
         _bouncer_register_once || { log "[bouncer] 第 $_i/$_max 轮注册未拿到 key"; continue; }
+        log "[bouncer] 新 key 已写入，刷新容器内 crowdsec 与路由器 bouncer 状态"
+        _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
+        _wait_lapi_ready 90 || true
         _restart_bouncer_service
         _ensure_bouncer_service
         _j=0
-        while [ "$_j" -lt 3 ]; do
+        while [ "$_j" -lt 12 ]; do
             _j=$((_j+1))
             bouncer_pulling && { log "[bouncer] 已恢复拉取（第 $_i 轮注册）"; return 0; }
             sleep 5
         done
-        log "[bouncer] 第 $_i/$_max 轮注册后 last_pull 仍为空"
+        log "[bouncer] 第 $_i/$_max 轮注册后 last_pull 仍为空（已等 60s）"
     done
     return 1
 }
@@ -824,7 +827,7 @@ main() {
             log "本地 bouncer 链路已通（last_pull 有效），跳过注册"
         else
             log "bouncer 链路未通（name 错位或 last_pull 空），执行重注册"
-            _bouncer_heal 3 || log "bouncer 重注册 3 轮未全通，随下方 CAPI 段修复处理"
+            _bouncer_heal 2 || log "bouncer 重注册 2 轮未全通，随下方 CAPI 段修复处理"
         fi
         _ensure_bouncer_service
     fi

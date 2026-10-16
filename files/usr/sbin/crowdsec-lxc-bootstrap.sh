@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.62"
+SCRIPT_VER="2026-10-16.63"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -664,21 +664,43 @@ _crowdsec_rebuild() {
     exec /bin/sh "$_SELF"
 }
 
+# 开机判定：只看 Enrolled——网页端 Accept 前不会有 authenticated，不查；
+# 兼容 1.6 文本行（Enrolled: true/false）与 1.8 表格行（✅/❌）
 console_enroll_ok() {
     _out="$(_ct_env "$CSCLI console status" 2>&1)"
-    [ -n "$_out" ] \
-        && printf '%s\n' "$_out" | grep -qiE "authenticated" \
-        && printf '%s\n' "$_out" | grep -qiE "enrolled" \
-        && ! printf '%s\n' "$_out" | grep -qiE "not registered|not enrolled|unauthorized|forbidden|invalid|revoked"
+    [ -n "$_out" ] || return 1
+    _line="$(printf '%s\n' "$_out" | grep -i 'enrolled' | head -n1)"
+    [ -n "$_line" ] || return 1
+    printf '%s\n' "$_line" | grep -qiE 'not enrolled|(^|[^[:alnum:]_])false' && return 1
+    return 0
+}
+
+# 等容器内能解析 api.crowdsec.net：开机时 DNS/mosdns 未就绪会让 enroll 秒退
+# 墙钟上限 _wn_max 秒（就绪即止，每次探测容器内 timeout 2 封顶）；容器停了立即失败
+_wait_capi_net() {
+    _wn_max="${1:-30}"
+    _wn_dl=$(( $(date +%s) + _wn_max ))
+    while [ "$(date +%s)" -lt "$_wn_dl" ]; do
+        ct_running || { log "[enroll] 容器已停止，放弃等待 DNS 就绪"; return 1; }
+        _ct_env "timeout 2 getent hosts api.crowdsec.net" >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    return 1
 }
 
 re_enroll() {
-    log "[自愈] console 状态异常，尝试用注册码重新 enroll"
+    log "[enroll] console 未注册，用注册码 enroll（注册码固定有效，可反复使用，不消耗）"
 
     _enroll_key=""
     [ -f "$ENROLL_KEY_FILE" ] && _enroll_key="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
     if [ -z "$_enroll_key" ]; then
-        log "[自愈] 无注册码，放弃 re-enroll"
+        log "[enroll] 无注册码（$ENROLL_KEY_FILE 缺失或为空），放弃 enroll"
+        return 1
+    fi
+
+    # CAPI 起不来 enroll 必败：先等 DNS/网络就绪（≤30s，就绪即止）
+    if ! _wait_capi_net 30; then
+        log "[enroll] 30 秒内仍无法解析 api.crowdsec.net（容器 DNS 未就绪），放弃本次 enroll"
         return 1
     fi
 
@@ -689,36 +711,37 @@ re_enroll() {
         mv -f "$_cred_file" "$_bak" 2>/dev/null || true
     fi
 
-    if ! _ct_env "/usr/bin/cscli console enroll $_enroll_key >/dev/null 2>&1"; then
+    # enroll 输出不再吞：秒退时日志里能看到 cscli 的真实报错
+    if ! _enroll_out="$(_ct_env "/usr/bin/cscli console enroll \"$_enroll_key\"" 2>&1)"; then
         [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
-        log "[自愈] re-enroll 执行失败（注册码未消耗），下次开机重试"
+        log "[enroll] enroll 执行失败：$(printf '%s' "$_enroll_out" | tr '\n' ' ' | cut -c1-300)"
+        log "[enroll] 注册码未消耗，下次开机重试"
         return 1
     fi
+    log "[enroll] enroll 命令返回成功：$(printf '%s' "$_enroll_out" | tr '\n' ' ' | cut -c1-200)"
+
+    # 推送开关：1.6.9+ enrolled 后自动全开；低版本补开，失败不阻断（未 Accept 前也可能被拒）
+    _ct_env '/usr/bin/cscli console enable --all' >/dev/null 2>&1 \
+        || log "[enroll] console enable --all 失败（不影响注册；新版本 enrolled 后自动全开）"
+
     _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
 
-    if ! _ct_env '/usr/bin/cscli console enable --all >/dev/null 2>&1'; then
-        log "[自愈] console enable 失败，回滚凭据，不放出 CAPI"
-        [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
-        return 1
-    fi
+    # 重启后把 CAPI 真实状态写进日志（CAPI 起不来 enroll 白搭，这里留证据）
+    _capi_out="$(_ct_env "$CSCLI capi status" 2>&1)"
+    [ -n "$_capi_out" ] && log "[enroll] capi status：$(printf '%s' "$_capi_out" | tr '\n' ' ' | cut -c1-200)"
 
+    # 复检只看 Enrolled：网页端 Accept 前本来就是未 authenticated，不算失败
     _i=0
-    while [ "$_i" -lt 6 ]; do
+    while [ "$_i" -lt 12 ]; do
         _i=$((_i+1))
         if console_enroll_ok; then
-            if _ct_env "crowdsec -c /etc/crowdsec/config.yaml -t >/dev/null 2>&1"; then
-                log "[自愈] re-enroll 成功，console 状态正常，CAPI 已放出，配置校验(-t)通过"
-                return 0
-            fi
-            log "[自愈] re-enroll 复检通过但配置校验(-t)报错，收回 CAPI 放出并回滚凭据"
-            _ct_env '/usr/bin/cscli console disable --all >/dev/null 2>&1' || true
-            [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
-            return 1
+            log "[enroll] 已注册（Enrolled）；网页端 Accept 后 CAPI 才 authenticated，无需脚本干预"
+            return 0
         fi
         sleep 5
     done
 
-    log "[自愈] re-enroll 复检未通过，收回 CAPI 放出并回滚凭据"
+    log "[enroll] enroll 后 60 秒内仍看不到 Enrolled，收回凭据回滚，下次开机重试"
     _ct_env '/usr/bin/cscli console disable --all >/dev/null 2>&1' || true
     [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
     return 1
@@ -726,10 +749,10 @@ re_enroll() {
 
 _try_enroll() {
     if console_enroll_ok; then
-        log "[enroll] console 已注册且正常，跳过 enroll"
+        log "[enroll] 已注册（Enrolled），跳过 enroll"
         return 0
     fi
-    re_enroll || log "[enroll] 自愈未成功（无注册码或 enroll 失败），下次开机再试"
+    re_enroll || log "[enroll] 本次 enroll 未成功，下次开机再试（注册码固定有效，不消耗）"
 }
 
 _mount_systemd_cgroup() {

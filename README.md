@@ -31,7 +31,7 @@ crowdsec的初次运行需要时间自动进行初始化安装，无需网络也
 **注意 3
 防火墙里面的NAT规则LXC-SNAT不要动它，它会在编译时会自动修改对应IP地址到出接口的IP。
 
-# crowdsec 引导流程图（v.62）
+# crowdsec 引导流程图（v.63）
 每次开机 rc.local 触发引导脚本后的完整执行链路：**左=大步骤框，右=小步骤框（①.a 式编号）**，含每个小步骤失效后的去向。
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)
@@ -42,7 +42,7 @@ crowdsec的初次运行需要时间自动进行初始化安装，无需网络也
 - 脚本本体：[files/usr/sbin/crowdsec-lxc-bootstrap.sh](files/usr/sbin/crowdsec-lxc-bootstrap.sh)
 - 图源文件：[docs/crowdsec-flow.svg](docs/crowdsec-flow.svg)，改图用生成器 [docs/gen_flow.py](docs/gen_flow.py)（python3 gen_flow.py）
 
-## 从开机到放出的时间线（v.62）
+## 从开机到放出的时间线（v.63）
 
 引导脚本每次开机由 rc.local 触发。下表把每一段的**等待性质**写明白（都是上限，条件满足立即通过）：
 
@@ -54,7 +54,7 @@ crowdsec的初次运行需要时间自动进行初始化安装，无需网络也
 | 启动容器 | ⑦ | lxc-start -d 后轮询 `ct_running`（`_wait_ct_running`，12×5s） | **≤60s** |
 | 等容器内 LAPI 就绪 | ⑦ | 每秒查 `cscli bouncers list`，通了立即返回；容器停了立即中止 | **≤90s** |
 | bouncer 链路检查 | ⑨ | `bouncer_pulling()` 直接判定，无等待 | 0s |
-| 健康路径：放出 + enroll + nft 检查 | ⑩⑪ | `sleep 3` 后查 nft 表；未注册时 enroll 复检 6×5s | 3s（+30s） |
+| 健康路径：放出 + enroll + nft 检查 | ⑩⑪ | `sleep 3` 后查 nft 表；已注册（Enrolled）则跳过 enroll；未注册才走 enroll：先等 `api.crowdsec.net` 可解析（**≤30s 墙钟，就绪即止**，治开机 DNS/mosdns 未就绪的秒退）→ enroll（输出进日志）→ 复检 12×5s | 3s（+30s+60s） |
 
 **健康重启通常 1 分钟内走完前 6 行**（等容器几秒 + 等 LAPI 十几到几十秒）。
 
@@ -71,6 +71,12 @@ crowdsec的初次运行需要时间自动进行初始化安装，无需网络也
 - **60s 验证窗口从哪开始计**：不是开机、不是容器起来、不是注册成功，而是本轮 heal 里「重启路由器 bouncer + sleep 12」**完成之后**才开始 12×5s 倒计时——bouncer 没重启完，last_pull 本来就不会动，提前计时只会误判
 - 两个 90s 是 LAPI 就绪闸门（`_wait_lapi_ready`），超时只告警不退出；注册本身零等待，成败交验证窗口判定
 - `BOUNCER_PULL_MAX_AGE=600s` 是 last_pull **陈旧阈值**（超龄未更新才判失效），不是任何地方的等待
+
+enroll 判定（v.63 起简化）：
+
+- 开机判定**只看 Enrolled**：`cscli console status` 的 Enrolled 行不是否定态（`not enrolled`/`false`）就算已注册。**authenticated 不查**——`cscli console enroll` 后必须先到网页端 app.crowdsec.net 点 Accept enroll，之前本来就是未 authenticated，拿它当开机判据只会每次误判异常、反复重注册
+- enroll 前先等 `api.crowdsec.net` 可解析（≤30s 墙钟、每秒一探、就绪即止），治开机时 DNS/mosdns 未就绪导致的**秒退**；enroll 命令的输出和 `cscli capi status` 都写进日志，失败有据可查
+- 注册码**固定有效、不消耗**，反复 enroll 无代价；enroll 成功后等网页端 Accept 即可，无需脚本干预
 
 # mosdns 与容器 DNS（redirect 开启后容器解析失败的排查）
 

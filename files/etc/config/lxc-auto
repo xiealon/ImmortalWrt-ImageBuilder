@@ -1,3 +1,0 @@
-config container
-	option name 'ubuntu'
-	option timeout '300'

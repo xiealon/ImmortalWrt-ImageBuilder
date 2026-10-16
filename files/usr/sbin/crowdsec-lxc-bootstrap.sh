@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.56"
+SCRIPT_VER="2026-10-16.57"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -721,11 +721,39 @@ _try_enroll() {
     re_enroll || log "[enroll] 自愈未成功（无注册码或 enroll 失败），下次开机再试"
 }
 
+_mount_systemd_cgroup() {
+    grep -q ' /sys/fs/cgroup/systemd ' /proc/mounts 2>/dev/null && return 0
+    mkdir -p /sys/fs/cgroup/systemd 2>/dev/null
+    if mount -t cgroup -o rw,nosuid,nodev,noexec,relatime,none,name=systemd cgroup /sys/fs/cgroup/systemd 2>/dev/null; then
+        log "[cgroup] 已挂载 systemd 命名层级（容器内 systemd 需要）"
+    else
+        log "[cgroup] systemd 层级挂载失败，容器内 systemd 可能异常"
+    fi
+}
+
+_ct_revive() {
+    log "[施救] 容器两次启动未拉起，进入启动修复链"
+
+    _mount_systemd_cgroup
+
+    log "[施救] 强停残留 → 重写容器 config → 重启"
+    ct_force_stop || true
+    write_cfg || true
+    lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
+    if _wait_ct_running; then
+        log "[施救] 重写 config 后容器已拉起"
+        return 0
+    fi
+
+    log "[施救] 重写 config 仍无效，判定 rootfs 损坏，重建重装"
+    _crowdsec_rebuild || { log "[施救] 重建失败，引导终止"; return 1; }
+    return 0
+}
+
 main() {
     log "===== crowdsec-lxc-bootstrap v$SCRIPT_VER 开始（容器 $LXC_NAME）====="
 
     if [ ! -f "$TARBALL" ] && [ -f "$LEGACY_TARBALL" ]; then
-        _unprotect_file "$TARBALL"
         mkdir -p "$CS_HOME" 2>/dev/null && mv -f "$LEGACY_TARBALL" "$TARBALL" 2>/dev/null \
             && log "镜像已从 $LEGACY_TARBALL 迁移到 $TARBALL"
     fi
@@ -763,19 +791,14 @@ main() {
     fi
 
     log "启动容器 $LXC_NAME"
-    if ! grep -q ' /sys/fs/cgroup/systemd ' /proc/mounts 2>/dev/null; then
-        mkdir -p /sys/fs/cgroup/systemd 2>/dev/null
-        if mount -t cgroup -o rw,nosuid,nodev,noexec,relatime,none,name=systemd cgroup /sys/fs/cgroup/systemd 2>/dev/null; then
-            log "[cgroup] 已挂载 systemd 命名层级（容器内 systemd 需要）"
-        else
-            log "[cgroup] systemd 层级挂载失败，容器内 systemd 可能异常"
-        fi
-    fi
+    _mount_systemd_cgroup
     lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
     if ! _wait_ct_running; then
         log "首启未拉起，重试 lxc-start -d"
         lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
-        _wait_ct_running || { log "容器起不来"; exit 1; }
+        if ! _wait_ct_running; then
+            _ct_revive || { log "容器启动修复链无效，引导失败"; exit 1; }
+        fi
     fi
     log "容器已启动"
 

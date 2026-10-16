@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.38"
+SCRIPT_VER="2026-10-16.39"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -470,7 +470,8 @@ setup_crowdsec_config() {
     setup_acquis || return 1
     ensure_listen_uri || return 1
     ensure_trusted_ip || return 1
-    ensure_online_client_off || return 1
+    # 注意：CAPI(online_client) 的「屏蔽/放出」不再在配置生成阶段无脑执行，
+    # 改由 main 按「首次/恢复 vs 后续重启」两种模式显式控制（见 main 末尾）。
     return 0
 }
 
@@ -663,6 +664,16 @@ re_enroll() {
     return 1
 }
 
+# 统一 enroll 入口：仅在 CAPI 已「放出」（online_client 取消注释）后调用，
+# 满足「enroll 的步骤在放出屏蔽之后」。若 console 已正常则跳过。
+_try_enroll() {
+    if console_enroll_ok; then
+        log "[enroll] console 已注册且正常，跳过 enroll"
+        return 0
+    fi
+    re_enroll || log "[enroll] 自愈未成功（无注册码或 enroll 失败），下次开机再试"
+}
+
 main() {
     log "===== crowdsec-lxc-bootstrap v$SCRIPT_VER 开始（容器 $LXC_NAME）====="
 
@@ -679,6 +690,11 @@ main() {
         exit 0
     fi
 
+    # 模式判定：此刻 rootfs 内 config.yaml 不存在 → 本次为「首次 / 恢复」
+    # （含彻底删除容器后重建）。已存在则为「后续重启」。
+    _recovering=false
+    [ -f "$CROWDSEC_CFG" ] || _recovering=true
+
     mkdir -p "$LXC_PATH/$LXC_NAME" 2>/dev/null
     if [ ! -f "$CFG" ]; then
         write_cfg
@@ -693,6 +709,13 @@ main() {
 
     setup_bridge
     prepare_container || { log "配置生成失败"; exit 1; }
+
+    # 首次 / 恢复容器：安装前「直接屏蔽」CAPI（online_client off，使用屏蔽相同代码），
+    # 让 LAPI 干净独立启动，避免中央 API 认证导致崩溃循环。
+    # 后续重启模式不在此屏蔽——重启仅在 last pull 验证失败后才屏蔽（见末尾 CAPI 段）。
+    if [ "$_recovering" = true ]; then
+        ensure_online_client_off || log "[CAPI] 屏蔽(off)失败，继续"
+    fi
 
     if [ -x /etc/init.d/lxc-auto ]; then
         /etc/init.d/lxc-auto enable >/dev/null 2>&1 || true
@@ -720,6 +743,7 @@ main() {
 
     setup_log_forward
 
+    # ---------- bouncer 注册（安装步骤的一部分，幂等） ----------
     _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
     if [ -z "$_sec" ]; then
         uci add crowdsec bouncer >/dev/null 2>&1
@@ -743,35 +767,66 @@ main() {
             log "本地 bouncer 链路已通（last_pull 有效），跳过注册"
         else
             log "bouncer 链路未通（name 错位或 last_pull 空），执行重注册"
-            if ! _bouncer_heal 3; then
-                log "bouncer 重注册 3 轮仍失败，进入诊断"
-                if _crowdsec_diagnose; then
-                    if _crowdsec_rebuild; then
-                        log "[重装] 重装完成，再次尝试 bouncer 注册"
-                        _bouncer_heal 3 || { log "重装后 bouncer 注册仍失败，请检查 LAPI/8080"; exit 1; }
-                    else
-                        log "rootfs 重装失败，放弃，请检查 LAPI/8080"
-                        exit 1
-                    fi
-                else
-                    log "诊断判定非文件损坏（网络/服务未就绪），不重装，请检查 LAPI/8080"
-                    exit 1
-                fi
-            fi
+            _bouncer_heal 3 || log "bouncer 重注册 3 轮未全通，随下方 CAPI/LAPI 判定处理"
         fi
         _ensure_bouncer_service
     fi
 
-    if console_enroll_ok; then
-        ensure_online_client_on
-        log "console 状态正常，CAPI 已放出（online_client 解除屏蔽）"
-    elif bouncer_pulling; then
-        ensure_online_client_on
-        log "LAPI 健康、CAPI 不可达，放出 online_client（不屏蔽），尝试注册控制台"
-        re_enroll || log "console 自愈未成功（无注册码或 enroll 失败），下次开机再试"
+    # ===================== CAPI 屏蔽 / 放出 + enroll =====================
+    # 判据：LAPI 侧 bouncer 的 last_pull 是否有数据（bouncer_pulling）。
+    if bouncer_pulling; then _lapi_ok=true; else _lapi_ok=false; fi
+
+    if [ "$_recovering" = true ]; then
+        # 首次 / 恢复容器：安装前已「直接屏蔽」(online_client off)。
+        # 安装结束验证 LAPI Last Pull 有数据 → 解除屏蔽（放出，使用屏蔽相同代码）。
+        if [ "$_lapi_ok" = true ]; then
+            ensure_online_client_on || log "[CAPI] 放出失败，CAPI 维持屏蔽"
+            log "[CAPI] 安装完成且 LAPI 健康，已解除屏蔽（放出 online_client）"
+            _try_enroll
+        else
+            # 首次就拉不通：保持屏蔽，按流程诊断根因，损坏则重建
+            ensure_online_client_off || true
+            log "[CAPI] 首次安装后 LAPI 无 last pull，保持屏蔽并诊断"
+            if _crowdsec_diagnose; then
+                _crowdsec_rebuild || { log "[CAPI] rootfs 重装失败，放弃"; exit 1; }
+                if bouncer_pulling; then
+                    ensure_online_client_on || true
+                    _try_enroll
+                else
+                    log "[CAPI] 重建后 LAPI 仍无 last pull，保持屏蔽"; exit 1
+                fi
+            else
+                log "[CAPI] 诊断为非文件损坏（网络/服务），保持屏蔽，请检查 LAPI/8080"; exit 1
+            fi
+        fi
     else
-        ensure_online_client_off
-        log "LAPI 未就绪，保持 online_client 屏蔽，优先恢复 LAPI"
+        # 后续重启：都会验证 last pull；只有失败后 才屏蔽
+        if [ "$_lapi_ok" = true ]; then
+            # 正常：不屏蔽。放出 CAPI（幂等）后按需 enroll（enroll 在放出之后）
+            ensure_online_client_on || true
+            _try_enroll
+        else
+            # last pull 验证失败 → 屏蔽（使用屏蔽相同代码）
+            ensure_online_client_off || true
+            log "[CAPI] 重启检测到 last pull 失败，已屏蔽 online_client"
+            # 按照流程查看日志等
+            if _crowdsec_diagnose; then
+                # 文件损坏 → 重建：确定重建则不再额外放出，重装后重新走验证/放出
+                log "[CAPI] 诊断判定损坏，重建容器"
+                _crowdsec_rebuild || { log "[CAPI] rootfs 重装失败，放弃"; exit 1; }
+                if bouncer_pulling; then
+                    ensure_online_client_on || true
+                    _try_enroll
+                else
+                    log "[CAPI] 重建后 LAPI 仍无 last pull，保持屏蔽"; exit 1
+                fi
+            else
+                # 网络/服务问题 → 放出屏蔽 + enroll（enroll 在放出之后）
+                ensure_online_client_on || true
+                log "[CAPI] 判定网络/服务问题，已放出屏蔽"
+                _try_enroll
+            fi
+        fi
     fi
 
     sleep 3

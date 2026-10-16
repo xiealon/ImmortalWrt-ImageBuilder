@@ -450,6 +450,22 @@ ensure_online_client_off() {
     return 1
 }
 
+ensure_online_client_on() {
+    [ -f "$CROWDSEC_CFG" ] || { log "[配置] config.yaml 缺失"; return 1; }
+
+    sed -i -E \
+        -e "s|^([[:space:]]*)# online_client:.*|\1online_client:|" \
+        -e "s|^([[:space:]]*)# credentials_path: /etc/crowdsec/online_api_credentials.yaml.*|\1credentials_path: /etc/crowdsec/online_api_credentials.yaml|" \
+        "$CROWDSEC_CFG" 2>/dev/null
+
+    if grep -qE "^[[:space:]]*online_client:" "$CROWDSEC_CFG" 2>/dev/null; then
+        log "[配置] online_client 已放出（取消注释），CAPI 可经 LAPI 后启用"
+        return 0
+    fi
+    log "[配置] online_client 放出失败"
+    return 1
+}
+
 setup_crowdsec_config() {
     setup_acquis || return 1
     ensure_listen_uri || return 1
@@ -747,9 +763,15 @@ main() {
     fi
 
     if console_enroll_ok; then
-        log "console 状态正常，跳过 enroll"
-    else
+        ensure_online_client_on
+        log "console 状态正常，CAPI 已放出（online_client 解除屏蔽）"
+    elif bouncer_pulling; then
+        ensure_online_client_on
+        log "LAPI 健康、CAPI 不可达，放出 online_client（不屏蔽），尝试注册控制台"
         re_enroll || log "console 自愈未成功（无注册码或 enroll 失败），下次开机再试"
+    else
+        ensure_online_client_off
+        log "LAPI 未就绪，保持 online_client 屏蔽，优先恢复 LAPI"
     fi
 
     sleep 3

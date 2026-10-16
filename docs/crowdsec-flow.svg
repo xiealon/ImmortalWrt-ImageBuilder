@@ -1,0 +1,345 @@
+<svg viewBox="0 0 680 3082" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#4a5568"/></marker>
+    <marker id="arrRed" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#c53030"/></marker>
+    <marker id="arrGreen" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#38a169"/></marker>
+    <marker id="arrOrange" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#dd6b20"/></marker>
+    <marker id="arrPurple" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#6b46c1"/></marker>
+  </defs>
+  <style>
+    .title{font-size:17px;font-weight:700;fill:#1a202c;}
+    .ver{font-size:11px;fill:#718096;}
+    .sub{font-size:13px;font-weight:700;fill:#2b6cb0;}
+    .sub2{font-size:12px;font-weight:600;fill:#dd6b20;}
+    .node{fill:#fff;stroke:#4a5568;stroke-width:1.3;}
+    .nodeBlue{fill:#ebf8ff;stroke:#2b6cb0;stroke-width:1.8;}
+    .nodeGreen{fill:#f0fff4;stroke:#38a169;stroke-width:1.8;}
+    .nodeOrange{fill:#fffaf0;stroke:#dd6b20;stroke-width:1.8;}
+    .nodeRed{fill:#fff5f5;stroke:#c53030;stroke-width:1.8;}
+    .nodePurple{fill:#faf5ff;stroke:#6b46c1;stroke-width:1.8;}
+    .sml{fill:#ffffff;stroke:#a0aec0;stroke-width:1.1;}
+    .nt{font-size:12px;font-weight:700;text-anchor:middle;}
+    .nd{font-size:10px;text-anchor:middle;fill:#4a5568;}
+    .ndl{font-size:10px;text-anchor:start;fill:#4a5568;}
+    .mono{font-family:'SFMono-Regular',Consolas,'Noto Sans CJK SC',monospace;font-size:9px;text-anchor:middle;fill:#2d3748;}
+    .bignum{font-size:30px;font-weight:700;text-anchor:middle;}
+    .loop{stroke:#dd6b20;stroke-width:1.6;stroke-dasharray:6 4;fill:none;}
+    .loopt{font-size:9px;fill:#c05621;}
+  </style>
+  <text x="340" y="26" class="title" text-anchor="middle">CrowdSec LXC · 详细流程架构图</text>
+  <text x="340" y="44" class="ver" text-anchor="middle">v.2026-10-16.62 ｜ 左=大步骤框，右=小步骤框（①.a 式编号）｜ 重建 = 强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
+  <text x="340" y="58" class="ver" text-anchor="middle">灰实线 = 正常流向 ｜ 红虚线 = 失效 / 重试分支 ｜ 橙虚线 = exec 重跑回路 ｜ exit 0/1 = 脚本终止</text>
+
+  <text x="20" y="78" class="sub">一、开机自启链路（v.56 起弃用 lxc-auto，只剩一条路径）</text>
+  <rect x="20" y="90" width="120" height="46" rx="7" class="nodeOrange"/>
+  <text x="80" y="109" class="nt">开机</text>
+  <text x="80" y="125" class="nd">procd 启动</text>
+  <line x1="140" y1="113" x2="164" y2="113" stroke="#4a5568" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="164" y="90" width="150" height="46" rx="7" class="node"/>
+  <text x="239" y="108" class="nt">/etc/rc.local</text>
+  <text x="239" y="124" class="nd">判锁+检查镜像</text>
+  <line x1="314" y1="113" x2="338" y2="113" stroke="#4a5568" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="338" y="90" width="150" height="46" rx="7" class="node"/>
+  <text x="413" y="108" class="nt">bootstrap 脚本</text>
+  <text x="413" y="124" class="mono">/usr/sbin/...sh</text>
+  <line x1="488" y1="113" x2="512" y2="113" stroke="#4a5568" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="512" y="90" width="150" height="46" rx="7" class="nodeBlue"/>
+  <text x="587" y="108" class="nt">lxc-start -d</text>
+  <text x="587" y="124" class="mono">-n ubuntu -d</text>
+  <rect x="20" y="152" width="200" height="80" rx="6" class="sml"/>
+  <text x="32" y="168" class="ndl"><tspan style="font-weight:700;fill:#2b6cb0">一.a</tspan> procd boot 阶段执行 /etc/r</text>
+  <text x="32" y="182" class="ndl">c.local → mkdir 锁防重入 → 检</text>
+  <text x="32" y="196" class="ndl">查镜像 tarball 或 rootfs；都无</text>
+  <text x="32" y="210" class="ndl">→ bootstrap exit 0 跳过（本机不</text>
+  <text x="32" y="224" class="ndl">带 CS）</text>
+  <rect x="230" y="152" width="200" height="66" rx="6" class="sml"/>
+  <text x="242" y="168" class="ndl"><tspan style="font-weight:700;fill:#2b6cb0">一.b</tspan> /bin/sh /usr/sbin/crowdsec</text>
+  <text x="242" y="182" class="ndl">-lxc-bootstrap.sh &gt;&gt; 日志；boot</text>
+  <text x="242" y="196" class="ndl">strap 先 disable lxc-auto（幂等</text>
+  <text x="242" y="210" class="ndl">，失败不阻断）</text>
+  <rect x="440" y="152" width="200" height="66" rx="6" class="sml"/>
+  <text x="452" y="168" class="ndl"><tspan style="font-weight:700;fill:#2b6cb0">一.c</tspan> 挂 systemd cgroup（幂等）→</text>
+  <text x="452" y="182" class="ndl">lxc-start -P /srv/lxc -n ubunt</text>
+  <text x="452" y="196" class="ndl">u -d → 容器 RUNNING；两次起不来</text>
+  <text x="452" y="210" class="ndl">→ _ct_revive 施救（二.⑦）</text>
+  <line x1="413" y1="136" x2="413" y2="152" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="20" y="256" class="sub">二、bootstrap 脚本流程（每次开机，rc.local 触发）</text>
+  <path d="M400,232 L400,266 L130,266 L130,284" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="30" y="284" width="200" height="88" rx="7" class="node"/>
+  <text x="130.0" y="302" class="nt">① 镜像迁移</text>
+  <text x="130.0" y="318" class="nd">旧→新路径</text>
+  <text x="130.0" y="360" class="bignum" fill="#4a5568" fill-opacity="0.16">①</text>
+  <line x1="230" y1="303.0" x2="260" y2="303.0" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="284" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="300" class="ndl"><tspan style="font-weight:700;fill:#4a5568">①.a</tspan> tarball 缺失：/opt/ 有旧镜像 → mv 迁移到 /etc/crowdsec/；两者都</text>
+  <text x="272" y="314" class="ndl">无 → exit 0 跳过（本机不带 CrowdSec）</text>
+  <line x1="460.0" y1="322" x2="460.0" y2="334" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="334" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="350" class="ndl"><tspan style="font-weight:700;fill:#4a5568">①.b</tspan> （.52 起移除 chattr +i 防误删——OpenWrt 无此命令，锁从未生效还刷</text>
+  <text x="272" y="364" class="ndl">警告）</text>
+  <path d="M460,372 L460,385 L130,385 L130,398" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="30" y="398" width="200" height="74" rx="7" class="node"/>
+  <text x="130.0" y="416" class="nt">② 模式判定</text>
+  <text x="130.0" y="432" class="nd">config.yaml 在?</text>
+  <text x="130.0" y="460" class="bignum" fill="#4a5568" fill-opacity="0.16">②</text>
+  <line x1="230" y1="417.0" x2="260" y2="417.0" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="398" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="414" class="ndl"><tspan style="font-weight:700;fill:#4a5568">②.a</tspan> rootfs 内 config.yaml 不存在 → _recovering=true（首次/恢复全流</text>
+  <text x="272" y="428" class="ndl">程）</text>
+  <line x1="460.0" y1="436" x2="460.0" y2="448" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="448" width="400" height="24" rx="6" class="sml"/>
+  <text x="272" y="464" class="ndl"><tspan style="font-weight:700;fill:#4a5568">②.b</tspan> 存在 → 后续重启模式：跳过解压，直接配置 + 启动 + 验 LP</text>
+  <path d="M460,472 L460,485 L130,485 L130,498" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="30" y="498" width="200" height="74" rx="7" class="node"/>
+  <text x="130.0" y="516" class="nt">③ 容器 config</text>
+  <text x="130.0" y="532" class="nd">缺失才写</text>
+  <text x="130.0" y="560" class="bignum" fill="#4a5568" fill-opacity="0.16">③</text>
+  <line x1="230" y1="517.0" x2="260" y2="517.0" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="498" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="514" class="ndl"><tspan style="font-weight:700;fill:#4a5568">③.a</tspan> /srv/lxc/ubuntu/config 不存在才写；apply_cfg 剪掉不被 lxc 支持的</text>
+  <text x="272" y="528" class="ndl">行，解析失败 → exit 1 终止</text>
+  <line x1="460.0" y1="536" x2="460.0" y2="548" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="548" width="400" height="24" rx="6" class="sml"/>
+  <text x="272" y="564" class="ndl"><tspan style="font-weight:700;fill:#4a5568">③.b</tspan> rootfs.path=dir:/srv/lxc/ubuntu/rootfs；静态 IP 10.0.0.10/24</text>
+  <path d="M460,572 L460,585 L130,585 L130,598" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="30" y="598" width="200" height="74" rx="7" class="node"/>
+  <text x="130.0" y="616" class="nt">④ 解压 rootfs</text>
+  <text x="130.0" y="632" class="nd">仅首次/恢复</text>
+  <text x="130.0" y="660" class="bignum" fill="#4a5568" fill-opacity="0.16">④</text>
+  <line x1="230" y1="617.0" x2="260" y2="617.0" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="598" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="614" class="ndl"><tspan style="font-weight:700;fill:#4a5568">④.a</tspan> rebuild_from_image：停容器 → 删 rootfs → tar 解压（.extracting</text>
+  <text x="272" y="628" class="ndl">锁）；解压失败 → exit 1 终止</text>
+  <line x1="460.0" y1="636" x2="460.0" y2="648" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="648" width="400" height="24" rx="6" class="sml"/>
+  <text x="272" y="664" class="ndl"><tspan style="font-weight:700;fill:#4a5568">④.b</tspan> CS_REBUILT=1 防开机循环：一次开机最多重建一次</text>
+  <path d="M460,672 L460,685 L130,685 L130,698" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="30" y="698" width="200" height="174" rx="7" class="node"/>
+  <text x="130.0" y="716" class="nt">⑤ 运行期配置</text>
+  <text x="130.0" y="732" class="nd">网桥+容器+解析</text>
+  <text x="130.0" y="860" class="bignum" fill="#4a5568" fill-opacity="0.16">⑤</text>
+  <line x1="230" y1="710.0" x2="260" y2="710.0" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="698" width="400" height="24" rx="6" class="sml"/>
+  <text x="272" y="714" class="ndl"><tspan style="font-weight:700;fill:#4a5568">⑤.a</tspan> setup_bridge：lxcbr0 10.0.0.1/24 + 防火墙 lxc 区 ACCEPT</text>
+  <line x1="460.0" y1="722" x2="460.0" y2="734" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="734" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="750" class="ndl"><tspan style="font-weight:700;fill:#4a5568">⑤.b</tspan> 容器静态 IP 10.0.0.10/24 网关 10.0.0.1；DNS 源文件 trim（.53：1</text>
+  <text x="272" y="764" class="ndl">字节空白不再写出空 nameserver）</text>
+  <line x1="460.0" y1="772" x2="460.0" y2="784" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="784" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="800" class="ndl"><tspan style="font-weight:700;fill:#4a5568">⑤.c</tspan> setup_container_boot：networkd + crowdsec 软链 + hostname/machi</text>
+  <text x="272" y="814" class="ndl">ne-id</text>
+  <line x1="460.0" y1="822" x2="460.0" y2="834" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="834" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="850" class="ndl"><tspan style="font-weight:700;fill:#4a5568">⑤.d</tspan> resolv.conf + 日志源 + listen_uri 0.0.0.0:8080 + trusted_ips 含</text>
+  <text x="272" y="864" class="ndl">10.0.0.1；prepare_container 失败 → exit 1</text>
+  <path d="M460,872 L460,885 L130,885 L130,898" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="30" y="898" width="200" height="74" rx="7" class="nodeOrange"/>
+  <text x="130.0" y="916" class="nt">⑥ 安装前屏蔽 CAPI</text>
+  <text x="130.0" y="932" class="nd">仅首次/恢复 off</text>
+  <text x="130.0" y="960" class="bignum" fill="#dd6b20" fill-opacity="0.16">⑥</text>
+  <line x1="230" y1="917.0" x2="260" y2="917.0" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="898" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="914" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑥.a</tspan> 仅首次/恢复：ensure_online_client_off 注释 online_client，LAPI</text>
+  <text x="272" y="928" class="ndl">干净独立启动；失败仅告警不阻断</text>
+  <line x1="460.0" y1="936" x2="460.0" y2="948" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="948" width="400" height="24" rx="6" class="sml"/>
+  <text x="272" y="964" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑥.b</tspan> 后续重启不在此屏蔽——只在 last pull 验证失败后才屏蔽（见第四节）</text>
+  <path d="M460,972 L460,985 L130,985 L130,998" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="30" y="998" width="200" height="252" rx="7" class="nodeBlue"/>
+  <text x="130.0" y="1016" class="nt">⑦ 启动容器</text>
+  <text x="130.0" y="1032" class="nd">cgroup + lxc-start -d</text>
+  <text x="130.0" y="1238" class="bignum" fill="#2b6cb0" fill-opacity="0.16">⑦</text>
+  <line x1="230" y1="1024.0" x2="260" y2="1024.0" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="998" width="400" height="52" rx="6" class="sml"/>
+  <text x="272" y="1014" class="ndl"><tspan style="font-weight:700;fill:#2b6cb0">⑦.a</tspan> v.54：grep /proc/mounts 无 /sys/fs/cgroup/systemd → mount name</text>
+  <text x="272" y="1028" class="ndl">=systemd（手动运行不经 lxc-auto boot()，否则容器内 systemd 20 秒内 STO</text>
+  <text x="272" y="1042" class="ndl">PPED）</text>
+  <line x1="460.0" y1="1050" x2="460.0" y2="1062" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1062" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1078" class="ndl"><tspan style="font-weight:700;fill:#2b6cb0">⑦.b</tspan> lxc-start -P /srv/lxc -n ubuntu -d 直接守护进程化（不经 lxc-auto</text>
+  <text x="272" y="1092" class="ndl">前台，不卡死）</text>
+  <line x1="460.0" y1="1100" x2="460.0" y2="1112" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1112" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1128" class="ndl"><tspan style="font-weight:700;fill:#2b6cb0">⑦.c</tspan> v.56：lxc-auto disable 幂等禁用（开机自启统一由 rc.local→本脚本</text>
+  <text x="272" y="1142" class="ndl">链负责，弃用 lxc-auto）</text>
+  <line x1="460.0" y1="1150" x2="460.0" y2="1162" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1162" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1178" class="ndl"><tspan style="font-weight:700;fill:#2b6cb0">⑦.d</tspan> 两次 lxc-start -d 失败 → _ct_revive：补挂 cgroup → 强停+重写 c</text>
+  <text x="272" y="1192" class="ndl">onfig 重启 → 仍无效则重建重装（v.57，exec 回路见三节）</text>
+  <line x1="460.0" y1="1200" x2="460.0" y2="1212" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1212" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1228" class="ndl"><tspan style="font-weight:700;fill:#2b6cb0">⑦.e</tspan> _wait_lapi_ready 等 cscli bouncers list 就绪（≤90s，.53）；90s</text>
+  <text x="272" y="1242" class="ndl">超时仅告警继续，注册成败交 ⑨ 判定</text>
+  <path d="M460,1250 L460,1263 L130,1263 L130,1276" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="30" y="1276" width="200" height="74" rx="7" class="node"/>
+  <text x="130.0" y="1294" class="nt">⑧ 日志转发</text>
+  <text x="130.0" y="1310" class="nd">宿主机→容器</text>
+  <text x="130.0" y="1338" class="bignum" fill="#4a5568" fill-opacity="0.16">⑧</text>
+  <line x1="230" y1="1295.0" x2="260" y2="1295.0" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1276" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1292" class="ndl"><tspan style="font-weight:700;fill:#4a5568">⑧.a</tspan> 配置 OpenWrt logd 远程转发：log_ip=10.0.0.10, log_port=514, log</text>
+  <text x="272" y="1306" class="ndl">_proto=udp；失败不阻断主流程</text>
+  <line x1="460.0" y1="1314" x2="460.0" y2="1326" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1326" width="400" height="24" rx="6" class="sml"/>
+  <text x="272" y="1342" class="ndl"><tspan style="font-weight:700;fill:#4a5568">⑧.b</tspan> 宿主机系统日志经 UDP 514 发到容器 CrowdSec 采集</text>
+  <path d="M460,1350 L460,1363 L130,1363 L130,1376" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="30" y="1376" width="200" height="274" rx="7" class="nodeOrange"/>
+  <text x="130.0" y="1394" class="nt">⑨ bouncer 注册</text>
+  <text x="130.0" y="1410" class="nd">查 last_pull</text>
+  <text x="130.0" y="1638" class="bignum" fill="#dd6b20" fill-opacity="0.16">⑨</text>
+  <line x1="230" y1="1395.0" x2="260" y2="1395.0" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1376" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1392" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑨.a</tspan> 固化 UCI bouncer 字段：api_url=http://10.0.0.10:8080/、enabled=</text>
+  <text x="272" y="1406" class="ndl">1、ipv4=1；失败 → 跳过注册块，直落 ⑩</text>
+  <line x1="460.0" y1="1414" x2="460.0" y2="1426" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1426" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1442" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑨.b</tspan> v.53：每轮注册前 _wait_lapi_ready，等 LAPI 就绪再 cscli bouncers</text>
+  <text x="272" y="1456" class="ndl">add；add 失败 → ⑨.e 下一轮</text>
+  <line x1="460.0" y1="1464" x2="460.0" y2="1476" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1476" width="400" height="24" rx="6" class="sml"/>
+  <text x="272" y="1492" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑨.c</tspan> bouncer_pulling() 判据：name 匹配 + last_pull 非空</text>
+  <line x1="460.0" y1="1500" x2="460.0" y2="1512" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1512" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1528" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑨.d</tspan> v.55：last_pull 距现在 &gt; BOUNCER_PULL_MAX_AGE（默认 600s）也判失</text>
+  <text x="272" y="1542" class="ndl">效——堵 LAPI 僵死盲区</text>
+  <line x1="460.0" y1="1550" x2="460.0" y2="1562" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1562" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1578" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑨.e</tspan> 失效 → _bouncer_heal 2 轮（删旧+注册→容器内重启 crowdsec+路由器</text>
+  <text x="272" y="1592" class="ndl">重启 bouncer 两端刷新→等 60s 验证）</text>
+  <line x1="460.0" y1="1600" x2="460.0" y2="1612" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1612" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1628" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">⑨.f</tspan> 2 轮未通 → _crowdsec_repair：容器级施救 → 配置校验 → UCI 对齐</text>
+  <text x="272" y="1642" class="ndl">→ 重注册 → 重启两端 → 重验（见三节）</text>
+  <path d="M460,1650 L460,1663 L130,1663 L130,1676" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="30" y="1676" width="200" height="88" rx="7" class="nodePurple"/>
+  <text x="130.0" y="1694" class="nt">⑩ CAPI 放出+enroll</text>
+  <text x="130.0" y="1710" class="nd">按模式，见第四节</text>
+  <text x="130.0" y="1752" class="bignum" fill="#6b46c1" fill-opacity="0.16">⑩</text>
+  <line x1="230" y1="1695.0" x2="260" y2="1695.0" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1676" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1692" class="ndl"><tspan style="font-weight:700;fill:#6b46c1">⑩.a</tspan> 判据：bouncer_pulling（LAPI 侧 last_pull 有效?）——安装后再确认</text>
+  <text x="272" y="1706" class="ndl">一次</text>
+  <line x1="460.0" y1="1714" x2="460.0" y2="1726" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1726" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1742" class="ndl"><tspan style="font-weight:700;fill:#6b46c1">⑩.b</tspan> 有 → 放出 on + _try_enroll；无 → 屏蔽 off + 诊断（分支见第三节</text>
+  <text x="272" y="1756" class="ndl">）</text>
+  <path d="M460,1764 L460,1777 L130,1777 L130,1790" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="30" y="1790" width="200" height="40" rx="7" class="nodeGreen"/>
+  <text x="130.0" y="1808" class="nt">⑪ nft 检查</text>
+  <text x="130.0" y="1824" class="nd">链路打通</text>
+  <line x1="230" y1="1809.0" x2="260" y2="1809.0" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="260" y="1790" width="400" height="38" rx="6" class="sml"/>
+  <text x="272" y="1806" class="ndl"><tspan style="font-weight:700;fill:#38a169">⑪.a</tspan> nft list table ip crowdsec → 有表则链路打通；无表 → 记日志检查</text>
+  <text x="272" y="1820" class="ndl">bouncer 日志，引导结束 exit 0</text>
+  <text x="30" y="1858" class="sub">三、CAPI 段：LP 失效 → repair 修复（不重建）→ 重建</text>
+  <rect x="30" y="1876" width="200" height="40" rx="7" class="nodeRed"/>
+  <text x="130" y="1892" class="nt">last pull 验证失败</text>
+  <text x="130" y="1907" class="nd">bouncer_pulling=false</text>
+  <text x="250" y="1900" class="ndl">先 ensure_online_client_off 屏蔽 CAPI</text>
+  <line x1="130" y1="1916" x2="130" y2="1944" stroke="#c53030" stroke-width="1.8" marker-end="url(#arrRed)"/>
+  <rect x="30" y="1944" width="260" height="40" rx="7" class="nodeOrange"/>
+  <text x="160" y="1960" class="nt">_crowdsec_repair（不重建路径）</text>
+  <text x="160" y="1975" class="nd">容器级施救 + 服务级修复</text>
+  <rect x="300" y="1944" width="185" height="40" rx="7" class="node"/>
+  <text x="392" y="1960" class="nt">① 容器级施救</text>
+  <text x="392" y="1975" class="nd">未运行/无 IP</text>
+  <line x1="290" y1="1964" x2="300" y2="1964" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="500" y="1944" width="160" height="40" rx="7" class="node"/>
+  <text x="580" y="1960" class="nt">② 服务级修复</text>
+  <text x="580" y="1975" class="nd">重配+重注册+重启</text>
+  <line x1="485" y1="1964" x2="500" y2="1964" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <polygon points="340,2010 420,2038 340,2094 260,2038" fill="#fffaf0" stroke="#dd6b20" stroke-width="1.8"/>
+  <text x="340" y="2042" class="nt">重验</text>
+  <text x="340" y="2056" class="nd">bouncer_pulling?</text>
+  <path d="M160,1984 L160,1996 L340,1996 L340,2010" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="420" y1="2038" x2="600" y2="2038" stroke="#38a169" stroke-width="1.8"/>
+  <line x1="600" y1="2038" x2="600" y2="2094" stroke="#38a169" stroke-width="1.8" marker-end="url(#arrGreen)"/>
+  <rect x="500" y="2094" width="160" height="40" rx="7" class="nodeGreen"/>
+  <text x="580" y="2110" class="nt">修复成功 → 放出</text>
+  <text x="580" y="2125" class="nd">online_client + enroll</text>
+  <line x1="260" y1="2038" x2="130" y2="2038" stroke="#c53030" stroke-width="1.8"/>
+  <line x1="130" y1="2038" x2="130" y2="2094" stroke="#c53030" stroke-width="1.8" marker-end="url(#arrRed)"/>
+  <rect x="30" y="2094" width="200" height="40" rx="7" class="nodeRed"/>
+  <text x="130" y="2110" class="nt">修复无效 → 重建</text>
+  <text x="130" y="2125" class="nd">_crowdsec_rebuild</text>
+  <line x1="130" y1="2134" x2="130" y2="2162" stroke="#4a5568" stroke-width="1.8" marker-end="url(#arr)"/>
+  <rect x="30" y="2162" width="200" height="40" rx="7" class="nodeBlue"/>
+  <text x="130" y="2178" class="nt">删容器 → exec 重跑</text>
+  <text x="130" y="2193" class="nd">CS_REBUILT 限一次</text>
+  <path d="M130,2202 L130,2212 L18,2212 L18,635.0 L30,635.0" fill="none" class="loop" marker-end="url(#arrOrange)"/>
+  <text x="246" y="2186" class="loopt">exec 重跑 → 回到 ④ 解压 rootfs（首次/恢复全流程）</text>
+  <path d="M660,1081.0 L668,1081.0 L668,1181.0 L660,1181.0" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#arrRed)"/>
+  <path d="M620,1550 L620,1562" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#arrRed)"/>
+  <path d="M660,1581.0 L664,1581.0 L664,1695.0 L660,1695.0" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#arrRed)"/>
+  <path d="M660,1745.0 L672,1745.0 L672,1868 L130,1868 L130,1876" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#arrRed)"/>
+  <rect x="30" y="2222" width="620" height="24" rx="6" class="sml"/>
+  <text x="42" y="2238" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">三.a</tspan> 触发：⑨ 注册后 CAPI 段复判 bouncer_pulling，LP 失效先 ensure_online_client_off 屏蔽 online_client</text>
+  <rect x="30" y="2256" width="620" height="24" rx="6" class="sml"/>
+  <text x="42" y="2272" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">三.b</tspan> repair-① 容器未运行 → _ct_revive 0：补挂 systemd cgroup + 重写容器 config 重启（不重建，失败交回上层）</text>
+  <rect x="30" y="2290" width="620" height="38" rx="6" class="sml"/>
+  <text x="42" y="2306" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">三.c</tspan> repair-② 容器在运行但无 IP 10.0.0.10 → 重写 .network/resolv.conf + 强停重启（resolv.conf 走 _container_</text>
+  <text x="42" y="2320" class="ndl">dns 兜底：空源文件回落 BRIDGE_IP 10.0.0.1——v.52 实战踩坑：空 nameserver 全链路连不上）</text>
+  <rect x="30" y="2338" width="620" height="38" rx="6" class="sml"/>
+  <text x="42" y="2354" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">三.d</tspan> repair-③ 配置校验 → UCI 对齐 → _wait_lapi_ready → 重注册 → 重启 crowdsec+bouncer 两端 → 6×5s 重验；</text>
+  <text x="42" y="2368" class="ndl">注册失败或重验不过 → return 1，交回上层重建（三.f）</text>
+  <rect x="30" y="2386" width="620" height="24" rx="6" class="sml"/>
+  <text x="42" y="2402" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">三.e</tspan> 重验通过 → 放出 online_client + _try_enroll → 收尾 nft 检查</text>
+  <rect x="30" y="2420" width="620" height="38" rx="6" class="sml"/>
+  <text x="42" y="2436" class="ndl"><tspan style="font-weight:700;fill:#dd6b20">三.f</tspan> 重验不过 → _crowdsec_rebuild：强停+删 rootfs（删不净强杀+清挂载再删）→ exec 重跑全流程；CS_REBUILT=1 限一</text>
+  <text x="42" y="2450" class="ndl">次</text>
+  <text x="20" y="2482" class="sub">四、CAPI(online_client) 屏蔽 / 放出 决策（按启动模式）</text>
+  <rect x="20" y="2494" width="620" height="22" rx="6" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="32" y="2509" class="ndl">屏蔽 = 注释 online_client（ensure_online_client_off）｜放出 = 取消注释（ensure_online_client_on，同一套 sed）</text>
+  <rect x="240" y="2534" width="200" height="40" rx="7" class="nodePurple"/>
+  <text x="340" y="2550" class="nt">判定模式</text>
+  <text x="340" y="2565" class="nd">config.yaml 此刻存在?</text>
+  <line x1="340" y1="2574" x2="172" y2="2628" stroke="#6b46c1" stroke-width="1.5" marker-end="url(#arrPurple)"/>
+  <line x1="340" y1="2574" x2="507" y2="2628" stroke="#6b46c1" stroke-width="1.5" marker-end="url(#arrPurple)"/>
+  <rect x="20" y="2628" width="305" height="32" rx="7" class="nodeBlue"/>
+  <text x="172" y="2649" class="nt">首次 / 恢复（rootfs 由镜像解压）</text>
+  <rect x="355" y="2628" width="305" height="32" rx="7" class="node"/>
+  <text x="507" y="2649" class="nt">后续重启（rootfs 已存在）</text>
+  <rect x="42" y="2674" width="260" height="42" rx="7" class="nodeOrange"/>
+  <text x="172" y="2692" class="nt">① 安装前「直接屏蔽」off</text>
+  <text x="172" y="2707" class="nd">online_client 注释</text>
+  <line x1="172" y1="2716" x2="172" y2="2734" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="42" y="2734" width="260" height="42" rx="7" class="node"/>
+  <text x="172" y="2752" class="nt">② 安装步骤</text>
+  <text x="172" y="2767" class="nd">解压·配置·启动·bouncer 注册</text>
+  <line x1="172" y1="2776" x2="172" y2="2794" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="42" y="2794" width="260" height="42" rx="7" class="node"/>
+  <text x="172" y="2812" class="nt">③ 验证 LAPI Last Pull</text>
+  <text x="172" y="2827" class="nd">bouncer_pulling（含新鲜度）?</text>
+  <line x1="104" y1="2836" x2="104" y2="2896" stroke="#38a169" stroke-width="1.8" marker-end="url(#arrGreen)"/>
+  <line x1="240" y1="2836" x2="240" y2="2896" stroke="#c53030" stroke-width="1.8" marker-end="url(#arrRed)"/>
+  <rect x="42" y="2896" width="125" height="110" rx="7" class="nodeGreen"/>
+  <text x="104" y="2918" class="nt">有 → 放出</text>
+  <text x="104" y="2936" class="nd">解除屏蔽(同代码)</text>
+  <text x="104" y="2954" class="nd">+ _try_enroll</text>
+  <text x="104" y="2972" class="nd">→ 收尾 nft 检查</text>
+  <rect x="177" y="2896" width="125" height="110" rx="7" class="nodeOrange"/>
+  <text x="239" y="2918" class="nt">无 → 保持屏蔽</text>
+  <text x="239" y="2936" class="nd">_crowdsec_diagnose</text>
+  <text x="239" y="2954" class="nd">损坏→重建重跑</text>
+  <text x="239" y="2972" class="nd">网络→屏蔽退出</text>
+  <rect x="377" y="2674" width="260" height="42" rx="7" class="nodeBlue"/>
+  <text x="507" y="2692" class="nt">① 验证 LAPI Last Pull</text>
+  <text x="507" y="2707" class="nd">每次重启都验（含新鲜度）</text>
+  <line x1="439" y1="2716" x2="439" y2="2772" stroke="#38a169" stroke-width="1.8" marker-end="url(#arrGreen)"/>
+  <line x1="574" y1="2716" x2="574" y2="2772" stroke="#c53030" stroke-width="1.8" marker-end="url(#arrRed)"/>
+  <rect x="377" y="2772" width="125" height="110" rx="7" class="nodeGreen"/>
+  <text x="439" y="2794" class="nt">有 → 不屏蔽</text>
+  <text x="439" y="2812" class="nd">放出on(幂等)</text>
+  <text x="439" y="2830" class="nd">+enroll 若需</text>
+  <text x="439" y="2848" class="nd">→ 收尾 nft 检查</text>
+  <rect x="512" y="2772" width="125" height="110" rx="7" class="nodeOrange"/>
+  <text x="574" y="2794" class="nt">无 → 屏蔽 off</text>
+  <text x="574" y="2812" class="nd">_crowdsec_diagnose</text>
+  <text x="574" y="2830" class="nd">损坏→重建重跑</text>
+  <text x="574" y="2848" class="nd">网络→放出+enroll</text>
+  <rect x="20" y="3026" width="620" height="40" rx="7" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="32" y="3042" class="sub2">要点</text>
+  <text x="92" y="3042" class="ndl">enroll 一律在放出之后；重启只在 LP 失效（空/错位/陈旧）后才屏蔽；重建后由重跑脚本自行验证 LP 再放出+enroll</text>
+  <text x="32" y="3058" class="ndl">新鲜度阈值 BOUNCER_PULL_MAX_AGE 默认 600s（crowdsec 正常每分钟拉一次），容器内 GNU date 解析 RFC3339；解析失败保守维持原非空逻辑</text>
+</svg>

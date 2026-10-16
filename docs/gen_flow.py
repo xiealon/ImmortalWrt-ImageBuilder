@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """生成 CrowdSec LXC 引导流程图 SVG（v.62）
-用法: python3 gen_flow.py  →  同目录 crowdsec-flow.svg
-渲染高清 PNG（2x，需 Noto Sans CJK 字体）:
-  chromium --headless --disable-gpu --no-sandbox --hide-scrollbars \
-    --force-device-scale-factor=2 --window-size=680,<viewBox高度> \
-    --screenshot=crowdsec-flow.png crowdsec-flow.svg
+用法: python3 gen_flow.py  →  同目录 crowdsec-flow.svg（末尾打印总高 H）
+
+渲染高清 PNG（2x，需 Noto Sans CJK 字体）——本机 Chromium 有两个坑，须按下面方法来：
+  ① 有效视口比 --window-size 高低 88px，直渲 SVG 会裁掉底部 →
+     先写个 render.html：body 白底，内嵌 <img src="file://.../crowdsec-flow.svg"
+     style="display:block;width:680px;height:Hpx">，让文档高度精确等于 H；
+     窗口按 680×(H+100) 开（--force-device-scale-factor=2），
+     截图后用 PIL crop((0,0,1360,2*H)) 裁回精确尺寸
+  ② SVG 根无背景，窗口高出文档的透明区会拍成黑带 → 生成器已内置全幅白矩形，
+     渲染再加 --default-background-color=FFFFFFFF 双保险
+  ③ 压缩：PIL convert('RGB').quantize(colors=256, MEDIANCUT, FLOYDSTEINBERG)
+     + optimize，约 1.3MB → 460KB，文字仍锐利
 """
 
 W = 680
@@ -78,6 +85,7 @@ parts.append(f'''<svg viewBox="0 0 {W} 2960" xmlns="http://www.w3.org/2000/svg" 
     .loop{{stroke:#dd6b20;stroke-width:1.6;stroke-dasharray:6 4;fill:none;}}
     .loopt{{font-size:9px;fill:#c05621;}}
   </style>
+  <rect x="0" y="0" width="680" height="4096" fill="#ffffff"/>
   <text x="340" y="26" class="title" text-anchor="middle">CrowdSec LXC · 详细流程架构图</text>
   <text x="340" y="44" class="ver" text-anchor="middle">v.2026-10-16.62 ｜ 左=大步骤框，右=小步骤框（①.a 式编号）｜ 重建 = 强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
   <text x="340" y="58" class="ver" text-anchor="middle">灰实线 = 正常流向 ｜ 红虚线 = 失效 / 重试分支 ｜ 橙虚线 = exec 重跑回路 ｜ exit 0/1 = 脚本终止</text>
@@ -190,7 +198,7 @@ steps = [
         "v.53：每轮注册前 _wait_lapi_ready，等 LAPI 就绪再 cscli bouncers add；add 失败 → ⑨.e 下一轮",
         "bouncer_pulling() 判据：name 匹配 + last_pull 非空",
         "v.55：陈旧阈值 BOUNCER_PULL_MAX_AGE=600s（阈值非等待）——last_pull 超龄未更新也判失效，堵 LAPI 僵死盲区",
-        "失效 → _bouncer_heal 2 轮（删旧+注册→容器内重启 crowdsec+路由器重启 bouncer 两端刷新→等 60s 验证）",
+        "失效 → _bouncer_heal 2 轮：等 LAPI≤90s → 删旧注册拿 key → 容器内重启 crowdsec → 再等 LAPI≤90s → 重启路由器 bouncer+12s → 此后才计 60s 验证窗口",
         "2 轮未通 → _crowdsec_repair：容器级施救 → 配置校验 → UCI 对齐 → 重注册 → 重启两端 → 重验（见三节）",
     ]),
     ("⑩", "CAPI 放出+enroll", "按模式，见第四节", "nodePurple", [
@@ -340,17 +348,26 @@ text(439, r2y+22, "有 → 不屏蔽", "nt");  text(439, r2y+40, "放出on(幂�
 rect(512, r2y, 125, 110, "nodeOrange")
 text(574, r2y+22, "无 → 屏蔽 off", "nt");  text(574, r2y+40, "_crowdsec_diagnose", "nd");  text(574, r2y+58, "损坏→重建重跑", "nd");  text(574, r2y+76, "网络→放出+enroll", "nd")
 
-# 要点
+# 要点（首两行手工断行：自动折行会把 enroll 拆成 enrol/l；x=92 为首行避开"要点"标签）
 ky = max(l4y + 110, r2y + 110) + 20
-parts.append(f'  <rect x="20" y="{ky}" width="620" height="40" rx="7" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>')
+kl1 = ["enroll 一律在放出之后；重启只在 LP 失效（空/错位/陈旧）后才屏蔽；",
+       "重建后由重跑脚本自行验证 LP 再放出 + enroll"]
+kl2 = wrap("新鲜度阈值 BOUNCER_PULL_MAX_AGE 默认 600s（crowdsec 正常每分钟拉一次），容器内 GNU date 解析 RFC3339；解析失败保守维持原非空逻辑", 60)
+nkl = len(kl1) + len(kl2)
+kh = 14*nkl + 10
+parts.append(f'  <rect x="20" y="{ky}" width="620" height="{kh}" rx="7" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>')
 text(32, ky+16, "要点", "sub2")
-text(92, ky+16, "enroll 一律在放出之后；重启只在 LP 失效（空/错位/陈旧）后才屏蔽；重建后由重跑脚本自行验证 LP 再放出+enroll", "ndl")
-text(32, ky+32, "新鲜度阈值 BOUNCER_PULL_MAX_AGE 默认 600s（crowdsec 正常每分钟拉一次），容器内 GNU date 解析 RFC3339；解析失败保守维持原非空逻辑", "ndl")
+for j, s in enumerate(kl1):
+    text(92, ky+16+14*j, s, "ndl")
+for j, s in enumerate(kl2):
+    text(32, ky+16+14*(len(kl1)+j), s, "ndl")
 
-total_h = ky + 40 + 16
+total_h = ky + kh + 16
 parts.append("</svg>")
 
-svg = "\n".join(parts).replace(f'viewBox="0 0 {W} 2960"', f'viewBox="0 0 {W} {total_h}"')
+svg = "\n".join(parts).replace(
+    f'viewBox="0 0 {W} 2960"',
+    f'width="{W}" height="{total_h}" viewBox="0 0 {W} {total_h}"')
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crowdsec-flow.svg")
 with open(OUT, "w", encoding="utf-8") as f:
     f.write(svg)

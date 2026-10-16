@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.58"
+SCRIPT_VER="2026-10-16.59"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -494,13 +494,13 @@ _bouncer_uci_apply() {
 }
 
 _wait_lapi_ready() {
-    _max="${1:-90}"
-    _i=0
-    while [ "$_i" -lt "$_max" ]; do
-        _i=$((_i+1))
+    _lw_max="${1:-90}"
+    _lw_i=0
+    while [ "$_lw_i" -lt "$_lw_max" ]; do
+        _lw_i=$((_lw_i+1))
         ct_running || { log "容器已停止，LAPI 等待中止"; return 1; }
         _ct_env "$CSCLI bouncers list -o json" >/dev/null 2>&1 && return 0
-        [ $((_i % 15)) -eq 0 ] && log "等待容器内 crowdsec LAPI 就绪（已等 ${_i}s）"
+        [ $((_lw_i % 15)) -eq 0 ] && log "等待容器内 crowdsec LAPI 就绪（已等 ${_lw_i}s）"
         sleep 1
     done
     return 1
@@ -543,24 +543,12 @@ _ensure_bouncer_service() {
     return 0
 }
 
-bouncer_pulling() {
-    _json="$(_ct_env "$CSCLI bouncers list -o json" 2>/dev/null)"
-    [ -n "$_json" ] || return 1
+_TS_RE='[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
 
-    _lp=$(printf '%s\n' "$_json" | awk -v want="$BOUNCER_NAME" '
-        /"name":/ {
-            cur = $0
-            sub(/.*"name":[[:space:]]*"/, "", cur)
-            sub(/".*/, "", cur)
-            in_obj = (cur == want)
-        }
-        in_obj && /"last_pull":/ {
-            lp = $0
-            sub(/.*"last_pull":[[:space:]]*"/, "", lp)
-            sub(/".*/, "", lp)
-            if (lp != "") print lp
-        }
-    ' | head -n 1)
+bouncer_pulling() {
+    _lp="$(_ct_env "$CSCLI bouncers list" 2>/dev/null \
+        | grep -E "^[[:space:]]*${BOUNCER_NAME}[[:space:]]" \
+        | grep -oE "${_TS_RE}Z?" | head -n 1)"
     [ -n "$_lp" ] || return 1
 
     _max_age="${BOUNCER_PULL_MAX_AGE:-600}"
@@ -578,7 +566,7 @@ bouncer_pulling() {
 }
 
 bouncer_exists() {
-    _ct_env "$CSCLI bouncers list -o json" 2>/dev/null | grep -q "\"name\":[[:space:]]*\"$BOUNCER_NAME\""
+    _ct_env "$CSCLI bouncers list" 2>/dev/null | grep -qE "^[[:space:]]*${BOUNCER_NAME}[[:space:]]"
 }
 
 _bouncer_heal() {

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""生成 CrowdSec LXC 引导流程图 SVG（v.64）
+"""生成 CrowdSec LXC 引导流程图 SVG（v.65）
 用法: python3 gen_flow.py  →  同目录 crowdsec-flow.svg（末尾打印总高 H）
 
 渲染高清 PNG（2x，需 Noto Sans CJK 字体）——本机 Chromium 有两个坑，须按下面方法来：
@@ -87,7 +87,7 @@ parts.append(f'''<svg viewBox="0 0 {W} 2960" xmlns="http://www.w3.org/2000/svg" 
   </style>
   <rect x="0" y="0" width="680" height="4096" fill="#ffffff"/>
   <text x="340" y="26" class="title" text-anchor="middle">CrowdSec LXC · 详细流程架构图</text>
-  <text x="340" y="44" class="ver" text-anchor="middle">v.2026-10-16.64 ｜ 左=大步骤框，右=小步骤框（①.a 式编号）｜ 重建 = 强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
+  <text x="340" y="44" class="ver" text-anchor="middle">v.2026-10-16.65 ｜ 左=大步骤框，右=小步骤框（①.a 式编号）｜ 重建 = 强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
   <text x="340" y="58" class="ver" text-anchor="middle">灰实线 = 正常流向 ｜ 红虚线 = 失效 / 重试分支 ｜ 橙虚线 = exec 重跑回路 ｜ exit 0/1 = 脚本终止</text>
 ''')
 
@@ -227,6 +227,8 @@ steps = [
         "v.63：开机判定只看 Enrolled——enroll 后需网页端 Accept，此前 authenticated 不会有，不查",
         "v.63：enroll 前等 api.crowdsec.net 可解析（≤30s 墙钟、就绪即止），治开机 DNS 未就绪秒退；enroll 输出与 capi status 进日志",
         "v.64：online_api_credentials.yaml 缺失时先 cscli capi register 建凭据再 enroll（enroll 的加载前提；v.62 先 mv 走凭据等于必然秒退）",
+        "v.65：复检改查 cscli capi status 的 enrolled 行——console status 只打选项表、永远不含 enrolled（源码实锤），v.64 查错命令导致误回滚",
+        "v.65：enroll 命令成功即放行；60s 等不到 Enrolled 不回滚不阻止，提示「需要前往网站确认接受」后退出",
     ]),
     ("⑪", "nft 检查", "链路打通", "nodeGreen", [
         "nft list table ip crowdsec → 有表则链路打通；无表 → 记日志检查 bouncer 日志，引导结束 exit 0",
@@ -376,8 +378,8 @@ ky = max(l4y + 110, r2y + 110) + 20
 kl1 = ["enroll 一律在放出之后；重启只在 LP 失效（空/错位/陈旧）后才屏蔽；",
        "重建后由重跑脚本自行验证 LP 再放出 + enroll"]
 kl2 = wrap("新鲜度阈值 BOUNCER_PULL_MAX_AGE 默认 600s（crowdsec 正常每分钟拉一次），容器内 GNU date 解析 RFC3339；解析失败保守维持原非空逻辑", 60)
-kl3 = wrap("enroll 开机判定只看 Enrolled（网页端 Accept 前不会有 authenticated，不查）；enroll 前等 api.crowdsec.net 可解析（≤30s 墙钟、就绪即止），治开机 DNS 未就绪秒退；注册码固定有效不消耗", 60)
-kl4 = wrap("enroll 前提：online_api_credentials.yaml 必须已存在（cscli capi register 的产物），缺失先 register 再 enroll；备份凭据用 cp 不用 mv", 60)
+kl3 = wrap("enroll 开机判定只看 Enrolled：查 cscli capi status 的 enrolled 行（console status 只打选项表、永远不含 enrolled）；enroll 前等 api.crowdsec.net 可解析（≤30s 墙钟、就绪即止）；注册码固定有效不消耗", 60)
+kl4 = wrap("enroll 前提：online_api_credentials.yaml 必须已存在（cscli capi register 的产物），缺失先 register 再 enroll；enroll 命令成功即放行，60s 等不到 Enrolled 不回滚，提示前往网站 Accept", 60)
 nkl = len(kl1) + len(kl2) + len(kl3) + len(kl4)
 kh = 14*nkl + 10
 parts.append(f'  <rect x="20" y="{ky}" width="620" height="{kh}" rx="7" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>')

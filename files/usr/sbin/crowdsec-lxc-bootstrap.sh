@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.64"
+SCRIPT_VER="2026-10-16.65"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -664,10 +664,14 @@ _crowdsec_rebuild() {
     exec /bin/sh "$_SELF"
 }
 
-# 开机判定：只看 Enrolled——网页端 Accept 前不会有 authenticated，不查；
-# 兼容 1.6 文本行（Enrolled: true/false）与 1.8 表格行（✅/❌）
+# 开机判定：只看 Enrolled。cscli capi status 在 IsEnrolled() 为真时打印
+# "Your instance is enrolled in the console"（JWT 带 organization_id claim，
+# 即服务端已注册；网页端 Accept 前该 claim 可能缺失，属正常过程）。
+# 注意：不能用 cscli console status——它只打印控制台选项表
+# （SEND_*/console_management 的启用态），任何输出模式都不含 enrolled
+# 字样（v1.6.5~v1.6.11 源码实锤），v.64 及更早查错命令导致复检必然失败
 console_enroll_ok() {
-    _out="$(_ct_env "$CSCLI console status" 2>&1)"
+    _out="$(_ct_env "$CSCLI capi status" 2>&1)"
     [ -n "$_out" ] || return 1
     _line="$(printf '%s\n' "$_out" | grep -i 'enrolled' | head -n1)"
     [ -n "$_line" ] || return 1
@@ -718,16 +722,10 @@ re_enroll() {
         log "[enroll] capi register 成功，凭据已写入 online_api_credentials.yaml"
     fi
 
-    # 备份现有凭据用 cp 不用 mv：enroll 要求文件在场，移走必然秒退（v.62 的坑）
-    _bak=""
-    if [ -s "$_cred_file" ]; then
-        _bak="$_cred_file.bak"
-        cp -f "$_cred_file" "$_bak" 2>/dev/null || _bak=""
-    fi
-
-    # enroll 输出不再吞：秒退时日志里能看到 cscli 的真实报错
+    # v.65 起不做任何凭据备份/回滚：enroll 命令返回成功即代表服务端已注册
+    # （watcher 已创建），此时用户只需到网页点 Accept 即完成。回滚会把已注册
+    # 状态破坏掉（disable --all + 恢复旧凭据），用户 Accept 后无法收场
     if ! _enroll_out="$(_ct_env "/usr/bin/cscli console enroll \"$_enroll_key\"" 2>&1)"; then
-        [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
         log "[enroll] enroll 执行失败：$(printf '%s' "$_enroll_out" | tr '\n' ' ' | cut -c1-300)"
         log "[enroll] 注册码未消耗，下次开机重试"
         return 1
@@ -744,7 +742,10 @@ re_enroll() {
     _capi_out="$(_ct_env "$CSCLI capi status" 2>&1)"
     [ -n "$_capi_out" ] && log "[enroll] capi status：$(printf '%s' "$_capi_out" | tr '\n' ' ' | cut -c1-200)"
 
-    # 复检只看 Enrolled：网页端 Accept 前本来就是未 authenticated，不算失败
+    # 复检只看 Enrolled：enroll 已成功，这里只是等本地状态可见。
+    # 网页端 Accept 前 JWT 可能还没有 organization_id claim（显示未 enrolled），
+    # 属正常过程——不回滚、不阻止使用，等满 60s 直接放行并提示去网站 Accept；
+    # 未及时 Accept 前 CAPI 侧可能持续报错，Accept 后自动恢复
     _i=0
     while [ "$_i" -lt 12 ]; do
         _i=$((_i+1))
@@ -755,10 +756,10 @@ re_enroll() {
         sleep 5
     done
 
-    log "[enroll] enroll 后 60 秒内仍看不到 Enrolled，收回凭据回滚，下次开机重试"
-    _ct_env '/usr/bin/cscli console disable --all >/dev/null 2>&1' || true
-    [ -n "$_bak" ] && mv -f "$_bak" "$_cred_file"
-    return 1
+    log "[enroll] enroll 已成功，60 秒内本地未显示 Enrolled"
+    log "[enroll] 需要前往网站确认接受：请访问 https://app.crowdsec.net 接受该实例（Accept）"
+    log "[enroll] 未及时 Accept 前 CAPI 侧可能有报错，属正常过程；Accept 后自动恢复"
+    return 0
 }
 
 _try_enroll() {

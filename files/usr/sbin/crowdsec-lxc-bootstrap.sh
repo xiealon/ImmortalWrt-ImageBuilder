@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.54"
+SCRIPT_VER="2026-10-16.55"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -547,7 +547,7 @@ bouncer_pulling() {
     _json="$(_ct_env "$CSCLI bouncers list -o json" 2>/dev/null)"
     [ -n "$_json" ] || return 1
 
-    printf '%s\n' "$_json" | awk -v want="$BOUNCER_NAME" '
+    _lp=$(printf '%s\n' "$_json" | awk -v want="$BOUNCER_NAME" '
         /"name":/ {
             cur = $0
             sub(/.*"name":[[:space:]]*"/, "", cur)
@@ -558,10 +558,23 @@ bouncer_pulling() {
             lp = $0
             sub(/.*"last_pull":[[:space:]]*"/, "", lp)
             sub(/".*/, "", lp)
-            if (lp != "") found = 1
+            if (lp != "") print lp
         }
-        END { exit (found ? 0 : 1) }
-    '
+    ' | head -n 1)
+    [ -n "$_lp" ] || return 1
+
+    _max_age="${BOUNCER_PULL_MAX_AGE:-600}"
+    case "$_max_age" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$_max_age" -gt 0 ] || return 0
+
+    _now="$(_ct_env "date +%s" 2>/dev/null)"
+    _at="$(_ct_env "date -d '$_lp' +%s" 2>/dev/null)"
+    [ -n "$_now" ] && [ -n "$_at" ] || return 0
+    if [ $(( _now - _at )) -gt "$_max_age" ]; then
+        log "[bouncer] last_pull 停滞（$_lp，超过 ${_max_age}s），判定失效"
+        return 1
+    fi
+    return 0
 }
 
 bouncer_exists() {

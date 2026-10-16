@@ -12,7 +12,7 @@
 # 纯净镜像原则：镜像编译期只 apt 装 crowdsec，不写定制配置；
 # 网络/解析器/listen_uri/trusted_ips 等全部在本脚本运行期生成。
 # =============================================================================
-SCRIPT_VER="2026-10-16.36"
+SCRIPT_VER="2026-10-16.37"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -688,6 +688,19 @@ main() {
     # 都无法可靠常驻——容器会被 procd 回收或与 lxc-auto 的原生 autostart
     # 机制打架（日志里网卡反复接入/断开）。最终只保留 lxc-auto 这一条启动
     # 路径：它读 /etc/config/lxc-auto 的 UCI 配置，由 procd 正式托管，最可靠。
+    #
+    # 兜底 1：确保 lxc-auto 启动项已 enable（生成 S99lxc-auto），并写好 UCI 配置。
+    if [ -x /etc/init.d/lxc-auto ]; then
+        /etc/init.d/lxc-auto enable >/dev/null 2>&1 || true
+        if ! uci -q get lxc-auto.@container[0] >/dev/null 2>&1; then
+            uci -q add lxc-auto container >/dev/null 2>&1 || true
+            uci -q set lxc-auto.@container[-1].name="$LXC_NAME" >/dev/null 2>&1 || true
+            uci -q set lxc-auto.@container[-1].timeout='300' >/dev/null 2>&1 || true
+            uci -q commit lxc-auto >/dev/null 2>&1 || true
+            log "已补写 lxc-auto UCI 配置（自启 $LXC_NAME）"
+        fi
+    fi
+
     log "启动容器 $LXC_NAME（经 lxc-auto）"
     if [ -x /etc/init.d/lxc-auto ]; then
         /etc/init.d/lxc-auto start >/dev/null 2>&1 || true

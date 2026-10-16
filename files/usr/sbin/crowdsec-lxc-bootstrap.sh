@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.53"
+SCRIPT_VER="2026-10-16.54"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -498,6 +498,7 @@ _wait_lapi_ready() {
     _i=0
     while [ "$_i" -lt "$_max" ]; do
         _i=$((_i+1))
+        ct_running || { log "容器已停止，LAPI 等待中止"; return 1; }
         _ct_env "$CSCLI bouncers list -o json" >/dev/null 2>&1 && return 0
         [ $((_i % 15)) -eq 0 ] && log "等待容器内 crowdsec LAPI 就绪（已等 ${_i}s）"
         sleep 1
@@ -755,6 +756,14 @@ main() {
     fi
 
     log "启动容器 $LXC_NAME"
+    if ! grep -q ' /sys/fs/cgroup/systemd ' /proc/mounts 2>/dev/null; then
+        mkdir -p /sys/fs/cgroup/systemd 2>/dev/null
+        if mount -t cgroup -o rw,nosuid,nodev,noexec,relatime,none,name=systemd cgroup /sys/fs/cgroup/systemd 2>/dev/null; then
+            log "[cgroup] 已挂载 systemd 命名层级（容器内 systemd 需要）"
+        else
+            log "[cgroup] systemd 层级挂载失败，容器内 systemd 可能异常"
+        fi
+    fi
     lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
     if ! _wait_ct_running; then
         log "首启未拉起，重试 lxc-start -d"

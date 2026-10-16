@@ -38,6 +38,7 @@ crowdsec的初次运行需要时间自动进行初始化安装，无需网络也
 
 - 灰实线 = 正常流向 ｜ 红虚线 = 失效 / 重试分支 ｜ 橙虚线 = exec 重跑回路 ｜ exit 0/1 = 脚本终止
 - 失效主链：注册失败 → heal 2 轮 → CAPI 段复判 → repair（不重建）→ 重验 → 过了放出+enroll ／ 不过重建 exec 重跑（CS_REBUILT 限一次）
+- 时间参数：`BOUNCER_PULL_MAX_AGE=600s` 是 last_pull **陈旧阈值**（超龄未更新才判失效，不是等待）；heal 每轮验证窗口 **60s**；repair 重验 **30s**
 - 脚本本体：[files/usr/sbin/crowdsec-lxc-bootstrap.sh](files/usr/sbin/crowdsec-lxc-bootstrap.sh)
 - 图源文件：[docs/crowdsec-flow.svg](docs/crowdsec-flow.svg)，改图用生成器 [docs/gen_flow.py](docs/gen_flow.py)（python3 gen_flow.py）
 

@@ -747,7 +747,7 @@ re_enroll() {
     # 属正常过程——不回滚、不阻止使用，等满 60s 直接放行并提示去网站 Accept；
     # 未及时 Accept 前 CAPI 侧可能持续报错，Accept 后自动恢复
     _i=0
-    while [ "$_i" -lt 12 ]; do
+    while [ "$_i" -lt 2 ]; do
         _i=$((_i+1))
         if console_enroll_ok; then
             log "[enroll] 已注册（Enrolled）；网页端 Accept 后 CAPI 才 authenticated，无需脚本干预"

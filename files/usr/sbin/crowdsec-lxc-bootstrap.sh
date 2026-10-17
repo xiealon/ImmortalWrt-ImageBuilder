@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-17.70"
+SCRIPT_VER="2026-10-17.71"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -170,7 +170,7 @@ setup_lxc_firewall() {
     uci -q set firewall.lan2lxc.dest='lxc'
     uci -q set firewall.lxcsnat=nat
     uci -q set firewall.lxcsnat.name='lxc-snat'
-    uci -q del_list firewall.lxcsnat.proto='all'
+    uci -q delete firewall.lxcsnat.proto
     uci -q add_list firewall.lxcsnat.proto='all'
     uci -q set firewall.lxcsnat.src='lan'
     uci -q set firewall.lxcsnat.src_ip="$(_lxc_net)"

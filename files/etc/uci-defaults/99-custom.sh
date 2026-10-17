@@ -84,17 +84,6 @@ uci del dhcp.lan.ndp
 
 uci -q del dhcp.@dnsmasq[0].authoritative
 
-uci set mosdns.config.enabled='1'
-uci set mosdns.config.redirect='1'
-uci set mosdns.config.local_dns_redirect='1'
-uci set mosdns.config.geo_auto_update='1'
-uci set mosdns.config.custom_local_dns='1'
-uci set mosdns.config.apple_optimization='1'
-uci add_list mosdns.config.local_dns='223.5.5.5'
-uci add_list mosdns.config.local_dns='119.29.29.29'
-
-uci commit
-
 uci del network.cfg030f15
 uci commit
 

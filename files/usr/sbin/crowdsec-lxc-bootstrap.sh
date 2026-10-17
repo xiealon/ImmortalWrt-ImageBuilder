@@ -83,7 +83,39 @@ _wait() {
 }
 _wait_ct_running() { _wait ct_running 12; }
 
+# 防火墙 lxc 区/转发/SNAT 全量预检：20 项逐项比对现状与期望值
+# 全部一致才返回 0（setup_lxc_firewall 据此跳过重建，不 commit 不 reload）；
+# 任何一项不符即返回 1（含 ip_forward 被关），由 setup_lxc_firewall 完整重写
+_fw_lxc_ready() {
+    _fr_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
+    _fr_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
+    [ -n "$_fr_ip" ] || { [ -f /etc/config/custom_router_ip.txt ] && _fr_ip=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n'); }
+    [ -n "$_fr_ip" ] || _fr_ip='192.168.3.201'
+    [ "$(uci -q get firewall.lxczone.name)" = "lxc" ] || return 1
+    [ "$(uci -q get firewall.lxczone.network)" = "lxc" ] || return 1
+    [ "$(uci -q get firewall.lxczone.input)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.lxczone.output)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.lxczone.forward)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.lxc2lan.src)" = "lxc" ] || return 1
+    [ "$(uci -q get firewall.lxc2lan.dest)" = "lan" ] || return 1
+    [ "$(uci -q get firewall.lxc2docker.src)" = "lxc" ] || return 1
+    [ "$(uci -q get firewall.lxc2docker.dest)" = "docker" ] || return 1
+    [ "$(uci -q get firewall.lxc2vpn.src)" = "lxc" ] || return 1
+    [ "$(uci -q get firewall.lxc2vpn.dest)" = "vpn" ] || return 1
+    [ "$(uci -q get firewall.lan2lxc.src)" = "lan" ] || return 1
+    [ "$(uci -q get firewall.lan2lxc.dest)" = "lxc" ] || return 1
+    [ "$(uci -q get firewall.lxcsnat.name)" = "lxc-snat" ] || return 1
+    [ "$(uci -q get firewall.lxcsnat.proto)" = "all" ] || return 1
+    [ "$(uci -q get firewall.lxcsnat.src)" = "lan" ] || return 1
+    [ "$(uci -q get firewall.lxcsnat.target)" = "SNAT" ] || return 1
+    [ "$(uci -q get firewall.lxcsnat.src_ip)" = "$_fr_net" ] || return 1
+    [ "$(uci -q get firewall.lxcsnat.snat_ip)" = "$_fr_ip" ] || return 1
+    [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ] || return 1
+    return 0
+}
+
 setup_lxc_firewall() {
+    _fw_lxc_ready && { log "[防火墙] lxc 区/转发/SNAT 已就绪，跳过重建"; return 0; }
     _lsc_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
     _lan_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
     if [ -z "$_lan_ip" ] && [ -f /etc/config/custom_router_ip.txt ]; then

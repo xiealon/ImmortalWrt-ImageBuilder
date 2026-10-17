@@ -123,6 +123,29 @@ setup_lxc_firewall() {
     return 0
 }
 
+# enroll 前校验 SNAT：容器上外网（拉黑名单、连 app.crowdsec.net）依赖 lxcsnat
+# 五项比对 zone=lan / target=SNAT / snat_ip=出口IP / src_ip=容器网段 / ip_forward=1，
+# 任一不符 → setup_lxc_firewall 重建并补 ip_forward（不阻断）
+verify_snat() {
+    _vs_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
+    _vs_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
+    [ -n "$_vs_ip" ] || { [ -f /etc/config/custom_router_ip.txt ] && _vs_ip=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n'); }
+    [ -n "$_vs_ip" ] || _vs_ip='192.168.3.201'
+    _vs_tgt=$(uci -q get firewall.lxcsnat.target 2>/dev/null)
+    _vs_sip=$(uci -q get firewall.lxcsnat.snat_ip 2>/dev/null)
+    _vs_src=$(uci -q get firewall.lxcsnat.src_ip 2>/dev/null)
+    _vs_zone=$(uci -q get firewall.lxcsnat.src 2>/dev/null)
+    _vs_fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
+    if [ "$_vs_tgt" = "SNAT" ] && [ "$_vs_sip" = "$_vs_ip" ] && [ "$_vs_src" = "$_vs_net" ] && [ "$_vs_zone" = "lan" ] && [ "$_vs_fwd" = "1" ]; then
+        log "[SNAT] 就位（zone=${_vs_zone} src=${_vs_src} → ${_vs_sip}）"
+        return 0
+    fi
+    log "[SNAT] 缺失/不符，重建（zone=${_vs_zone:-空} target=${_vs_tgt:-空} snat_ip=${_vs_sip:-空} src_ip=${_vs_src:-空} ip_forward=${_vs_fwd:-空}）"
+    setup_lxc_firewall
+    echo 1 >/proc/sys/net/ipv4/ip_forward 2>/dev/null
+    return 0
+}
+
 setup_log_forward() {
     [ -n "$CONTAINER_IP" ] || { log "[日志] 无容器 IP，跳过转发配置"; return 1; }
 
@@ -701,6 +724,8 @@ re_enroll() {
         log "[enroll] 无注册码（$ENROLL_KEY_FILE 缺失或为空），放弃 enroll"
         return 1
     fi
+
+    verify_snat
 
     # CAPI 起不来 enroll 必败：先等 DNS/网络就绪（≤30s，就绪即止）
     if ! _wait_capi_net 30; then

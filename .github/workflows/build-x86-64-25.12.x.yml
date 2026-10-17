@@ -76,7 +76,7 @@ on:
         description: "CrowdSec 控制台注册密钥（app.crowdsec.net 的 enrollment key）；留空则不开通账号绑定。仅 include_crowdsec=yes 时生效"
         required: false
         default: ''
-        type: password
+        type: string
 permissions:
   contents: write
 

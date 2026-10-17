@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """生成 CrowdSec LXC 引导流程图 SVG（v.65）
 用法: python3 gen_flow.py  →  同目录 crowdsec-flow.svg（末尾打印总高 H）
 
@@ -15,12 +14,13 @@
      + optimize，约 1.3MB → 460KB，文字仍锐利
 """
 
-W = 680
-X_BIG, W_BIG = 30, 200          # 大步骤框（左列）
-X_SML, W_SML = 260, 400         # 小步骤框（右列）
-CX_BIG = X_BIG + W_BIG/2        # 130
-CX_SML = X_SML + W_SML/2        # 460
-X_R = X_SML + W_SML             # 660 小框右缘
+W = 740
+X_BIG, W_BIG = 30, 200
+X_SML, W_SML = 260, 400
+CX_BIG = X_BIG + W_BIG/2
+CX_SML = X_SML + W_SML/2
+X_R = X_SML + W_SML
+CH = 672
 
 import os
 
@@ -36,7 +36,6 @@ def _cw(ch):
     return 0.55
 
 def wrap(s, width):
-    """按显示宽度折行（CJK/全角=1，ASCII≈0.55）"""
     out, cur, curw = [], "", 0.0
     for ch in s:
         w = _cw(ch)
@@ -50,6 +49,31 @@ def wrap(s, width):
     if cur.strip():
         out.append(cur.rstrip())
     return out or [""]
+
+def wrapw(s, width):
+    """宽度感知折行（词优先）：按空格切词贪心装箱，不在词中断开；
+    仅当单个词自身超宽才退化为按字拆；末行孤字（宽<1.2）时从上行借一词"""
+    words = [w for w in s.split(' ') if w]
+    lines, cur = [], ''
+    for wd in words:
+        if not cur:
+            cur = wd
+        elif sum(_cw(c) for c in cur) + 0.55 + sum(_cw(c) for c in wd) <= width:
+            cur += ' ' + wd
+        else:
+            lines.append(cur)
+            cur = wd
+    if cur:
+        lines.append(cur)
+    out = []
+    for ln in lines:
+        out.extend([ln] if sum(_cw(c) for c in ln) <= width else wrap(ln, width))
+    if len(out) >= 2 and sum(_cw(c) for c in out[-1]) < 1.2:
+        pw = out[-2].split(' ')
+        if len(pw) > 1:
+            out[-2] = ' '.join(pw[:-1])
+            out[-1] = pw[-1] + out[-1]
+    return out or ['']
 
 STEP_COLORS = {
     "node": "#4a5568", "nodeBlue": "#2b6cb0", "nodeGreen": "#38a169",
@@ -81,14 +105,18 @@ parts.append(f'''<svg viewBox="0 0 {W} 2960" xmlns="http://www.w3.org/2000/svg" 
     .nd{{font-size:10px;text-anchor:middle;fill:#4a5568;}}
     .ndl{{font-size:10px;text-anchor:start;fill:#4a5568;}}
     .mono{{font-family:'SFMono-Regular',Consolas,'Noto Sans CJK SC',monospace;font-size:9px;text-anchor:middle;fill:#2d3748;}}
+    .tiny{{font-size:9px;fill:#718096;paint-order:stroke;stroke:#ffffff;stroke-width:3px;stroke-linejoin:round;}}
+    .tinyR{{font-size:9px;fill:#c53030;paint-order:stroke;stroke:#ffffff;stroke-width:3px;stroke-linejoin:round;}}
+    .tinyO{{font-size:9px;fill:#c05621;paint-order:stroke;stroke:#ffffff;stroke-width:3px;stroke-linejoin:round;}}
+    .tinyG{{font-size:9px;fill:#2f855a;paint-order:stroke;stroke:#ffffff;stroke-width:3px;stroke-linejoin:round;}}
     .bignum{{font-size:30px;font-weight:700;text-anchor:middle;}}
     .loop{{stroke:#dd6b20;stroke-width:1.6;stroke-dasharray:6 4;fill:none;}}
     .loopt{{font-size:9px;fill:#c05621;}}
   </style>
-  <rect x="0" y="0" width="680" height="4096" fill="#ffffff"/>
-  <text x="340" y="26" class="title" text-anchor="middle">CrowdSec LXC · 详细流程架构图</text>
-  <text x="340" y="44" class="ver" text-anchor="middle">v.2026-10-16.65 ｜ 左=大步骤框，右=小步骤框（①.a 式编号）｜ 重建 = 强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
-  <text x="340" y="58" class="ver" text-anchor="middle">灰实线 = 正常流向 ｜ 红虚线 = 失效 / 重试分支 ｜ 橙虚线 = exec 重跑回路 ｜ exit 0/1 = 脚本终止</text>
+  <rect x="0" y="0" width="740" height="4096" fill="#ffffff"/>
+  <text x="370" y="26" class="title" text-anchor="middle">CrowdSec LXC · 详细流程架构图</text>
+  <text x="370" y="44" class="ver" text-anchor="middle">v.2026-10-17.75 ｜ 左=大步骤框，右=小步骤框（①.a 式编号；◆=判定框，分支标签在箭头上）｜ 重建=强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
+  <text x="370" y="58" class="ver" text-anchor="middle">实线=正常流 ｜ 紫框+标签=判定分支 ｜ 红虚线+红块=失败/exit 1 ｜ 灰虚线+灰块=exit 0 ｜ 橙虚线=告警/放弃/回路 ｜ 绿=有效</text>
 ''')
 
 def rect(x, y, w, h, cls):
@@ -103,20 +131,36 @@ def line(x1, y1, x2, y2, color="#4a5568", w=1.5, marker="arr"):
     parts.append(f'  <line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{color}" stroke-width="{w}"{m}/>')
 
 def fail_path(d):
-    """失效分支：红色虚线 + 红箭头"""
     parts.append(f'  <path d="{d}" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#arrRed)"/>')
 
-def fail_bypass(key_from, key_to, xc):
-    """右缘通道绕行：A 框右缘 → 通道 xc → B 框右缘"""
+def fail_bypass(key_from, key_to, xc, label=None):
     _, cyA, _, _ = sml_pos[key_from]
     _, cyB, _, _ = sml_pos[key_to]
     fail_path(f"M{X_R},{cyA} L{xc},{cyA} L{xc},{cyB} L{X_R},{cyB}")
+    if label:
+        for j, ln in enumerate(wrapw(label, 7.0)):
+            text(xc+6, (cyA+cyB)/2 - 6 + 11*j, ln, "tinyR")
+
+def edge_end(key, label, kind="red"):
+    """本框右缘 → 短虚线 + 色块 + 标签（终止/告警类，不跨步骤）"""
+    color = {"red": "#c53030", "gray": "#718096", "orange": "#dd6b20", "green": "#38a169"}[kind]
+    marker = {"red": "arrRed", "gray": "arr", "orange": "arrOrange", "green": "arrGreen"}[kind]
+    xr, cy, _, _ = sml_pos[key]
+    parts.append(f'  <line x1="{xr}" y1="{cy}" x2="{xr+26}" y2="{cy}" stroke="{color}" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#{marker})"/>')
+    parts.append(f'  <rect x="{xr+28}" y="{cy-4.5}" width="9" height="9" rx="2" fill="{color}"/>')
+    cls = {"red": "tinyR", "gray": "tiny", "orange": "tinyO", "green": "tinyG"}[kind]
+    for j, ln in enumerate(wrapw(label, 5.0)):
+        text(xr+30, cy+9+10*j, ln, cls)
+
+def tint(hexc, f=0.09):
+    """边框色兑白出浅底：小步骤框有明确'框感'，文字对比度不受影响"""
+    r, g, b = (int(hexc[i:i+2], 16) for i in (1, 3, 5))
+    return '#%02x%02x%02x' % tuple(round(c*f + 255*(1-f)) for c in (r, g, b))
 
 def small_box(x, y, w, label, body, wrapw, color="#4a5568"):
-    """小步骤框：白底灰边，label 着色加粗，自动折行；返回框高"""
     lines = wrap(f"{label} {body}", wrapw)
     h = 14*len(lines) + 10
-    parts.append(f'  <rect x="{x}" y="{y}" width="{w}" height="{h}" rx="6" class="sml"/>')
+    parts.append(f'  <rect x="{x}" y="{y}" width="{w}" height="{h}" rx="6" fill="{tint(color)}" stroke="{color}" stroke-width="1.5"/>')
     rest0 = lines[0][len(label):].lstrip()
     lab = f'<tspan style="font-weight:700;fill:{color}">{esc(label)}</tspan>'
     if rest0:
@@ -127,8 +171,7 @@ def small_box(x, y, w, label, body, wrapw, color="#4a5568"):
         text(x+12, y+16+14*j, lines[j], "ndl")
     return h
 
-# ==================== 顶部：开机起算时间线 ====================
-parts.append('  <rect x="14" y="66" width="652" height="58" rx="7" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>')
+parts.append('  <rect x="14" y="66" width="692" height="58" rx="7" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>')
 text(24, 80, "开机起算 · 引导时间线（最坏等待；健康重启通常 <1 分钟走完前三步）", "sub")
 _tl = [
     ("rc.local", "触发 bootstrap", "node"),
@@ -147,7 +190,6 @@ for _i, (_t1, _t2, _cls) in enumerate(_tl):
         line(_tx + _tw, 104, _tx + _tw + _gap, 104, w=1.4)
     _tx += _tw + _gap
 
-# ==================== 一、开机自启链路 ====================
 text(20, 140, "一、开机自启链路（v.56 起弃用 lxc-auto，只剩一条路径）", "sub")
 rect(20, 152, 120, 46, "nodeOrange");  text(80, 171, "开机", "nt");  text(80, 187, "procd 启动", "nd")
 line(140, 175, 164, 175, w=1.8)
@@ -166,37 +208,38 @@ dy1 = 214
 db = dy1
 for i, d in enumerate(det1):
     h = small_box(20 + i*210, dy1, 200, f"一.{chr(97+i)}", d, 17, "#2b6cb0")
+    if i < len(det1) - 1:
+        line(20 + i*210 + 200, dy1 + h/2, 20 + (i+1)*210, dy1 + h/2, w=1.4)
     db = max(db, dy1 + h)
 line(413, 198, 413, dy1)
 
-# ==================== 二、bootstrap 脚本流程 ====================
 sec2_top = db + 52
 text(20, db + 24, "二、bootstrap 脚本流程（每次开机，rc.local 触发）", "sub")
 parts.append(f'  <path d="M400,{db} L400,{db+34} L130,{db+34} L130,{sec2_top}" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>')
 
-# (编号, 标题, 副标题, 节点样式, [小步骤正文])
 steps = [
     ("①", "镜像迁移", "旧→新路径", "node", [
         "tarball 缺失：/opt/ 有旧镜像 → mv 迁移到 /etc/crowdsec/；两者都无 → exit 0 跳过（本机不带 CrowdSec）",
         "（.52 起移除 chattr +i 防误删——OpenWrt 无此命令，锁从未生效还刷警告）",
     ]),
     ("②", "模式判定", "config.yaml 在?", "node", [
-        "rootfs 内 config.yaml 不存在 → _recovering=true（首次/恢复全流程）",
-        "存在 → 后续重启模式：跳过解压，直接配置 + 启动 + 验 LP",
+        "◆ 判定：config.yaml 存在？（rootfs 内 /etc/crowdsec/config.yaml）",
+        "_recovering=true：首次/恢复全流程（③ 写 config → ④ 解压 rootfs → ⑤ 配置 → …）",
     ]),
     ("③", "容器 config", "缺失才写", "node", [
         "/srv/lxc/ubuntu/config 不存在才写；apply_cfg 剪掉不被 lxc 支持的行，解析失败 → exit 1 终止",
-        "rootfs.path=dir:/srv/lxc/ubuntu/rootfs；静态 IP 10.0.0.10/24",
+        "rootfs.path=dir:/srv/lxc/ubuntu/rootfs；静态 IP 10.1.0.10/24",
     ]),
     ("④", "解压 rootfs", "仅首次/恢复", "node", [
         "rebuild_from_image：停容器 → 删 rootfs → tar 解压（.extracting 锁）；解压失败 → exit 1 终止",
         "CS_REBUILT=1 防开机循环：一次开机最多重建一次",
     ]),
     ("⑤", "运行期配置", "网桥+容器+解析", "node", [
-        "setup_bridge：lxcbr0 10.0.0.1/24 + 防火墙 lxc 区 ACCEPT",
-        "容器静态 IP 10.0.0.10/24 网关 10.0.0.1；DNS 源文件 trim（.53：1 字节空白不再写出空 nameserver）",
+        "setup_bridge：lxcbr0 10.1.0.1/24 + 防火墙 lxc 区 ACCEPT + SNAT（src_ip 10.1.0.0/24 → snat_ip 10.0.0.201）",
+        "v.72：验证侧各对象独立（verify_lxc_zone/verify_fwd_rules/verify_snat_rule/verify_ip_forward/verify_bridge 按需调用）；修复侧同步拆分——setup_lxc_firewall 入口四分项预检，哪项不符只重建哪项（build_lxc_zone_fwd/build_snat/echo ip_forward），一次 commit+reload；容器网段/出口 IP 收敛为 _lxc_net()/_lan_ip() 唯一出处；proto 规范化 delete+add_list；全对跳过（不 commit 不 reload）",
+        "容器静态 IP 10.1.0.10/24 网关 10.1.0.1；DNS 源文件 trim（.53：1 字节空白不再写出空 nameserver）",
         "setup_container_boot：networkd + crowdsec 软链 + hostname/machine-id",
-        "resolv.conf + 日志源 + listen_uri 0.0.0.0:8080 + trusted_ips 含 10.0.0.1；prepare_container 失败 → exit 1",
+        "resolv.conf + 日志源 + listen_uri 0.0.0.0:8080 + trusted_ips 含 10.1.0.1；prepare_container 失败 → exit 1",
     ]),
     ("⑥", "安装前屏蔽 CAPI", "仅首次/恢复 off", "nodeOrange", [
         "仅首次/恢复：ensure_online_client_off 注释 online_client，LAPI 干净独立启动；失败仅告警不阻断",
@@ -210,38 +253,51 @@ steps = [
         "_wait_lapi_ready 等 cscli bouncers list 就绪（≤90s，.53）；90s 超时仅告警继续，注册成败交 ⑨ 判定",
     ]),
     ("⑧", "日志转发", "宿主机→容器", "node", [
-        "配置 OpenWrt logd 远程转发：log_ip=10.0.0.10, log_port=514, log_proto=udp；失败不阻断主流程",
+        "配置 OpenWrt logd 远程转发：log_ip=10.1.0.10, log_port=514, log_proto=udp；失败不阻断主流程",
         "宿主机系统日志经 UDP 514 发到容器 CrowdSec 采集",
     ]),
     ("⑨", "bouncer 注册", "查 last_pull", "nodeOrange", [
-        "固化 UCI bouncer 字段：api_url=http://10.0.0.10:8080/、enabled=1、ipv4=1；失败 → 跳过注册块，直落 ⑩",
-        "v.53：每轮注册前 _wait_lapi_ready，等 LAPI 就绪再 cscli bouncers add；add 失败 → ⑨.e 下一轮",
-        "bouncer_pulling() 判据：name 匹配 + last_pull 非空",
-        "v.55：陈旧阈值 BOUNCER_PULL_MAX_AGE=600s（阈值非等待）——last_pull 超龄未更新也判失效，堵 LAPI 僵死盲区",
-        "失效 → _bouncer_heal 2 轮：等 LAPI≤90s → 删旧注册拿 key → 容器内重启 crowdsec → 再等 LAPI≤90s → 重启路由器 bouncer+12s → 此后才计 60s 验证窗口",
+        "固化 UCI bouncer 字段：api_url=http://10.1.0.10:8080/、enabled=1、ipv4=1；失败 → 跳过注册块，直落 ⑩",
+        "v.53：每轮注册前 _wait_lapi_ready，等 LAPI 就绪再 cscli bouncers add；add 失败 → ⑨.d 下一轮",
+        "◆ 判定 bouncer_pulling：name 匹配 + last_pull 非空 + last_pull 未超 600s（v.55 陈旧阈值，堵 LAPI 僵死盲区）",
+        "_bouncer_heal 2 轮：等 LAPI≤90s → 删旧注册拿 key → 容器内重启 crowdsec → 再等 LAPI≤90s → 重启路由器 bouncer+12s → 计 60s 验证窗口",
+        "◆ 判定：60s 窗口内 bouncer_pulling 转正？",
         "2 轮未通 → _crowdsec_repair：容器级施救 → 配置校验 → UCI 对齐 → 重注册 → 重启两端 → 重验（见三节）",
     ]),
-    ("⑩", "CAPI 放出+enroll", "按模式，见第四节", "nodePurple", [
-        "判据：bouncer_pulling（LAPI 侧 last_pull 有效?）——安装后再确认一次",
-        "有 → 放出 on + _try_enroll；无 → 屏蔽 off + 诊断（分支见第三节）",
-        "v.63：开机判定只看 Enrolled——enroll 后需网页端 Accept，此前 authenticated 不会有，不查",
+    ("⑩", "CAPI 放出", "按模式，见第四节", "nodePurple", [
+        "◆ 判定 bouncer_pulling：LAPI 侧 last_pull 有效？（安装后再确认一次）",
+        "屏蔽 off + _crowdsec_diagnose（分支见第三节）",
+        "v.63：开机判定只看 Enrolled——此前 authenticated 不会有，不查",
+    ]),
+    ("⑪", "console enroll", "注册码 + CAPI 绑定", "nodePurple", [
+        "注册码判空：ENROLL_KEY_FILE 缺失/为空 → 放弃 enroll（注册码固定有效不消耗，下次开机重试）",
+        "v.66：先 verify_snat 五项校验——src=lan / target=SNAT / snat_ip=出口IP / src_ip=容器网段 / ip_forward=1，任一不符 → setup_lxc_firewall 重建 + 补 ip_forward（不阻断；容器上外网靠它：拉黑名单、连 app.crowdsec.net）",
         "v.63：enroll 前等 api.crowdsec.net 可解析（≤30s 墙钟、就绪即止），治开机 DNS 未就绪秒退；enroll 输出与 capi status 进日志",
         "v.64：online_api_credentials.yaml 缺失时先 cscli capi register 建凭据再 enroll（enroll 的加载前提；v.62 先 mv 走凭据等于必然秒退）",
         "v.65：复检改查 cscli capi status 的 enrolled 行——console status 只打选项表、永远不含 enrolled（源码实锤），v.64 查错命令导致误回滚",
         "v.65：enroll 命令成功即放行；60s 等不到 Enrolled 不回滚不阻止，提示「需要前往网站确认接受」后退出",
     ]),
-    ("⑪", "nft 检查", "链路打通", "nodeGreen", [
+    ("⑫", "nft 检查", "链路打通", "nodeGreen", [
         "nft list table ip crowdsec → 有表则链路打通；无表 → 记日志检查 bouncer 日志，引导结束 exit 0",
     ]),
 ]
 
-sml_pos = {}   # "⑦.b" -> (右缘x, 中心y, 底y, 顶y)
+sml_pos = {}
+# 判定框分支标签：key -> ((向下箭头标签, 色), (右缘短边标签, 类型))
+TAGS = {
+    "②.a": (("否", "red"), ("是 → 重启模式（跳过解压）", "green")),
+    "⑨.c": (("失效", "red"), ("有效 → 直落 ⑩", "green")),
+    "⑨.e": (("未通", "red"), ("通 → 直落 ⑩", "green")),
+    "⑩.a": (("无", "orange"), ("有 → 取消注释放出", "green")),
+}
+TAGCLS = {"red": "tinyR", "orange": "tinyO", "green": "tinyG", "gray": "tiny"}
 y = sec2_top
 prev_lb = None
 pos4 = None
 for num, t, sub, cls, det in steps:
-    hs = [14*len(wrap(f"{num}.{chr(97+i)} {d}", 37)) + 10 for i, d in enumerate(det)]
-    block_h = max(40, sum(hs) + 12*(len(hs)-1))
+    det = [(d[1:].lstrip(), True) if d.startswith("◆") else (d, False) for d in det]
+    hs = [14*len(wrap(f"{num}.{chr(97+i)} {bd}", 37)) + 10 for i, (bd, _j) in enumerate(det)]
+    block_h = max(40, sum(hs) + 22*(len(hs)-1))
     if prev_lb is not None:
         parts.append(f'  <path d="M460,{prev_lb} L460,{prev_lb+13} L130,{prev_lb+13} L130,{y}" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>')
     rect(X_BIG, y, W_BIG, block_h, cls)
@@ -250,22 +306,31 @@ for num, t, sub, cls, det in steps:
     if block_h > 70:
         parts.append(f'  <text x="{CX_BIG}" y="{y+block_h-12}" class="bignum" fill="{STEP_COLORS[cls]}" fill-opacity="0.16">{num}</text>')
     sy = y
-    for i, d in enumerate(det):
+    prev_key = None
+    for i, (bd, judge) in enumerate(det):
         h = hs[i]
+        key = f"{num}.{chr(97+i)}"
+        col = "#6b46c1" if judge else STEP_COLORS[cls]
         if i == 0:
-            line(X_BIG+W_BIG, sy+h/2, X_SML, sy+h/2)
+            line(X_BIG+W_BIG, sy+h/2, X_SML, sy+h/2, color=STEP_COLORS[cls], w=1.6)
         else:
-            line(CX_SML, sy-12, CX_SML, sy)
-        small_box(X_SML, sy, W_SML, f"{num}.{chr(97+i)}", d, 37, STEP_COLORS[cls])
-        sml_pos[f"{num}.{chr(97+i)}"] = (X_R, sy+h/2, sy+h, sy)
-        sy += h + 12
-    prev_lb = sy - 12
+            line(CX_SML, sy-22, CX_SML, sy, w=1.5)
+            tg = TAGS.get(prev_key)
+            if tg and tg[0]:
+                text(CX_SML-8, sy-11, tg[0][0], TAGCLS[tg[0][1]], anchor="end")
+        small_box(X_SML, sy, W_SML, key, bd, 37, col)
+        sml_pos[key] = (X_R, sy+h/2, sy+h, sy)
+        tg = TAGS.get(key)
+        if tg and tg[1]:
+            edge_end(key, tg[1][0], tg[1][1])
+        sy += h + 22
+        prev_key = key
+    prev_lb = sy - 22
     if num == "④":
         pos4 = y + block_h/2
     y += block_h + 26
 sec2_bottom = prev_lb
 
-# ==================== 三、修复 → 重建 ====================
 y3 = sec2_bottom + 30
 text(30, y3, "三、CAPI 段：LP 失效 → repair 修复（不重建）→ 重建", "sub")
 ry = y3 + 18
@@ -290,7 +355,7 @@ parts.append(f'  <path d="M160,{ry2+40} L160,{ry2+52} L340,{ry2+52} L340,{cy}" f
 fy = dcy + 56
 line(dcx+80, dcy, 600, dcy, color="#38a169", w=1.8, marker=None)
 line(600, dcy, 600, fy, color="#38a169", w=1.8, marker="arrGreen")
-rect(500, fy, 160, 40, "nodeGreen");  text(580, fy+16, "修复成功 → 放出", "nt");  text(580, fy+31, "online_client + enroll", "nd")
+rect(500, fy, 160, 40, "nodeGreen");  text(580, fy+16, "修复成功 → 放出", "nt");  text(580, fy+31, "online_client + ⒋enroll", "nd")
 
 line(dcx-80, dcy, 130, dcy, color="#c53030", w=1.8, marker=None)
 line(130, dcy, 130, fy, color="#c53030", w=1.8, marker="arrRed")
@@ -298,42 +363,42 @@ rect(30, fy, 200, 40, "nodeRed");  text(130, fy+16, "修复无效 → 重建", "
 line(130, fy+40, 130, fy+68, w=1.8)
 rect(30, fy+68, 200, 40, "nodeBlue");  text(130, fy+84, "删容器 → exec 重跑", "nt");  text(130, fy+99, "CS_REBUILT 限一次", "nd")
 
-# exec 回路 → 回到 ④ 解压 rootfs（左侧竖线，避开小步骤框）
 loop_y = fy + 118
 parts.append(f'  <path d="M130,{fy+108} L130,{loop_y} L18,{loop_y} L18,{pos4} L30,{pos4}" fill="none" class="loop" marker-end="url(#arrOrange)"/>')
 text(246, fy+92, "exec 重跑 → 回到 ④ 解压 rootfs（首次/恢复全流程）", "loopt")
 
-# ---- 失效分支箭头（红虚线）----
-# ⑦.b 启动两次失败 → ⑦.d _ct_revive（右缘通道绕行，跨过 ⑦.c）
-fail_bypass("⑦.b", "⑦.d", 668)
-# ⑨.d LP 判据失效 → ⑨.e _bouncer_heal（底部平行短箭）
-_, _, b9d, _ = sml_pos["⑨.d"]
-_, _, _, t9e = sml_pos["⑨.e"]
-fail_path(f"M620,{b9d} L620,{t9e}")
-# ⑨.e 2 轮未通 → ⑩.a CAPI 段复判（右缘通道绕行，跨过 ⑨.f）
-fail_bypass("⑨.e", "⑩.a", 664)
-# ⑩.b LP 失效 → 三节 repair 触发红框（右缘通道 → 节标题下方横线 → 红框顶）
+edge_end("①.a", "两者都无 → exit 0", "gray")
+edge_end("③.a", "解析失败 → exit 1", "red")
+edge_end("④.a", "解压失败 → exit 1", "red")
+edge_end("⑤.e", "准备失败 → exit 1", "red")
+edge_end("⑥.a", "失败仅告警", "orange")
+edge_end("⑪.a", "注册码空 → 放弃", "orange")
+edge_end("⑫.a", "无 nft 表 → exit 0", "gray")
+fail_bypass("⑦.b", "⑦.d", CH, "两次起不来 → _ct_revive")
+fail_bypass("⑨.b", "⑨.d", CH, "add 失败 → 下一轮")
 _, cy10b, _, _ = sml_pos["⑩.b"]
-fail_path(f"M{X_R},{cy10b} L672,{cy10b} L672,{sec2_bottom+40} L130,{sec2_bottom+40} L130,{ry}")
+fail_path(f"M{X_R},{cy10b} L{CH},{cy10b} L{CH},{sec2_bottom+40} L130,{sec2_bottom+40} L130,{ry}")
+text(300, sec2_bottom+36, "LP 失效 → 屏蔽 + diagnose（见三节）", "tinyR")
 
 det3 = [
     "触发：⑨ 注册后 CAPI 段复判 bouncer_pulling，LP 失效先 ensure_online_client_off 屏蔽 online_client",
     "repair-① 容器未运行 → _ct_revive 0：补挂 systemd cgroup + 重写容器 config 重启（不重建，失败交回上层）",
-    "repair-② 容器在运行但无 IP 10.0.0.10 → 重写 .network/resolv.conf + 强停重启（resolv.conf 走 _container_dns 兜底：空源文件回落 BRIDGE_IP 10.0.0.1——v.52 实战踩坑：空 nameserver 全链路连不上）",
+    "repair-② 容器在运行但无 IP 10.1.0.10 → 重写 .network/resolv.conf + 强停重启（resolv.conf 走 _container_dns 兜底：空源文件回落 BRIDGE_IP 10.1.0.1——v.52 实战踩坑：空 nameserver 全链路连不上）",
     "repair-③ 配置校验 → UCI 对齐 → _wait_lapi_ready → 重注册 → 重启 crowdsec+bouncer 两端 → 6×5s 重验；注册失败或重验不过 → return 1，交回上层重建（三.f）",
-    "重验通过 → 放出 online_client + _try_enroll → 收尾 nft 检查",
+    "重验通过 → 放出 online_client（⑩）+ enroll（⑪）→ 收尾 nft 检查（⑫）",
     "重验不过 → _crowdsec_rebuild：强停+删 rootfs（删不净强杀+清挂载再删）→ exec 重跑全流程；CS_REBUILT=1 限一次",
 ]
 by = fy + 128
 for i, d in enumerate(det3):
-    h = small_box(30, by, 620, f"三.{chr(97+i)}", d, 59, "#dd6b20")
-    by += h + 10
+    if i > 0:
+        line(360, by-16, 360, by, color="#dd6b20", w=1.6)
+    h = small_box(30, by, 660, f"三.{chr(97+i)}", d, 63, "#dd6b20")
+    by += h + 16
 y4 = by + 14
 
-# ==================== 四、CAPI 决策 ====================
 text(20, y4, "四、CAPI(online_client) 屏蔽 / 放出 决策（按启动模式）", "sub")
 by4 = y4 + 12
-parts.append(f'  <rect x="20" y="{by4}" width="620" height="22" rx="6" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>')
+parts.append(f'  <rect x="20" y="{by4}" width="660" height="22" rx="6" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>')
 text(32, by4+15, "屏蔽 = 注释 online_client（ensure_online_client_off）｜放出 = 取消注释（ensure_online_client_on，同一套 sed）", "ndl")
 
 my = by4 + 40
@@ -345,7 +410,6 @@ sy = my + 94
 rect(20, sy, 305, 32, "nodeBlue");  text(172, sy+21, "首次 / 恢复（rootfs 由镜像解压）", "nt")
 rect(355, sy, 305, 32, "node");  text(507, sy+21, "后续重启（rootfs 已存在）", "nt")
 
-# 左列
 l1y = sy + 46
 rect(42, l1y, 260, 42, "nodeOrange");  text(172, l1y+18, "① 安装前「直接屏蔽」off", "nt");  text(172, l1y+33, "online_client 注释", "nd")
 line(172, l1y+42, 172, l1y+60)
@@ -358,31 +422,30 @@ line(104, l3y+42, 104, l3y+102, color="#38a169", w=1.8, marker="arrGreen")
 line(240, l3y+42, 240, l3y+102, color="#c53030", w=1.8, marker="arrRed")
 l4y = l3y + 102
 rect(42, l4y, 125, 110, "nodeGreen")
-text(104, l4y+22, "有 → 放出", "nt");  text(104, l4y+40, "解除屏蔽(同代码)", "nd");  text(104, l4y+58, "+ _try_enroll", "nd");  text(104, l4y+76, "→ 收尾 nft 检查", "nd")
+text(104, l4y+22, "有 → 放出", "nt");  text(104, l4y+40, "解除屏蔽(同代码)", "nd");  text(104, l4y+58, "+ enroll⑪", "nd");  text(104, l4y+76, "→ 收尾 nft 检查", "nd")
 rect(177, l4y, 125, 110, "nodeOrange")
 text(239, l4y+22, "无 → 保持屏蔽", "nt");  text(239, l4y+40, "_crowdsec_diagnose", "nd");  text(239, l4y+58, "损坏→重建重跑", "nd");  text(239, l4y+76, "网络→屏蔽退出", "nd")
 
-# 右列
 r1y = sy + 46
 rect(377, r1y, 260, 42, "nodeBlue");  text(507, r1y+18, "① 验证 LAPI Last Pull", "nt");  text(507, r1y+33, "每次重启都验（含新鲜度）", "nd")
 line(439, r1y+42, 439, r1y+98, color="#38a169", w=1.8, marker="arrGreen")
 line(574, r1y+42, 574, r1y+98, color="#c53030", w=1.8, marker="arrRed")
 r2y = r1y + 98
 rect(377, r2y, 125, 110, "nodeGreen")
-text(439, r2y+22, "有 → 不屏蔽", "nt");  text(439, r2y+40, "放出on(幂等)", "nd");  text(439, r2y+58, "+enroll 若需", "nd");  text(439, r2y+76, "→ 收尾 nft 检查", "nd")
+text(439, r2y+22, "有 → 不屏蔽", "nt");  text(439, r2y+40, "放出on(幂等)", "nd");  text(439, r2y+58, "+enroll⑪ 若需", "nd");  text(439, r2y+76, "→ 收尾 nft 检查", "nd")
 rect(512, r2y, 125, 110, "nodeOrange")
-text(574, r2y+22, "无 → 屏蔽 off", "nt");  text(574, r2y+40, "_crowdsec_diagnose", "nd");  text(574, r2y+58, "损坏→重建重跑", "nd");  text(574, r2y+76, "网络→放出+enroll", "nd")
+text(574, r2y+22, "无 → 屏蔽 off", "nt");  text(574, r2y+40, "_crowdsec_diagnose", "nd");  text(574, r2y+58, "损坏→重建重跑", "nd");  text(574, r2y+76, "网络→放出+enroll⑪", "nd")
 
-# 要点（首两行手工断行：自动折行会把 enroll 拆成 enrol/l；x=92 为首行避开"要点"标签）
 ky = max(l4y + 110, r2y + 110) + 20
-kl1 = ["enroll 一律在放出之后；重启只在 LP 失效（空/错位/陈旧）后才屏蔽；",
+kl1 = ["放出（⑩）与 enroll（⑪）拆为两步：enroll 一律在放出之后；重启只在 LP 失效（空/错位/陈旧）后才屏蔽；",
        "重建后由重跑脚本自行验证 LP 再放出 + enroll"]
-kl2 = wrap("新鲜度阈值 BOUNCER_PULL_MAX_AGE 默认 600s（crowdsec 正常每分钟拉一次），容器内 GNU date 解析 RFC3339；解析失败保守维持原非空逻辑", 60)
-kl3 = wrap("enroll 开机判定只看 Enrolled：查 cscli capi status 的 enrolled 行（console status 只打选项表、永远不含 enrolled）；enroll 前等 api.crowdsec.net 可解析（≤30s 墙钟、就绪即止）；注册码固定有效不消耗", 60)
-kl4 = wrap("enroll 前提：online_api_credentials.yaml 必须已存在（cscli capi register 的产物），缺失先 register 再 enroll；enroll 命令成功即放行，60s 等不到 Enrolled 不回滚，提示前往网站 Accept", 60)
-nkl = len(kl1) + len(kl2) + len(kl3) + len(kl4)
+kl2 = wrap("新鲜度阈值 BOUNCER_PULL_MAX_AGE 默认 600s（crowdsec 正常每分钟拉一次），容器内 GNU date 解析 RFC3339；解析失败保守维持原非空逻辑", 64)
+kl3 = wrap("enroll 开机判定只看 Enrolled：查 cscli capi status 的 enrolled 行（console status 只打选项表、永远不含 enrolled）；enroll 前等 api.crowdsec.net 可解析（≤30s 墙钟、就绪即止）；注册码固定有效不消耗", 64)
+kl4 = wrap("enroll 前提：online_api_credentials.yaml 必须已存在（cscli capi register 的产物），缺失先 register 再 enroll；enroll 命令成功即放行，60s 等不到 Enrolled 不回滚，提示前往网站 Accept", 64)
+kl5 = wrap("SNAT 与 CAPI 分流：bouncer↔LAPI 走本地桥接不经 SNAT；SNAT 只管容器上外网——拉黑名单、enroll 连 app.crowdsec.net；last_pull 失效不依赖 SNAT，故校验放在 enroll 步（⑪，v.66）", 64)
+nkl = len(kl1) + len(kl2) + len(kl3) + len(kl4) + len(kl5)
 kh = 14*nkl + 10
-parts.append(f'  <rect x="20" y="{ky}" width="620" height="{kh}" rx="7" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>')
+parts.append(f'  <rect x="20" y="{ky}" width="660" height="{kh}" rx="7" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>')
 text(32, ky+16, "要点", "sub2")
 for j, s in enumerate(kl1):
     text(92, ky+16+14*j, s, "ndl")
@@ -392,6 +455,8 @@ for j, s in enumerate(kl3):
     text(32, ky+16+14*(len(kl1)+len(kl2)+j), s, "ndl")
 for j, s in enumerate(kl4):
     text(32, ky+16+14*(len(kl1)+len(kl2)+len(kl3)+j), s, "ndl")
+for j, s in enumerate(kl5):
+    text(32, ky+16+14*(len(kl1)+len(kl2)+len(kl3)+len(kl4)+j), s, "ndl")
 
 total_h = ky + kh + 16
 parts.append("</svg>")

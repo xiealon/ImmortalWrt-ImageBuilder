@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-17.71"
+SCRIPT_VER="2026-10-17.72"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -140,16 +140,8 @@ verify_bridge() {
        && [ -n "$_vb" ] && [ "$_vb" = "$BRIDGE_IP" ]
 }
 
-# 防火墙 lxc 区/转发/SNAT/转发开关全量预检：分项组合调用各独立验证
-# 全部一致才返回 0（setup_lxc_firewall 据此跳过重建，不 commit 不 reload）；
-# 任何一项不符即返回 1（含 ip_forward 被关），由 setup_lxc_firewall 完整重写
-_fw_lxc_ready() {
-    verify_lxc_zone && verify_fwd_rules && verify_snat_rule && verify_ip_forward
-}
-
-setup_lxc_firewall() {
-    _fw_lxc_ready && { log "[防火墙] lxc 区/转发/SNAT 已就绪，跳过重建"; return 0; }
-
+# lxc 防火墙区+转发规则 builder（zone 5 项 + forwarding 4 组）
+build_lxc_zone_fwd() {
     uci -q set firewall.lxczone=zone
     uci -q set firewall.lxczone.name='lxc'
     uci -q set firewall.lxczone.network='lxc'
@@ -168,6 +160,10 @@ setup_lxc_firewall() {
     uci -q set firewall.lan2lxc=forwarding
     uci -q set firewall.lan2lxc.src='lan'
     uci -q set firewall.lan2lxc.dest='lxc'
+}
+
+# SNAT 规则 builder：proto 整项规范化 + src_ip/snat_ip 现场推导
+build_snat() {
     uci -q set firewall.lxcsnat=nat
     uci -q set firewall.lxcsnat.name='lxc-snat'
     uci -q delete firewall.lxcsnat.proto
@@ -176,10 +172,34 @@ setup_lxc_firewall() {
     uci -q set firewall.lxcsnat.src_ip="$(_lxc_net)"
     uci -q set firewall.lxcsnat.target='SNAT'
     uci -q set firewall.lxcsnat.snat_ip="$(_lan_ip)"
-    uci -q commit firewall
-    /etc/init.d/firewall reload >/dev/null 2>&1
-    echo 1 >/proc/sys/net/ipv4/ip_forward 2>/dev/null
-    log "[防火墙] lxc 区 input/output/forward=ACCEPT（8080/tcp、514/udp 可达）"
+}
+
+# 防火墙修复入口：四分项独立预检，哪项不符只重建哪项
+# 全对 -> 不 commit 不 reload 直接跳过；只有 ip_forward 被关 -> 只 echo 1；
+# 其余按需重建，一次 commit + 一次 reload
+setup_lxc_firewall() {
+    _ok_z=0; _ok_f=0; _ok_s=0; _ok_i=0
+    verify_lxc_zone || _ok_z=1
+    verify_fwd_rules || _ok_f=1
+    verify_snat_rule || _ok_s=1
+    verify_ip_forward || _ok_i=1
+    [ "$_ok_z$_ok_f$_ok_s$_ok_i" = "0000" ] && { log "[防火墙] lxc 区/转发/SNAT 已就绪，跳过重建"; return 0; }
+    if [ "$_ok_z" = 1 ] || [ "$_ok_f" = 1 ]; then
+        build_lxc_zone_fwd
+        log "[防火墙] lxc 区/转发规则已重建（input/output/forward=ACCEPT，8080/tcp、514/udp 可达）"
+    fi
+    if [ "$_ok_s" = 1 ]; then
+        build_snat
+        log "[防火墙] SNAT 已重建（src_ip=$(_lxc_net) snat_ip=$(_lan_ip)）"
+    fi
+    if [ "$_ok_z" = 1 ] || [ "$_ok_f" = 1 ] || [ "$_ok_s" = 1 ]; then
+        uci -q commit firewall
+        /etc/init.d/firewall reload >/dev/null 2>&1
+    fi
+    if [ "$_ok_i" = 1 ]; then
+        echo 1 >/proc/sys/net/ipv4/ip_forward 2>/dev/null
+        log "[防火墙] ip_forward 已置 1"
+    fi
     return 0
 }
 

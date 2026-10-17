@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-16.65"
+SCRIPT_VER="2026-10-17.70"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -83,19 +83,30 @@ _wait() {
 }
 _wait_ct_running() { _wait ct_running 12; }
 
-# 防火墙 lxc 区/转发/SNAT 全量预检：20 项逐项比对现状与期望值
-# 全部一致才返回 0（setup_lxc_firewall 据此跳过重建，不 commit 不 reload）；
-# 任何一项不符即返回 1（含 ip_forward 被关），由 setup_lxc_firewall 完整重写
-_fw_lxc_ready() {
-    _fr_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
-    _fr_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
-    [ -n "$_fr_ip" ] || { [ -f /etc/config/custom_router_ip.txt ] && _fr_ip=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n'); }
-    [ -n "$_fr_ip" ] || _fr_ip='192.168.3.201'
+# 容器网段（/24）唯一推导处：由 CONTAINER_IP 取前三段，SNAT src_ip 等处统一调用
+_lxc_net() {
+    echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}'
+}
+
+# 出口 IP 唯一取值处：先 uci lan.ipaddr，再 custom_router_ip.txt，最后兜底
+_lan_ip() {
+    _si=$(uci -q get network.lan.ipaddr 2>/dev/null)
+    [ -n "$_si" ] || { [ -f /etc/config/custom_router_ip.txt ] && _si=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n'); }
+    [ -n "$_si" ] || _si='192.168.3.201'
+    echo "$_si"
+}
+
+# lxc 防火墙区独立验证（5 项）
+verify_lxc_zone() {
     [ "$(uci -q get firewall.lxczone.name)" = "lxc" ] || return 1
     [ "$(uci -q get firewall.lxczone.network)" = "lxc" ] || return 1
     [ "$(uci -q get firewall.lxczone.input)" = "ACCEPT" ] || return 1
     [ "$(uci -q get firewall.lxczone.output)" = "ACCEPT" ] || return 1
     [ "$(uci -q get firewall.lxczone.forward)" = "ACCEPT" ] || return 1
+}
+
+# lxc 转发规则独立验证（8 项：lxc2lan/lxc2docker/lxc2vpn/lan2lxc）
+verify_fwd_rules() {
     [ "$(uci -q get firewall.lxc2lan.src)" = "lxc" ] || return 1
     [ "$(uci -q get firewall.lxc2lan.dest)" = "lan" ] || return 1
     [ "$(uci -q get firewall.lxc2docker.src)" = "lxc" ] || return 1
@@ -104,24 +115,40 @@ _fw_lxc_ready() {
     [ "$(uci -q get firewall.lxc2vpn.dest)" = "vpn" ] || return 1
     [ "$(uci -q get firewall.lan2lxc.src)" = "lan" ] || return 1
     [ "$(uci -q get firewall.lan2lxc.dest)" = "lxc" ] || return 1
+}
+
+# SNAT 规则独立验证（6 项：src_ip=容器网段、snat_ip=出口IP，期望值现场推导比对）
+verify_snat_rule() {
     [ "$(uci -q get firewall.lxcsnat.name)" = "lxc-snat" ] || return 1
     [ "$(uci -q get firewall.lxcsnat.proto)" = "all" ] || return 1
     [ "$(uci -q get firewall.lxcsnat.src)" = "lan" ] || return 1
     [ "$(uci -q get firewall.lxcsnat.target)" = "SNAT" ] || return 1
-    [ "$(uci -q get firewall.lxcsnat.src_ip)" = "$_fr_net" ] || return 1
-    [ "$(uci -q get firewall.lxcsnat.snat_ip)" = "$_fr_ip" ] || return 1
+    [ "$(uci -q get firewall.lxcsnat.src_ip)" = "$(_lxc_net)" ] || return 1
+    [ "$(uci -q get firewall.lxcsnat.snat_ip)" = "$(_lan_ip)" ] || return 1
+}
+
+# 内核 IPv4 转发开关独立验证
+verify_ip_forward() {
     [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ] || return 1
-    return 0
+}
+
+# 网桥就绪独立验证：设备在 + uci static + 实际 IP 与 BRIDGE_IP 一致
+verify_bridge() {
+    _vb=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
+    ip link show lxcbr0 >/dev/null 2>&1 \
+       && [ "$(uci -q get network.lxc.proto 2>/dev/null)" = "static" ] \
+       && [ -n "$_vb" ] && [ "$_vb" = "$BRIDGE_IP" ]
+}
+
+# 防火墙 lxc 区/转发/SNAT/转发开关全量预检：分项组合调用各独立验证
+# 全部一致才返回 0（setup_lxc_firewall 据此跳过重建，不 commit 不 reload）；
+# 任何一项不符即返回 1（含 ip_forward 被关），由 setup_lxc_firewall 完整重写
+_fw_lxc_ready() {
+    verify_lxc_zone && verify_fwd_rules && verify_snat_rule && verify_ip_forward
 }
 
 setup_lxc_firewall() {
     _fw_lxc_ready && { log "[防火墙] lxc 区/转发/SNAT 已就绪，跳过重建"; return 0; }
-    _lsc_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
-    _lan_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
-    if [ -z "$_lan_ip" ] && [ -f /etc/config/custom_router_ip.txt ]; then
-        _lan_ip=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n')
-    fi
-    [ -n "$_lan_ip" ] || _lan_ip='192.168.3.201'
 
     uci -q set firewall.lxczone=zone
     uci -q set firewall.lxczone.name='lxc'
@@ -146,9 +173,9 @@ setup_lxc_firewall() {
     uci -q del_list firewall.lxcsnat.proto='all'
     uci -q add_list firewall.lxcsnat.proto='all'
     uci -q set firewall.lxcsnat.src='lan'
-    uci -q set firewall.lxcsnat.src_ip="${_lsc_net}"
+    uci -q set firewall.lxcsnat.src_ip="$(_lxc_net)"
     uci -q set firewall.lxcsnat.target='SNAT'
-    uci -q set firewall.lxcsnat.snat_ip="${_lan_ip}"
+    uci -q set firewall.lxcsnat.snat_ip="$(_lan_ip)"
     uci -q commit firewall
     /etc/init.d/firewall reload >/dev/null 2>&1
     echo 1 >/proc/sys/net/ipv4/ip_forward 2>/dev/null
@@ -157,19 +184,15 @@ setup_lxc_firewall() {
 }
 
 # enroll 前校验 SNAT：容器上外网（拉黑名单、连 app.crowdsec.net）依赖 lxcsnat
-# 五项比对 zone=lan / target=SNAT / snat_ip=出口IP / src_ip=容器网段 / ip_forward=1，
-# 任一不符 → setup_lxc_firewall 重建并补 ip_forward（不阻断）
+# 按需调用 verify_snat_rule（6 项）+ ip_forward，任一不符 → setup_lxc_firewall
+# 重建并补 ip_forward（不阻断）
 verify_snat() {
-    _vs_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
-    _vs_ip=$(uci -q get network.lan.ipaddr 2>/dev/null)
-    [ -n "$_vs_ip" ] || { [ -f /etc/config/custom_router_ip.txt ] && _vs_ip=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n'); }
-    [ -n "$_vs_ip" ] || _vs_ip='192.168.3.201'
     _vs_tgt=$(uci -q get firewall.lxcsnat.target 2>/dev/null)
     _vs_sip=$(uci -q get firewall.lxcsnat.snat_ip 2>/dev/null)
     _vs_src=$(uci -q get firewall.lxcsnat.src_ip 2>/dev/null)
     _vs_zone=$(uci -q get firewall.lxcsnat.src 2>/dev/null)
     _vs_fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
-    if [ "$_vs_tgt" = "SNAT" ] && [ "$_vs_sip" = "$_vs_ip" ] && [ "$_vs_src" = "$_vs_net" ] && [ "$_vs_zone" = "lan" ] && [ "$_vs_fwd" = "1" ]; then
+    if verify_snat_rule && [ "$_vs_fwd" = "1" ]; then
         log "[SNAT] 就位（zone=${_vs_zone} src=${_vs_src} → ${_vs_sip}）"
         return 0
     fi
@@ -213,11 +236,7 @@ setup_log_forward() {
 }
 
 setup_bridge() {
-    _lsc_net=$(echo "$CONTAINER_IP" | awk -F. '{print $1"."$2"."$3".0/24"}')
-    _br=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
-    if ip link show lxcbr0 >/dev/null 2>&1 \
-       && [ "$(uci -q get network.lxc.proto 2>/dev/null)" = "static" ] \
-       && [ -n "$_br" ] && [ "$_br" = "$BRIDGE_IP" ]; then
+    if verify_bridge; then
         log "[网桥] 已就绪 lxcbr0=${BRIDGE_IP}/24，跳过重建"
         setup_lxc_firewall
         return 0
@@ -250,7 +269,7 @@ setup_bridge() {
     echo 1 >/proc/sys/net/ipv4/ip_forward 2>/dev/null
 
     BRIDGE_IP=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
-    log "[网桥] lxcbr0=${BRIDGE_IP}/24 容器=${CONTAINER_IP} 网段=${_lsc_net}"
+    log "[网桥] lxcbr0=${BRIDGE_IP}/24 容器=${CONTAINER_IP} 网段=$(_lxc_net)"
     setup_lxc_firewall
 }
 

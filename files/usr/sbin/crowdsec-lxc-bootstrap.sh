@@ -151,6 +151,7 @@ setup_lxc_firewall() {
     uci -q set firewall.lxcsnat.snat_ip="${_lan_ip}"
     uci -q commit firewall
     /etc/init.d/firewall reload >/dev/null 2>&1
+    echo 1 >/proc/sys/net/ipv4/ip_forward 2>/dev/null
     log "[防火墙] lxc 区 input/output/forward=ACCEPT（8080/tcp、514/udp 可达）"
     return 0
 }

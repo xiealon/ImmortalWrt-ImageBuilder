@@ -20,7 +20,8 @@ X_SML, W_SML = 260, 400
 CX_BIG = X_BIG + W_BIG/2
 CX_SML = X_SML + W_SML/2
 X_R = X_SML + W_SML
-CH = 672
+CH = 672      # 红虚线 bypass 车道
+CH_T = 700    # 彩色分支轨迹车道
 
 import os
 
@@ -115,7 +116,7 @@ parts.append(f'''<svg viewBox="0 0 {W} 2960" xmlns="http://www.w3.org/2000/svg" 
   </style>
   <rect x="0" y="0" width="740" height="4096" fill="#ffffff"/>
   <text x="370" y="26" class="title" text-anchor="middle">CrowdSec LXC · 详细流程架构图</text>
-  <text x="370" y="44" class="ver" text-anchor="middle">v.2026-10-17.75 ｜ 左=大步骤框，右=小步骤框（①.a 式编号；◆=判定框，分支标签在箭头上）｜ 重建=强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
+  <text x="370" y="44" class="ver" text-anchor="middle">v.2026-10-17.76 ｜ ①.a 式小步骤框；◆=判定框，分支轨迹绕右车道连到目标步（竖排标签）｜ 重建=强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
   <text x="370" y="58" class="ver" text-anchor="middle">实线=正常流 ｜ 紫框+标签=判定分支 ｜ 红虚线+红块=失败/exit 1 ｜ 灰虚线+灰块=exit 0 ｜ 橙虚线=告警/放弃/回路 ｜ 绿=有效</text>
 ''')
 
@@ -133,13 +134,14 @@ def line(x1, y1, x2, y2, color="#4a5568", w=1.5, marker="arr"):
 def fail_path(d):
     parts.append(f'  <path d="{d}" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#arrRed)"/>')
 
-def fail_bypass(key_from, key_to, xc, label=None):
+def fail_bypass(key_from, key_to, xc, label=None, lpos="mid"):
     _, cyA, _, _ = sml_pos[key_from]
     _, cyB, _, _ = sml_pos[key_to]
     fail_path(f"M{X_R},{cyA} L{xc},{cyA} L{xc},{cyB} L{X_R},{cyB}")
     if label:
         for j, ln in enumerate(wrapw(label, 7.0)):
-            text(xc+6, (cyA+cyB)/2 - 6 + 11*j, ln, "tinyR")
+            ly = (cyA+cyB)/2 - 6 + 11*j if lpos == "mid" else cyA + 14 + 11*j
+            text(xc+6, ly, ln, "tinyR")
 
 def edge_end(key, label, kind="red"):
     """本框右缘 → 短虚线 + 色块 + 标签（终止/告警类，不跨步骤）"""
@@ -283,14 +285,18 @@ steps = [
 ]
 
 sml_pos = {}
-# 判定框分支标签：key -> ((向下箭头标签, 色), (右缘短边标签, 类型))
+# 分支轨迹：key -> ((向下箭头标签, 色), (轨迹标签, 线型, 目标key, 车道, 起点dy, 终点dy))
+# 线型：green=有效/通过、gray=不阻断继续、orange=放弃/告警、red=失败
 TAGS = {
-    "②.a": (("否", "red"), ("是 → 重启模式（跳过解压）", "green")),
-    "⑨.c": (("失效", "red"), ("有效 → 直落 ⑩", "green")),
-    "⑨.e": (("未通", "red"), ("通 → 直落 ⑩", "green")),
-    "⑩.a": (("无", "orange"), ("有 → 取消注释放出", "green")),
+    "②.a": (("否", "red"), ("是 → ⑤ 跳过解压", "green", "⑤.a", CH, 0, 0)),
+    "⑥.a": (None, ("不阻断 → ⑦", "gray", "⑦.a", CH, 0, 0)),
+    "⑨.c": (("失效", "red"), ("有效 → ⑩", "green", "⑩.a", CH_T, 0, -20)),
+    "⑨.e": (("未通", "red"), ("通 → ⑩", "green", "⑩.a", CH_T, 0, -8)),
+    "⑩.a": (("无", "orange"), ("有 → ⑪", "green", "⑪.a", CH_T, 8, 0)),
+    "⑪.a": (None, ("注册码空 → ⑫", "orange", "⑫.a", CH_T, 12, -14)),
 }
 TAGCLS = {"red": "tinyR", "orange": "tinyO", "green": "tinyG", "gray": "tiny"}
+TRACKS = []
 y = sec2_top
 prev_lb = None
 pos4 = None
@@ -322,7 +328,7 @@ for num, t, sub, cls, det in steps:
         sml_pos[key] = (X_R, sy+h/2, sy+h, sy)
         tg = TAGS.get(key)
         if tg and tg[1]:
-            edge_end(key, tg[1][0], tg[1][1])
+            TRACKS.append((key,) + tg[1])
         sy += h + 22
         prev_key = key
     prev_lb = sy - 22
@@ -371,11 +377,23 @@ edge_end("①.a", "两者都无 → exit 0", "gray")
 edge_end("③.a", "解析失败 → exit 1", "red")
 edge_end("④.a", "解压失败 → exit 1", "red")
 edge_end("⑤.e", "准备失败 → exit 1", "red")
-edge_end("⑥.a", "失败仅告警", "orange")
-edge_end("⑪.a", "注册码空 → 放弃", "orange")
 edge_end("⑫.a", "无 nft 表 → exit 0", "gray")
 fail_bypass("⑦.b", "⑦.d", CH, "两次起不来 → _ct_revive")
-fail_bypass("⑨.b", "⑨.d", CH, "add 失败 → 下一轮")
+fail_bypass("⑨.b", "⑨.d", CH, "add 失败 → 下一轮", lpos="top")
+
+# 分支轨迹：框右缘 → 右车道 → 连到目标框右缘，竖排标签注明到哪一步
+TRK_COLOR = {"green": "#38a169", "orange": "#dd6b20", "gray": "#4a5568", "red": "#c53030"}
+TRK_MK = {"green": "arrGreen", "orange": "arrOrange", "gray": "arr", "red": "arrRed"}
+for fk, label, kind, tk, lane, ody, idy in TRACKS:
+    _, cyA, _, _ = sml_pos[fk]
+    _, cyB, _, _ = sml_pos[tk]
+    yA, yB = cyA + ody, cyB + idy
+    dash = ' stroke-dasharray="5 3"' if kind == "orange" else ''
+    parts.append(f'  <path d="M{X_R},{yA} L{lane},{yA} L{lane},{yB} L{X_R},{yB}" fill="none" stroke="{TRK_COLOR[kind]}" stroke-width="1.5"{dash} marker-end="url(#{TRK_MK[kind]})"/>')
+    chars = [c for c in label if c != ' ']
+    y0 = (yA + yB)/2 - 5.5*(len(chars)-1)
+    for j, cch in enumerate(chars):
+        text(lane + (3 if lane == CH else 5), y0 + 9 + 11*j, cch, TAGCLS[kind])
 _, cy10b, _, _ = sml_pos["⑩.b"]
 fail_path(f"M{X_R},{cy10b} L{CH},{cy10b} L{CH},{sec2_bottom+40} L130,{sec2_bottom+40} L130,{ry}")
 text(300, sec2_bottom+36, "LP 失效 → 屏蔽 + diagnose（见三节）", "tinyR")

@@ -32,7 +32,7 @@
   </style>
   <rect x="0" y="0" width="740" height="4096" fill="#ffffff"/>
   <text x="370" y="26" class="title" text-anchor="middle">CrowdSec LXC · 详细流程架构图</text>
-  <text x="370" y="44" class="ver" text-anchor="middle">v.2026-10-17.75 ｜ 左=大步骤框，右=小步骤框（①.a 式编号；◆=判定框，分支标签在箭头上）｜ 重建=强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
+  <text x="370" y="44" class="ver" text-anchor="middle">v.2026-10-17.76 ｜ ①.a 式小步骤框；◆=判定框，分支轨迹绕右车道连到目标步（竖排标签）｜ 重建=强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
   <text x="370" y="58" class="ver" text-anchor="middle">实线=正常流 ｜ 紫框+标签=判定分支 ｜ 红虚线+红块=失败/exit 1 ｜ 灰虚线+灰块=exit 0 ｜ 橙虚线=告警/放弃/回路 ｜ 绿=有效</text>
 
   <rect x="14" y="66" width="692" height="58" rx="7" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>
@@ -117,11 +117,6 @@
   <line x1="230" y1="482.0" x2="260" y2="482.0" stroke="#4a5568" stroke-width="1.6" marker-end="url(#arr)"/>
   <rect x="260" y="470" width="400" height="24" rx="6" fill="#f2eef9" stroke="#6b46c1" stroke-width="1.5"/>
   <text x="272" y="486" class="ndl"><tspan style="font-weight:700;fill:#6b46c1">②.a</tspan> 判定：config.yaml 存在？（rootfs 内 /etc/crowdsec/config.yaml）</text>
-  <line x1="660" y1="482.0" x2="686" y2="482.0" stroke="#38a169" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrGreen)"/>
-  <rect x="688" y="477.5" width="9" height="9" rx="2" fill="#38a169"/>
-  <text x="690" y="491.0" class="tinyG">是 →</text>
-  <text x="690" y="501.0" class="tinyG">重启模式（</text>
-  <text x="690" y="511.0" class="tinyG">跳过解压）</text>
   <line x1="460.0" y1="494" x2="460.0" y2="516" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
   <text x="452.0" y="505" class="tinyR" text-anchor="end">否</text>
   <rect x="260" y="516" width="400" height="38" rx="6" fill="#eff0f1" stroke="#4a5568" stroke-width="1.5"/>
@@ -247,10 +242,6 @@
   <rect x="260" y="1818" width="400" height="38" rx="6" fill="#f2eef9" stroke="#6b46c1" stroke-width="1.5"/>
   <text x="272" y="1834" class="ndl"><tspan style="font-weight:700;fill:#6b46c1">⑨.c</tspan> 判定 bouncer_pulling：name 匹配 + last_pull 非空 + last_pull 未</text>
   <text x="272" y="1848" class="ndl">超 600s（v.55 陈旧阈值，堵 LAPI 僵死盲区）</text>
-  <line x1="660" y1="1837.0" x2="686" y2="1837.0" stroke="#38a169" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrGreen)"/>
-  <rect x="688" y="1832.5" width="9" height="9" rx="2" fill="#38a169"/>
-  <text x="690" y="1846.0" class="tinyG">有效 →</text>
-  <text x="690" y="1856.0" class="tinyG">直落 ⑩</text>
   <line x1="460.0" y1="1856" x2="460.0" y2="1878" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
   <text x="452.0" y="1867" class="tinyR" text-anchor="end">失效</text>
   <rect x="260" y="1878" width="400" height="38" rx="6" fill="#fcf2eb" stroke="#dd6b20" stroke-width="1.5"/>
@@ -259,10 +250,6 @@
   <line x1="460.0" y1="1916" x2="460.0" y2="1938" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
   <rect x="260" y="1938" width="400" height="24" rx="6" fill="#f2eef9" stroke="#6b46c1" stroke-width="1.5"/>
   <text x="272" y="1954" class="ndl"><tspan style="font-weight:700;fill:#6b46c1">⑨.e</tspan> 判定：60s 窗口内 bouncer_pulling 转正？</text>
-  <line x1="660" y1="1950.0" x2="686" y2="1950.0" stroke="#38a169" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrGreen)"/>
-  <rect x="688" y="1945.5" width="9" height="9" rx="2" fill="#38a169"/>
-  <text x="690" y="1959.0" class="tinyG">通 →</text>
-  <text x="690" y="1969.0" class="tinyG">直落 ⑩</text>
   <line x1="460.0" y1="1962" x2="460.0" y2="1984" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
   <text x="452.0" y="1973" class="tinyR" text-anchor="end">未通</text>
   <rect x="260" y="1984" width="400" height="38" rx="6" fill="#fcf2eb" stroke="#dd6b20" stroke-width="1.5"/>
@@ -277,11 +264,6 @@
   <rect x="260" y="2048" width="400" height="38" rx="6" fill="#f2eef9" stroke="#6b46c1" stroke-width="1.5"/>
   <text x="272" y="2064" class="ndl"><tspan style="font-weight:700;fill:#6b46c1">⑩.a</tspan> 判定 bouncer_pulling：LAPI 侧 last_pull 有效？（安装后再确认一次</text>
   <text x="272" y="2078" class="ndl">）</text>
-  <line x1="660" y1="2067.0" x2="686" y2="2067.0" stroke="#38a169" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrGreen)"/>
-  <rect x="688" y="2062.5" width="9" height="9" rx="2" fill="#38a169"/>
-  <text x="690" y="2076.0" class="tinyG">有 →</text>
-  <text x="690" y="2086.0" class="tinyG">取消注释放</text>
-  <text x="690" y="2096.0" class="tinyG">出</text>
   <line x1="460.0" y1="2086" x2="460.0" y2="2108" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
   <text x="452.0" y="2097" class="tinyO" text-anchor="end">无</text>
   <rect x="260" y="2108" width="400" height="24" rx="6" fill="#f2eef9" stroke="#6b46c1" stroke-width="1.5"/>
@@ -381,13 +363,6 @@
   <rect x="688" y="1110.5" width="9" height="9" rx="2" fill="#c53030"/>
   <text x="690" y="1124.0" class="tinyR">准备失败</text>
   <text x="690" y="1134.0" class="tinyR">→ exit 1</text>
-  <line x1="660" y1="1179.0" x2="686" y2="1179.0" stroke="#dd6b20" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrOrange)"/>
-  <rect x="688" y="1174.5" width="9" height="9" rx="2" fill="#dd6b20"/>
-  <text x="690" y="1188.0" class="tinyO">失败仅告警</text>
-  <line x1="660" y1="2223.0" x2="686" y2="2223.0" stroke="#dd6b20" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrOrange)"/>
-  <rect x="688" y="2218.5" width="9" height="9" rx="2" fill="#dd6b20"/>
-  <text x="690" y="2232.0" class="tinyO">注册码空</text>
-  <text x="690" y="2242.0" class="tinyO">→ 放弃</text>
   <line x1="660" y1="2615.0" x2="686" y2="2615.0" stroke="#718096" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arr)"/>
   <rect x="688" y="2610.5" width="9" height="9" rx="2" fill="#718096"/>
   <text x="690" y="2624.0" class="tiny">无 nft 表</text>
@@ -396,8 +371,42 @@
   <text x="678" y="1417.0" class="tinyR">两次起不来 →</text>
   <text x="678" y="1428.0" class="tinyR">_ct_revive</text>
   <path d="M660,1777.0 L672,1777.0 L672,1897.0 L660,1897.0" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#arrRed)"/>
-  <text x="678" y="1831.0" class="tinyR">add 失败 →</text>
-  <text x="678" y="1842.0" class="tinyR">下一轮</text>
+  <text x="678" y="1791.0" class="tinyR">add 失败 →</text>
+  <text x="678" y="1802.0" class="tinyR">下一轮</text>
+  <path d="M660,482.0 L672,482.0 L672,819.0 L660,819.0" fill="none" stroke="#38a169" stroke-width="1.5" marker-end="url(#arrGreen)"/>
+  <text x="675" y="626.5" class="tinyG">是</text>
+  <text x="675" y="637.5" class="tinyG">→</text>
+  <text x="675" y="648.5" class="tinyG">⑤</text>
+  <text x="675" y="659.5" class="tinyG">跳</text>
+  <text x="675" y="670.5" class="tinyG">过</text>
+  <text x="675" y="681.5" class="tinyG">解</text>
+  <text x="675" y="692.5" class="tinyG">压</text>
+  <path d="M660,1179.0 L672,1179.0 L672,1296.0 L660,1296.0" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="675" y="1224.5" class="tiny">不</text>
+  <text x="675" y="1235.5" class="tiny">阻</text>
+  <text x="675" y="1246.5" class="tiny">断</text>
+  <text x="675" y="1257.5" class="tiny">→</text>
+  <text x="675" y="1268.5" class="tiny">⑦</text>
+  <path d="M660,1837.0 L700,1837.0 L700,2047.0 L660,2047.0" fill="none" stroke="#38a169" stroke-width="1.5" marker-end="url(#arrGreen)"/>
+  <text x="705" y="1934.5" class="tinyG">有</text>
+  <text x="705" y="1945.5" class="tinyG">效</text>
+  <text x="705" y="1956.5" class="tinyG">→</text>
+  <text x="705" y="1967.5" class="tinyG">⑩</text>
+  <path d="M660,1950.0 L700,1950.0 L700,2059.0 L660,2059.0" fill="none" stroke="#38a169" stroke-width="1.5" marker-end="url(#arrGreen)"/>
+  <text x="705" y="2002.5" class="tinyG">通</text>
+  <text x="705" y="2013.5" class="tinyG">→</text>
+  <text x="705" y="2024.5" class="tinyG">⑩</text>
+  <path d="M660,2075.0 L700,2075.0 L700,2223.0 L660,2223.0" fill="none" stroke="#38a169" stroke-width="1.5" marker-end="url(#arrGreen)"/>
+  <text x="705" y="2147.0" class="tinyG">有</text>
+  <text x="705" y="2158.0" class="tinyG">→</text>
+  <text x="705" y="2169.0" class="tinyG">⑪</text>
+  <path d="M660,2235.0 L700,2235.0 L700,2601.0 L660,2601.0" fill="none" stroke="#dd6b20" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrOrange)"/>
+  <text x="705" y="2399.5" class="tinyO">注</text>
+  <text x="705" y="2410.5" class="tinyO">册</text>
+  <text x="705" y="2421.5" class="tinyO">码</text>
+  <text x="705" y="2432.5" class="tinyO">空</text>
+  <text x="705" y="2443.5" class="tinyO">→</text>
+  <text x="705" y="2454.5" class="tinyO">⑫</text>
   <path d="M660,2120.0 L672,2120.0 L672,2674 L130,2674 L130,2682" fill="none" stroke="#c53030" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#arrRed)"/>
   <text x="300" y="2670" class="tinyR">LP 失效 → 屏蔽 + diagnose（见三节）</text>
   <rect x="30" y="3028" width="660" height="24" rx="6" fill="#fcf2eb" stroke="#dd6b20" stroke-width="1.5"/>

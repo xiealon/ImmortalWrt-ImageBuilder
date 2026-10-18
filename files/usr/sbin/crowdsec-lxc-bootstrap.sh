@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-18.75"
+SCRIPT_VER="2026-10-18.76"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -284,6 +284,17 @@ verify_dns_domain() {
     return 1
 }
 
+# gw 模式 LAN DHCP 验证（主路由命脉，与 bypass 的 ignore=1 语义互斥）：
+#   ignore=0（显式开启）+ start/limit/leasetime 就位（空则需补默认）
+# bypass 切 gw 时上一模式留下的 ignore=1 会被此验证判不符 → build 修正回 0
+verify_lan_dhcp() {
+    [ "$(uci -q get dhcp.lan.ignore 2>/dev/null)" = "0" ] || return 1
+    [ -n "$(uci -q get dhcp.lan.start 2>/dev/null)" ] || return 1
+    [ -n "$(uci -q get dhcp.lan.limit 2>/dev/null)" ] || return 1
+    [ -n "$(uci -q get dhcp.lan.leasetime 2>/dev/null)" ] || return 1
+    return 0
+}
+
 # docker 防火墙验证：zone（ACCEPT + 172.16.0.0/12）+ docker↔lan/wan 三向 forwarding
 # 无 dockerd → 不涉及，跳过
 verify_docker_fw() {
@@ -420,6 +431,15 @@ build_dns_domain() {
     return 0
 }
 
+# gw 模式 LAN DHCP builder：显式 ignore=0 + start/limit/leasetime 空项补默认值
+# （用户已改过的 start/limit/leasetime 不覆盖，只补缺）
+build_lan_dhcp() {
+    uci -q set dhcp.lan.ignore='0'
+    [ -n "$(uci -q get dhcp.lan.start 2>/dev/null)" ] || uci -q set dhcp.lan.start='100'
+    [ -n "$(uci -q get dhcp.lan.limit 2>/dev/null)" ] || uci -q set dhcp.lan.limit='150'
+    [ -n "$(uci -q get dhcp.lan.leasetime 2>/dev/null)" ] || uci -q set dhcp.lan.leasetime='12h'
+}
+
 # docker 防火墙 builder：按段名定责清含 docker 的 forwarding（不赌 @forwarding[idx] 索引，
 # 标准 uci show 输出的是 cfgXXX=forwarding 段名）→ 重建 zone + 三向 forwarding
 build_docker_fw() {
@@ -537,14 +557,24 @@ setup_log_forward() {
     return 0
 }
 
-# 旁路由网络基线入口（v.75）：按 _router_mode 分流，仅 bypass 校准——
-#   桥接口 / LAN 静态 / DHCP 让权 / WAN 禁用 / DNS 劫持 五对象独立预检按需重建，
-#   任一 network/dhcp 对象重建 → 一次 commit + network/dnsmasq reload 生效
+# 网络模式入口（v.76）：按 _router_mode 分流，两套互斥语义各自校准——
+#   bypass：旁路由基线五对象（桥接口/LAN 静态/DHCP 让权 ignore=1/WAN 禁用/DNS 劫持）
+#   gw：LAN DHCP 必须开启（ignore=0 + start/limit/leasetime 兜底）——主路由命脉，
+#       LAN 设备靠本机发地址；旁路基线（WAN 禁用/DHCP 让权等）一律不应用
+#   模式互切双向闭环：bypass→gw 时遗留 ignore=1 被 verify_lan_dhcp 判不符→修正回 0；
+#   gw→bypass 时遗留 ignore=0 被 verify_dhcp_ignore 判不符→修正回 1
 # 必须在 setup_bridge/setup_lxc_firewall 之前跑：SNAT 的 snat_ip 取 _lan_ip()，
 # 需先确保 network.lan.ipaddr 已校准就位（否则首启会读到固件默认地址）
-setup_bypass_net() {
-    if [ "$(_router_mode)" != "bypass" ]; then
-        log "[旁路基线] 模式 $(_router_mode) 非 bypass，跳过旁路由网络校准（主路由适配后续版本）"
+setup_router_net() {
+    if [ "$(_router_mode)" = "gw" ]; then
+        if verify_lan_dhcp; then
+            log "[主路由] LAN DHCP 已开启（ignore=0），跳过"
+        else
+            build_lan_dhcp
+            uci -q commit dhcp
+            /etc/init.d/dnsmasq reload >/dev/null 2>&1
+            log "[主路由] LAN DHCP 已开启（ignore=0，start/limit/leasetime 兜底 100/150/12h）"
+        fi
         setup_docker_fw
         return 0
     fi
@@ -1234,7 +1264,7 @@ _ct_revive() {
 
 main() {
     log "===== crowdsec-lxc-bootstrap v$SCRIPT_VER 开始（容器 $LXC_NAME）====="
-    log "网络模式: $(_router_mode)（WAN-input/LAN-input 按 name 定责；旁路基线由 bootstrap 每次开机校准，v.75）"
+    log "网络模式: $(_router_mode)（WAN-input/LAN-input 按 name 定责；网络基线按模式分流：bypass=旁路五对象 / gw=LAN DHCP 开启，v.76）"
 
     if [ ! -f "$TARBALL" ] && [ -f "$LEGACY_TARBALL" ]; then
         mkdir -p "$CS_HOME" 2>/dev/null && mv -f "$LEGACY_TARBALL" "$TARBALL" 2>/dev/null \
@@ -1261,8 +1291,8 @@ main() {
         rebuild_from_image || { log "镜像解压失败"; exit 1; }
     fi
 
-    # 先校准旁路由 LAN 静态地址（SNAT snat_ip 依赖 network.lan.ipaddr 就位），再建 lxcbr0
-    setup_bypass_net
+    # 先按模式校准网络基线（bypass：LAN 静态地址先就位供 SNAT 推导；gw：LAN DHCP 开启），再建 lxcbr0
+    setup_router_net
     setup_bridge
     prepare_container || { log "配置生成失败"; exit 1; }
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-18.76"
+SCRIPT_VER="2026-10-18.77"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -145,6 +145,15 @@ _zone_sec() {
         [ "$(uci -q get firewall.$_z.name 2>/dev/null)" = "$1" ] && { echo "$_z"; return 0; }
     done
     return 1
+}
+
+# LAN zone 网络接口名唯一出处：按 name 定责取 firewall zone(lan).network 首值
+# （标准固件为 'lan'；旁路由下 br-lan 归 lan 接口、主路由下 LAN 口归 lan 接口）
+_zone_lan_network() {
+    _lz=$(_zone_sec lan) || return 1
+    _zn=$(uci -q get firewall.$_lz.network 2>/dev/null | head -n1)
+    [ -n "$_zn" ] || return 1
+    echo "$_zn"
 }
 
 # 网络模式唯一取值处：custom_router_mode.txt（编译期 Actions 写入，运行时可改文件）
@@ -295,6 +304,18 @@ verify_lan_dhcp() {
     return 0
 }
 
+# 管理服务监听面验证（v.77）：dropbear(SSH)/ttyd(网页终端) 绑 LAN zone 对应接口
+# ——取代原 99-custom 的「Interface 清空=无差别监听所有口」：那种写法在主路由下
+# 会把 SSH 暴露到 WAN；按 zone 定责绑定后，旁路由经 br-lan（上游局域网）可达、
+# 主路由从 LAN 口可达，两模式都可管且 WAN 不暴露
+# 无 name=lan 的 zone → 不涉及，跳过
+verify_svc_bind() {
+    _wn=$(_zone_lan_network) || return 0
+    [ "$(uci -q get dropbear.@dropbear[0].Interface 2>/dev/null)" = "$_wn" ] || return 1
+    [ "$(uci -q get ttyd.@ttyd[0].interface 2>/dev/null)" = "$_wn" ] || return 1
+    return 0
+}
+
 # docker 防火墙验证：zone（ACCEPT + 172.16.0.0/12）+ docker↔lan/wan 三向 forwarding
 # 无 dockerd → 不涉及，跳过
 verify_docker_fw() {
@@ -440,6 +461,27 @@ build_lan_dhcp() {
     [ -n "$(uci -q get dhcp.lan.leasetime 2>/dev/null)" ] || uci -q set dhcp.lan.leasetime='12h'
 }
 
+# 管理服务监听面 builder：dropbear/ttyd 绑 LAN zone 对应接口 + reload 两端服务
+# （@dropbear[0]/@ttyd[0] 为 OpenWrt 官方标准单段写法，两服务恒定各一段、索引不漂移；
+#  「绑哪个区域」由 _zone_lan_network 按 name 定责推导，不写死）
+build_svc_bind() {
+    _wn=$(_zone_lan_network) || { log "[服务] 无 name=lan 的 zone，跳过管理服务绑定管理"; return 0; }
+    uci -q set dropbear.@dropbear[0].Interface="$_wn"
+    uci -q set ttyd.@ttyd[0].interface="$_wn"
+    uci -q commit dropbear
+    uci -q commit ttyd
+    /etc/init.d/dropbear reload >/dev/null 2>&1 || true
+    /etc/init.d/ttyd reload >/dev/null 2>&1 || true
+    log "[服务] dropbear/ttyd 已绑 LAN zone 接口($_wn)（WAN 不暴露 SSH/网页终端）"
+}
+
+# 管理服务监听面入口（无条件，与模式无关）：预检不符才重建
+setup_svc_bind() {
+    verify_svc_bind && { log "[服务] dropbear/ttyd 已绑 LAN zone 接口($(_zone_lan_network))，跳过"; return 0; }
+    build_svc_bind
+    return 0
+}
+
 # docker 防火墙 builder：按段名定责清含 docker 的 forwarding（不赌 @forwarding[idx] 索引，
 # 标准 uci show 输出的是 cfgXXX=forwarding 段名）→ 重建 zone + 三向 forwarding
 build_docker_fw() {
@@ -575,6 +617,7 @@ setup_router_net() {
             /etc/init.d/dnsmasq reload >/dev/null 2>&1
             log "[主路由] LAN DHCP 已开启（ignore=0，start/limit/leasetime 兜底 100/150/12h）"
         fi
+        setup_svc_bind
         setup_docker_fw
         return 0
     fi
@@ -586,6 +629,7 @@ setup_router_net() {
     verify_dns_domain   || _ok_n=1
     if [ "$_ok_b$_ok_p$_ok_d$_ok_w$_ok_n" = "00000" ]; then
         log "[旁路基线] br-lan/LAN 静态/DHCP 让权/WAN 禁用/DNS 劫持 已就绪，跳过"
+        setup_svc_bind
         setup_docker_fw
         return 0
     fi
@@ -599,6 +643,7 @@ setup_router_net() {
     /etc/init.d/network reload >/dev/null 2>&1
     /etc/init.d/dnsmasq reload >/dev/null 2>&1
     log "[旁路基线] network/dhcp 已提交并 reload"
+    setup_svc_bind
     setup_docker_fw
     return 0
 }
@@ -1264,7 +1309,7 @@ _ct_revive() {
 
 main() {
     log "===== crowdsec-lxc-bootstrap v$SCRIPT_VER 开始（容器 $LXC_NAME）====="
-    log "网络模式: $(_router_mode)（WAN-input/LAN-input 按 name 定责；网络基线按模式分流：bypass=旁路五对象 / gw=LAN DHCP 开启，v.76）"
+    log "网络模式: $(_router_mode)（WAN-input/LAN-input 按 name 定责；网络基线按模式分流：bypass=旁路五对象 / gw=LAN DHCP 开启；dropbear/ttyd 绑 LAN zone 接口，v.77）"
 
     if [ ! -f "$TARBALL" ] && [ -f "$LEGACY_TARBALL" ]; then
         mkdir -p "$CS_HOME" 2>/dev/null && mv -f "$LEGACY_TARBALL" "$TARBALL" 2>/dev/null \

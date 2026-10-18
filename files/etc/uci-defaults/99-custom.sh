@@ -7,17 +7,12 @@ echo "Starting 99-custom.sh at $(date)" >>$LOGFILE
 # v.75 起，旁路由网络基线全部搬迁至 crowdsec-lxc-bootstrap（每次开机按需校准）：
 #   br-lan 桥接口 / LAN 静态地址(含 custom_router_ip/gateway/dns/netmask 推导) /
 #   DHCP 让权(ignore) / WAN 禁用 / DNS 劫持(time.android.com) / docker 防火墙
+# v.77 起，dropbear/ttyd 监听面改由 bootstrap 按 LAN zone 定责绑定（不再清空=全监听）
 # 本文件只保留非网络的一次性首启设置
 
   uci set luci.main.mediaurlbase="/luci-static/bootstrap"
   uci set luci.main.lang='auto'
   uci set luci.main.tablefilters='1'
-  uci commit
-
-
-  uci del ttyd.@ttyd[0].interface
-
-  uci set dropbear.@dropbear[0].Interface=''
   uci commit
 
 FILE_PATH="/etc/openwrt_release"

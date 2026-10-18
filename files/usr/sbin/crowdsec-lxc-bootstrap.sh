@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-18.74"
+SCRIPT_VER="2026-10-18.75"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -94,6 +94,41 @@ _lan_ip() {
     [ -n "$_si" ] || { [ -f /etc/config/custom_router_ip.txt ] && _si=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n'); }
     [ -n "$_si" ] || _si='192.168.3.201'
     echo "$_si"
+}
+
+# 读取 custom_*.txt 首行（编译期 Actions 写入 /etc/config，运行时可改文件免重编译）
+_read_netconf() {
+    [ -f "/etc/config/$1" ] || return 0
+    head -n1 "/etc/config/$1" | tr -d ' \t\r\n'
+}
+
+# 管理地址期望值唯一推导处（自 99-custom.sh 同源搬迁，v.75 起由 bootstrap 每次开机按需校准）
+# 输出一行四值：IP NETMASK GATEWAY DNS；推导规则与原 99-custom.sh 完全一致：
+#   默认 10.1.1.201/24（网关 DNS 按 /24 推 .1）；自定义 IP + /24 → 同规则推导；
+#   自定义 IP + 非 /24 → 不推导网关（保持默认，提示显式填 custom_router_gateway）；
+#   custom_router_gateway/dns.txt 显式传入时优先级最高
+_lan_static_conf() {
+    _ls_ip='10.1.1.201'
+    _ls_nm="$(_read_netconf custom_router_netmask.txt)"
+    [ -n "$_ls_nm" ] || _ls_nm='255.255.255.0'
+    _ls_gw='10.1.1.1'
+    _ls_dn='10.1.1.1'
+    _ls_uip="$(_read_netconf custom_router_ip.txt)"
+    if [ -n "$_ls_uip" ]; then
+        _ls_ip="$_ls_uip"
+        if [ "$_ls_nm" = "255.255.255.0" ]; then
+            _ls_gw="$(echo "$_ls_ip" | awk -F. '{print $1"."$2"."$3".1"}')"
+            _ls_dn="$_ls_gw"
+        fi
+    fi
+    _ls_ugw="$(_read_netconf custom_router_gateway.txt)"
+    if [ -n "$_ls_ugw" ]; then
+        _ls_gw="$_ls_ugw"
+        [ -n "$(_read_netconf custom_router_dns.txt)" ] || _ls_dn="$_ls_ugw"
+    fi
+    _ls_udn="$(_read_netconf custom_router_dns.txt)"
+    [ -n "$_ls_udn" ] && _ls_dn="$_ls_udn"
+    echo "$_ls_ip $_ls_nm $_ls_gw $_ls_dn"
 }
 
 # 物理网口列表：排除 lo/虚拟/桥接，规则与 99-custom.sh 组桥同源（唯一出处）
@@ -192,6 +227,81 @@ verify_lan_input() {
     return 0
 }
 
+# ---- 旁路由网络基线（v.75 起自 99-custom.sh 同源搬迁，bypass 模式每次开机按需校准）----
+
+# 桥接口验证：br-lan bridge 设备 + ports 与 /sys 实际枚举物理口集合一致 + 无残留 cfg030f15
+# 枚举为空（开机早期网口驱动未就绪）→ 跳过不误建空桥（防外网断）
+verify_br_lan_ports() {
+    _vp=$(_phys_ports)
+    [ -n "$_vp" ] || return 0
+    [ "$(uci -q get network.br_lan.type 2>/dev/null)" = "bridge" ] || return 1
+    [ "$(uci -q get network.br_lan.name 2>/dev/null)" = "br-lan" ] || return 1
+    [ "$(uci -q get network.lan.device 2>/dev/null)" = "br-lan" ] || return 1
+    uci show network.cfg030f15 >/dev/null 2>&1 && return 1
+    [ "$(printf '%s\n' "$_vp" | sort)" = "$(uci -q get network.br_lan.ports 2>/dev/null | sort)" ]
+}
+
+# LAN 静态地址验证：proto/device/ipaddr/netmask/gateway/dns 与 _lan_static_conf 推导值一致
+verify_lan_static() {
+    set -- $(_lan_static_conf)
+    [ "$(uci -q get network.lan.proto 2>/dev/null)" = "static" ] || return 1
+    [ "$(uci -q get network.lan.device 2>/dev/null)" = "br-lan" ] || return 1
+    [ "$(uci -q get network.lan.ipaddr 2>/dev/null)" = "$1" ] || return 1
+    [ "$(uci -q get network.lan.netmask 2>/dev/null)" = "$2" ] || return 1
+    [ "$(uci -q get network.lan.gateway 2>/dev/null)" = "$3" ] || return 1
+    [ "$(uci -q get network.lan.dns 2>/dev/null)" = "$4" ] || return 1
+    return 0
+}
+
+# DHCP 让权验证：lan ignore=1（旁路由不提供 DHCP，上游光猫发）+ IPv6 RA 项清净 + 无权威 DNS
+verify_dhcp_ignore() {
+    [ "$(uci -q get dhcp.lan.ignore 2>/dev/null)" = "1" ] || return 1
+    [ -z "$(uci -q get dhcp.lan.ra 2>/dev/null)" ] || return 1
+    [ -z "$(uci -q get dhcp.lan.max_preferred_lifetime 2>/dev/null)" ] || return 1
+    [ -z "$(uci -q get dhcp.lan.max_valid_lifetime 2>/dev/null)" ] || return 1
+    [ -z "$(uci -q get dhcp.lan.dhcpv6 2>/dev/null)" ] || return 1
+    [ -z "$(uci -q get dhcp.lan.ndp 2>/dev/null)" ] || return 1
+    for _dm in $(uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
+        [ -z "$(uci -q get dhcp.$_dm.authoritative 2>/dev/null)" ] || return 1
+    done
+    return 0
+}
+
+# WAN 禁用验证（仅 bypass 语义）：wan/wan6 disabled=1——旁路由不抢拨号，出口走上游网关
+verify_wan_disabled() {
+    [ "$(uci -q get network.wan.disabled 2>/dev/null)" = "1" ] || return 1
+    [ "$(uci -q get network.wan6.disabled 2>/dev/null)" = "1" ] || return 1
+    return 0
+}
+
+# DNS 劫持验证：存在 time.android.com → 203.107.6.88 的 dhcp domain（安卓 NTP 走国内源）
+verify_dns_domain() {
+    for _dd in $(uci show dhcp 2>/dev/null | grep -E '=domain$' | cut -d. -f2 | cut -d= -f1); do
+        [ "$(uci -q get dhcp.$_dd.name 2>/dev/null)" = "time.android.com" ] || continue
+        [ "$(uci -q get dhcp.$_dd.ip 2>/dev/null)" = "203.107.6.88" ] || return 1
+        return 0
+    done
+    return 1
+}
+
+# docker 防火墙验证：zone（ACCEPT + 172.16.0.0/12）+ docker↔lan/wan 三向 forwarding
+# 无 dockerd → 不涉及，跳过
+verify_docker_fw() {
+    command -v dockerd >/dev/null 2>&1 || return 0
+    [ "$(uci -q get firewall.docker.name 2>/dev/null)" = "docker" ] || return 1
+    [ "$(uci -q get firewall.docker.input 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.docker.output 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.docker.forward 2>/dev/null)" = "ACCEPT" ] || return 1
+    uci -q get firewall.docker.subnet 2>/dev/null | grep -qx '172.16.0.0/12' || return 1
+    [ "$(uci -q get firewall.docker2lan.src 2>/dev/null)" = "docker" ] || return 1
+    [ "$(uci -q get firewall.docker2lan.dest 2>/dev/null)" = "lan" ] || return 1
+    [ "$(uci -q get firewall.docker2wan.src 2>/dev/null)" = "docker" ] || return 1
+    [ "$(uci -q get firewall.docker2wan.dest 2>/dev/null)" = "wan" ] || return 1
+    [ "$(uci -q get firewall.lan2docker.src 2>/dev/null)" = "lan" ] || return 1
+    [ "$(uci -q get firewall.lan2docker.dest 2>/dev/null)" = "docker" ] || return 1
+    return 0
+}
+
 # lxc 防火墙区+转发规则 builder（zone 5 项 + forwarding 4 组）
 build_lxc_zone_fwd() {
     uci -q set firewall.lxczone=zone
@@ -244,6 +354,98 @@ build_lan_input() {
     uci -q set firewall.$_lz.input='ACCEPT'
     uci -q set firewall.$_lz.forward='ACCEPT'
     log "[防火墙] LAN zone($_lz) input/forward 已放开（ACCEPT）"
+}
+
+# ---- 旁路由网络基线 builder（v.75，与原 99-custom.sh 同值同规则搬迁）----
+
+# 桥接口 builder：清旧引用重建 br-lan，ports=当前枚举到的全部物理口
+build_br_lan_ports() {
+    uci -q delete network.lan.device
+    uci -q delete network.br_lan
+    uci -q delete network.cfg030f15
+    uci -q set network.br_lan=device
+    uci -q set network.br_lan.name='br-lan'
+    uci -q set network.br_lan.type='bridge'
+    uci -q set network.br_lan.bridge_empty='1'
+    uci -q delete network.br_lan.ports
+    for _p in $(_phys_ports); do
+        uci -q add_list network.br_lan.ports="$_p"
+    done
+    uci -q set network.lan.device='br-lan'
+}
+
+# LAN 静态地址 builder：按 _lan_static_conf 推导值写 proto/ipaddr/netmask/gateway/dns
+build_lan_static() {
+    set -- $(_lan_static_conf)
+    uci -q set network.lan.proto='static'
+    uci -q set network.lan.device='br-lan'
+    uci -q set network.lan.ipaddr="$1"
+    uci -q set network.lan.netmask="$2"
+    uci -q set network.lan.gateway="$3"
+    uci -q set network.lan.dns="$4"
+}
+
+# DHCP 让权 builder：ignore=1 + 清 IPv6 RA 项 + 遍历所有 dnsmasq 段删 authoritative
+build_dhcp_ignore() {
+    uci -q set dhcp.lan.ignore='1'
+    uci -q delete dhcp.lan.ra
+    uci -q delete dhcp.lan.max_preferred_lifetime
+    uci -q delete dhcp.lan.max_valid_lifetime
+    uci -q delete dhcp.lan.dhcpv6
+    uci -q delete dhcp.lan.ndp
+    for _dm in $(uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
+        uci -q delete dhcp.$_dm.authoritative
+    done
+}
+
+# WAN 禁用 builder（bypass）：wan/wan6 disabled=1
+build_wan_disabled() {
+    uci -q set network.wan.disabled='1'
+    uci -q set network.wan6.disabled='1'
+}
+
+# DNS 劫持 builder：幂等补/改 time.android.com → 203.107.6.88
+build_dns_domain() {
+    for _dd in $(uci show dhcp 2>/dev/null | grep -E '=domain$' | cut -d. -f2 | cut -d= -f1); do
+        if [ "$(uci -q get dhcp.$_dd.name 2>/dev/null)" = "time.android.com" ]; then
+            uci -q set dhcp.$_dd.ip='203.107.6.88'
+            return 0
+        fi
+    done
+    uci -q add dhcp domain >/dev/null 2>&1
+    _dd=$(uci show dhcp 2>/dev/null | grep -E '=domain$' | cut -d. -f2 | cut -d= -f1 | tail -n1)
+    [ -n "$_dd" ] || return 1
+    uci -q set "dhcp.$_dd.name=time.android.com"
+    uci -q set "dhcp.$_dd.ip=203.107.6.88"
+    return 0
+}
+
+# docker 防火墙 builder：按段名定责清含 docker 的 forwarding（不赌 @forwarding[idx] 索引，
+# 标准 uci show 输出的是 cfgXXX=forwarding 段名）→ 重建 zone + 三向 forwarding
+build_docker_fw() {
+    uci -q delete firewall.docker
+    for _fw in $(uci show firewall 2>/dev/null | grep -E '=forwarding$' | cut -d. -f2 | cut -d= -f1); do
+        _src=$(uci -q get firewall.$_fw.src 2>/dev/null)
+        _dest=$(uci -q get firewall.$_fw.dest 2>/dev/null)
+        if [ "$_src" = "docker" ] || [ "$_dest" = "docker" ]; then
+            uci -q delete firewall.$_fw
+        fi
+    done
+    uci -q set firewall.docker=zone
+    uci -q set firewall.docker.name='docker'
+    uci -q set firewall.docker.input='ACCEPT'
+    uci -q set firewall.docker.output='ACCEPT'
+    uci -q set firewall.docker.forward='ACCEPT'
+    uci -q add_list firewall.docker.subnet='172.16.0.0/12'
+    uci -q set firewall.docker2lan=forwarding
+    uci -q set firewall.docker2lan.src='docker'
+    uci -q set firewall.docker2lan.dest='lan'
+    uci -q set firewall.docker2wan=forwarding
+    uci -q set firewall.docker2wan.src='docker'
+    uci -q set firewall.docker2wan.dest='wan'
+    uci -q set firewall.lan2docker=forwarding
+    uci -q set firewall.lan2docker.src='lan'
+    uci -q set firewall.lan2docker.dest='docker'
 }
 
 # 防火墙修复入口：四分项独立预检，哪项不符只重建哪项
@@ -332,6 +534,56 @@ setup_log_forward() {
 
     /etc/init.d/log reload >/dev/null 2>&1 || /etc/init.d/logd reload >/dev/null 2>&1 || true
     log "[日志] 宿主机系统日志已转发到容器 ${_want_ip}:514/udp"
+    return 0
+}
+
+# 旁路由网络基线入口（v.75）：按 _router_mode 分流，仅 bypass 校准——
+#   桥接口 / LAN 静态 / DHCP 让权 / WAN 禁用 / DNS 劫持 五对象独立预检按需重建，
+#   任一 network/dhcp 对象重建 → 一次 commit + network/dnsmasq reload 生效
+# 必须在 setup_bridge/setup_lxc_firewall 之前跑：SNAT 的 snat_ip 取 _lan_ip()，
+# 需先确保 network.lan.ipaddr 已校准就位（否则首启会读到固件默认地址）
+setup_bypass_net() {
+    if [ "$(_router_mode)" != "bypass" ]; then
+        log "[旁路基线] 模式 $(_router_mode) 非 bypass，跳过旁路由网络校准（主路由适配后续版本）"
+        setup_docker_fw
+        return 0
+    fi
+    _ok_b=0; _ok_p=0; _ok_d=0; _ok_w=0; _ok_n=0
+    verify_br_lan_ports || _ok_b=1
+    verify_lan_static   || _ok_p=1
+    verify_dhcp_ignore  || _ok_d=1
+    verify_wan_disabled || _ok_w=1
+    verify_dns_domain   || _ok_n=1
+    if [ "$_ok_b$_ok_p$_ok_d$_ok_w$_ok_n" = "00000" ]; then
+        log "[旁路基线] br-lan/LAN 静态/DHCP 让权/WAN 禁用/DNS 劫持 已就绪，跳过"
+        setup_docker_fw
+        return 0
+    fi
+    [ "$_ok_b" = 1 ] && { build_br_lan_ports; log "[旁路基线] br-lan 桥接口已重建（口：$(_phys_ports | tr '\n' ' ')）"; }
+    [ "$_ok_p" = 1 ] && { build_lan_static; log "[旁路基线] LAN 静态已重建 $(_lan_static_conf | tr ' ' '/')"; }
+    [ "$_ok_d" = 1 ] && { build_dhcp_ignore; log "[旁路基线] DHCP 已让权（ignore=1，IPv6 RA 清净）"; }
+    [ "$_ok_w" = 1 ] && { build_wan_disabled; log "[旁路基线] WAN/WAN6 已禁用（出口走上游网关）"; }
+    [ "$_ok_n" = 1 ] && { build_dns_domain; log "[旁路基线] DNS 劫持已就位（time.android.com → 203.107.6.88）"; }
+    uci -q commit network
+    uci -q commit dhcp
+    /etc/init.d/network reload >/dev/null 2>&1
+    /etc/init.d/dnsmasq reload >/dev/null 2>&1
+    log "[旁路基线] network/dhcp 已提交并 reload"
+    setup_docker_fw
+    return 0
+}
+
+# docker 防火墙入口（无条件，与模式无关）：装了 dockerd 就要保证容器网络与防火墙互通
+setup_docker_fw() {
+    command -v dockerd >/dev/null 2>&1 || { log "[docker] 未检测到 dockerd，跳过防火墙配置"; return 0; }
+    if verify_docker_fw; then
+        log "[docker] zone + docker↔lan/wan forwarding 已就绪，跳过"
+        return 0
+    fi
+    build_docker_fw
+    uci -q commit firewall
+    /etc/init.d/firewall reload >/dev/null 2>&1
+    log "[docker] zone + docker↔lan/wan forwarding 已重建"
     return 0
 }
 
@@ -982,7 +1234,7 @@ _ct_revive() {
 
 main() {
     log "===== crowdsec-lxc-bootstrap v$SCRIPT_VER 开始（容器 $LXC_NAME）====="
-    log "网络模式: $(_router_mode)（WAN-input/LAN-input 由 bootstrap 按 name 定责管理）"
+    log "网络模式: $(_router_mode)（WAN-input/LAN-input 按 name 定责；旁路基线由 bootstrap 每次开机校准，v.75）"
 
     if [ ! -f "$TARBALL" ] && [ -f "$LEGACY_TARBALL" ]; then
         mkdir -p "$CS_HOME" 2>/dev/null && mv -f "$LEGACY_TARBALL" "$TARBALL" 2>/dev/null \
@@ -1009,6 +1261,8 @@ main() {
         rebuild_from_image || { log "镜像解压失败"; exit 1; }
     fi
 
+    # 先校准旁路由 LAN 静态地址（SNAT snat_ip 依赖 network.lan.ipaddr 就位），再建 lxcbr0
+    setup_bypass_net
     setup_bridge
     prepare_container || { log "配置生成失败"; exit 1; }
 

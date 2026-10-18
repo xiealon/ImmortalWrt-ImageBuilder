@@ -1,5 +1,5 @@
 #!/bin/sh
-SCRIPT_VER="2026-10-17.72"
+SCRIPT_VER="2026-10-18.74"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -96,6 +96,33 @@ _lan_ip() {
     echo "$_si"
 }
 
+# 物理网口列表：排除 lo/虚拟/桥接，规则与 99-custom.sh 组桥同源（唯一出处）
+# 用于 WAN-input 放行定责：单网口才需放行，多网口必有一个在 LAN，无需放行
+_phys_ports() {
+    ls /sys/class/net/ 2>/dev/null | grep -E '^(eth|en|lan)' | grep -v -E '(lo|docker|veth|br-|tun|tap)'
+}
+_phys_port_count() { _phys_ports | wc -l | tr -d ' '; }
+
+# 按职责(name)定位 firewall zone 的 section 名，不赌 @zone[N] 索引
+# （索引会因其他包 insert zone / 定制改序而漂移，name 才是稳定职责标识）
+_zone_sec() {
+    for _z in $(uci show firewall 2>/dev/null | grep -E '=zone$' | cut -d. -f2 | cut -d= -f1); do
+        [ "$(uci -q get firewall.$_z.name 2>/dev/null)" = "$1" ] && { echo "$_z"; return 0; }
+    done
+    return 1
+}
+
+# 网络模式唯一取值处：custom_router_mode.txt（编译期 Actions 写入，运行时可改文件）
+# gw=主路由 / bypass=旁路单臂 / 缺省或非法值=auto（按物理网口数推定）
+_router_mode() {
+    _m=""
+    [ -f /etc/config/custom_router_mode.txt ] && _m=$(head -n1 /etc/config/custom_router_mode.txt | tr -d ' \t\r\n')
+    case "$_m" in
+        gw|bypass) echo "$_m"; return 0 ;;
+    esac
+    if [ "$(_phys_port_count)" -ge 2 ]; then echo gw; else echo bypass; fi
+}
+
 # lxc 防火墙区独立验证（5 项）
 verify_lxc_zone() {
     [ "$(uci -q get firewall.lxczone.name)" = "lxc" ] || return 1
@@ -140,6 +167,31 @@ verify_bridge() {
        && [ -n "$_vb" ] && [ "$_vb" = "$BRIDGE_IP" ]
 }
 
+# WAN zone input 放行独立验证（定责 name=wan，不赌索引）
+# 单网口设备：必须 ACCEPT——否则唯一的口若被划为 WAN，input=REJECT 会连不上 luci
+# 多网口设备：不得 ACCEPT——必有一个口在 LAN zone(input 本就 ACCEPT)，从 LAN 进 luci；
+#             路由模式下 WAN 口应保持收紧
+# 无 name=wan 的 zone（纯旁路由未建 WAN 区）：不涉及，跳过
+verify_wan_input() {
+    _wz=$(_zone_sec wan) || return 0
+    _cur=$(uci -q get firewall.$_wz.input 2>/dev/null)
+    if [ "$(_phys_port_count)" -ge 2 ]; then
+        [ "$_cur" = "ACCEPT" ] && return 1
+        return 0
+    fi
+    [ "$_cur" = "ACCEPT" ] || return 1
+    return 0
+}
+
+# LAN zone 放行独立验证（定责 name=lan）：input/forward 必须 ACCEPT
+# （放开内网：可进管理界面、可被转发到其他 zone）
+verify_lan_input() {
+    _lz=$(_zone_sec lan) || return 0
+    [ "$(uci -q get firewall.$_lz.input 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.$_lz.forward 2>/dev/null)" = "ACCEPT" ] || return 1
+    return 0
+}
+
 # lxc 防火墙区+转发规则 builder（zone 5 项 + forwarding 4 组）
 build_lxc_zone_fwd() {
     uci -q set firewall.lxczone=zone
@@ -174,16 +226,38 @@ build_snat() {
     uci -q set firewall.lxcsnat.snat_ip="$(_lan_ip)"
 }
 
+# WAN zone input 放行 builder：按网口数定责设/收紧（作用于 name=wan 的 zone）
+build_wan_input() {
+    _wz=$(_zone_sec wan) || { log "[防火墙] 无 name=wan 的 zone，跳过 WAN input 管理"; return 0; }
+    if [ "$(_phys_port_count)" -ge 2 ]; then
+        uci -q set firewall.$_wz.input='REJECT'
+        log "[防火墙] 多网口设备，WAN zone($_wz) input 收紧为 REJECT（LAN 口可进 luci）"
+    else
+        uci -q set firewall.$_wz.input='ACCEPT'
+        log "[防火墙] 单网口设备，WAN zone($_wz) input 放行 ACCEPT（保 luci 可达）"
+    fi
+}
+
+# LAN zone 放行 builder：input/forward 锁定 ACCEPT
+build_lan_input() {
+    _lz=$(_zone_sec lan) || { log "[防火墙] 无 name=lan 的 zone，跳过 LAN 放行管理"; return 0; }
+    uci -q set firewall.$_lz.input='ACCEPT'
+    uci -q set firewall.$_lz.forward='ACCEPT'
+    log "[防火墙] LAN zone($_lz) input/forward 已放开（ACCEPT）"
+}
+
 # 防火墙修复入口：四分项独立预检，哪项不符只重建哪项
 # 全对 -> 不 commit 不 reload 直接跳过；只有 ip_forward 被关 -> 只 echo 1；
 # 其余按需重建，一次 commit + 一次 reload
 setup_lxc_firewall() {
-    _ok_z=0; _ok_f=0; _ok_s=0; _ok_i=0
+    _ok_z=0; _ok_f=0; _ok_s=0; _ok_i=0; _ok_w=0; _ok_l=0
     verify_lxc_zone || _ok_z=1
     verify_fwd_rules || _ok_f=1
     verify_snat_rule || _ok_s=1
     verify_ip_forward || _ok_i=1
-    [ "$_ok_z$_ok_f$_ok_s$_ok_i" = "0000" ] && { log "[防火墙] lxc 区/转发/SNAT 已就绪，跳过重建"; return 0; }
+    verify_wan_input || _ok_w=1
+    verify_lan_input || _ok_l=1
+    [ "$_ok_z$_ok_f$_ok_s$_ok_i$_ok_w$_ok_l" = "000000" ] && { log "[防火墙] lxc 区/转发/SNAT/ip_forward/WAN-input/LAN-input 已就绪，跳过重建"; return 0; }
     if [ "$_ok_z" = 1 ] || [ "$_ok_f" = 1 ]; then
         build_lxc_zone_fwd
         log "[防火墙] lxc 区/转发规则已重建（input/output/forward=ACCEPT，8080/tcp、514/udp 可达）"
@@ -192,7 +266,13 @@ setup_lxc_firewall() {
         build_snat
         log "[防火墙] SNAT 已重建（src_ip=$(_lxc_net) snat_ip=$(_lan_ip)）"
     fi
-    if [ "$_ok_z" = 1 ] || [ "$_ok_f" = 1 ] || [ "$_ok_s" = 1 ]; then
+    if [ "$_ok_w" = 1 ]; then
+        build_wan_input
+    fi
+    if [ "$_ok_l" = 1 ]; then
+        build_lan_input
+    fi
+    if [ "$_ok_z" = 1 ] || [ "$_ok_f" = 1 ] || [ "$_ok_s" = 1 ] || [ "$_ok_w" = 1 ] || [ "$_ok_l" = 1 ]; then
         uci -q commit firewall
         /etc/init.d/firewall reload >/dev/null 2>&1
     fi
@@ -902,6 +982,7 @@ _ct_revive() {
 
 main() {
     log "===== crowdsec-lxc-bootstrap v$SCRIPT_VER 开始（容器 $LXC_NAME）====="
+    log "网络模式: $(_router_mode)（WAN-input/LAN-input 由 bootstrap 按 name 定责管理）"
 
     if [ ! -f "$TARBALL" ] && [ -f "$LEGACY_TARBALL" ]; then
         mkdir -p "$CS_HOME" 2>/dev/null && mv -f "$LEGACY_TARBALL" "$TARBALL" 2>/dev/null \

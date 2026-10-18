@@ -38,6 +38,15 @@ on:
         description: "lxcbr0 网桥 IP，留空默认 10.0.0.1；同时作为容器的网关和 DNS（掩码固定 255.255.255.0）。网桥/接口由开机引导脚本按此值创建"
         required: false
         default: "10.0.0.1"
+      custom_router_mode:
+        description: "网络模式: bypass=旁路单臂(默认,兼容现状) / gw=主路由(拨号+DHCP+NAT,后续适配) / auto=按物理网口数自动判定"
+        required: false
+        default: "bypass"
+        type: choice
+        options:
+          - bypass
+          - gw
+          - auto
       profile:
         description: '选择软件包空间大小'
         required: true
@@ -240,6 +249,7 @@ jobs:
           echo "${{ github.event.inputs.custom_router_netmask  }}" > "$CUSTOM/custom_router_netmask.txt"
           echo "${{ github.event.inputs.custom_router_gateway  }}" > "$CUSTOM/custom_router_gateway.txt"
           echo "${{ github.event.inputs.custom_router_dns      }}" > "$CUSTOM/custom_router_dns.txt"
+          echo "${{ github.event.inputs.custom_router_mode     }}" > "$CUSTOM/custom_router_mode.txt"
 
           echo "已写入: IP=$(cat "$CUSTOM/custom_router_ip.txt")"
           echo "        掩码=[$(tr -d '\r\n' < "$CUSTOM/custom_router_netmask.txt")]"

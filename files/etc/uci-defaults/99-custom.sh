@@ -1,7 +1,8 @@
 #!/bin/sh
 LOGFILE="/etc/config/uci-defaults-log.txt"
 echo "Starting 99-custom.sh at $(date)" >>$LOGFILE
-uci set firewall.@zone[1].input='ACCEPT'
+# WAN/LAN zone input 改由 crowdsec-lxc-bootstrap 按 name 定责管理
+#（单网口放行 WAN / 多网口收紧 WAN + LAN 放开），不再在此硬设 @zone[N] 索引
 
 uci add dhcp domain
 uci set "dhcp.@domain[-1].name=time.android.com"

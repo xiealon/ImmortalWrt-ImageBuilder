@@ -1,95 +1,128 @@
 #!/bin/bash
-# Log file for debugging
 source shell/custom-packages.sh
+source shell/switch_repository.sh
 echo "第三方软件包: $CUSTOM_PACKAGES"
 LOGFILE="/tmp/uci-defaults-log.txt"
 echo "Starting 99-custom.sh at $(date)" >> $LOGFILE
 echo "编译固件大小为: $PROFILE MB"
-echo "Include Docker: $INCLUDE_DOCKER"
 
-echo "Create pppoe-settings"
-mkdir -p  /home/build/immortalwrt/files/etc/config
+mkdir -p /home/build/immortalwrt/files/etc/config
 
-# 创建pppoe配置文件 yml传入环境变量ENABLE_PPPOE等 写入配置文件 供99-custom.sh读取
-cat << EOF > /home/build/immortalwrt/files/etc/config/pppoe-settings
-enable_pppoe=${ENABLE_PPPOE}
-pppoe_account=${PPPOE_ACCOUNT}
-pppoe_password=${PPPOE_PASSWORD}
-EOF
-
-echo "cat pppoe-settings"
-cat /home/build/immortalwrt/files/etc/config/pppoe-settings
+# custom/ 由 workflow 挂到 /home/build/immortalwrt/custom（v.108.9）。
+# 旧写法直接把 custom 挂到 files/etc/config 上，Docker 的 bind mount 会整体遮蔽
+# 该目录 —— 仓库里固化在 files/etc/config 下的文件（lxc-auto）永远进不了镜像，
+# 镜像落回软件包自带的默认模板。改成挂到独立目录、由这里拷进来：注入的
+# /etc/config/*.txt 照样进镜像，固化的文件也不再被吃掉。
+for _cf in /home/build/immortalwrt/custom/*; do
+    [ -f "$_cf" ] || continue
+    # 固化配置优先：action 注入不该有本事把 lxc-auto 覆盖成别的容器名，
+    # 那会让 lxc-auto 服务拉错容器（或一个都不拉），且现场毫无报错。
+    case "$(basename "$_cf")" in
+        lxc-auto)
+            echo "::warning::custom/ 里出现了 lxc-auto，已忽略（容器配置由 files/etc/config 固化）"
+            continue ;;
+    esac
+    cp -f "$_cf" /home/build/immortalwrt/files/etc/config/ \
+        || { echo "::error::拷贝 $_cf 到 files/etc/config 失败"; exit 1; }
+done
 
 if [ -z "$CUSTOM_PACKAGES" ]; then
   echo "⚪️ 未选择 任何第三方软件包"
 else
-  # ============= 同步第三方插件库==============
-  # 同步第三方软件仓库run/ipk
   echo "🔄 正在同步第三方软件仓库 Cloning run file repo..."
   git clone --depth=1 https://github.com/wukongdaily/store.git /tmp/store-run-repo
 
-  # 拷贝 run/x86 下所有 run 文件和ipk文件 到 extra-packages 目录
   mkdir -p /home/build/immortalwrt/extra-packages
   cp -r /tmp/store-run-repo/run/x86/* /home/build/immortalwrt/extra-packages/
 
   echo "✅ Run files copied to extra-packages:"
   ls -lh /home/build/immortalwrt/extra-packages/*.run
-  # 解压并拷贝ipk到packages目录
   sh shell/prepare-packages.sh
   ls -lah /home/build/immortalwrt/packages/
 fi
 
-# 输出调试信息
 echo "$(date '+%Y-%m-%d %H:%M:%S') - 开始构建固件..."
 
-# ============= imm仓库内的插件==============
-# 定义所需安装的包列表 下列插件你都可以自行删减
 PACKAGES=""
 PACKAGES="$PACKAGES curl"
+PACKAGES="$PACKAGES -dnsmasq dnsmasq-full"
 PACKAGES="$PACKAGES luci-i18n-diskman-zh-cn"
 PACKAGES="$PACKAGES luci-i18n-firewall-zh-cn"
 PACKAGES="$PACKAGES luci-theme-argon"
 PACKAGES="$PACKAGES luci-app-argon-config"
 PACKAGES="$PACKAGES luci-i18n-argon-config-zh-cn"
-#24.10
+
 PACKAGES="$PACKAGES luci-i18n-package-manager-zh-cn"
 PACKAGES="$PACKAGES luci-i18n-ttyd-zh-cn"
-PACKAGES="$PACKAGES luci-i18n-passwall-zh-cn"
-PACKAGES="$PACKAGES luci-app-openclash"
-PACKAGES="$PACKAGES luci-i18n-homeproxy-zh-cn"
-PACKAGES="$PACKAGES openssh-sftp-server"
-PACKAGES="$PACKAGES luci-i18n-samba4-zh-cn"
-# 文件管理器
+PACKAGES="$PACKAGES base-files coreutils-nohup"
+
 PACKAGES="$PACKAGES luci-i18n-filemanager-zh-cn"
-# 静态文件服务器dufs(推荐)
-PACKAGES="$PACKAGES luci-i18n-dufs-zh-cn"
-# ======== shell/custom-packages.sh =======
-# 合并imm仓库以外的第三方插件
 PACKAGES="$PACKAGES $CUSTOM_PACKAGES"
 
+# Docker 包已固定写在 shell/custom-packages.sh 里（v.99-bp.2：纯 X86，不再由开关控制）
 
-# 判断是否需要编译 Docker 插件
-if [ "$INCLUDE_DOCKER" = "yes" ]; then
-    PACKAGES="$PACKAGES luci-i18n-dockerman-zh-cn"
-    echo "Adding package: luci-i18n-dockerman-zh-cn"
-fi
-
-# 若构建openclash 则添加内核
 if echo "$PACKAGES" | grep -q "luci-app-openclash"; then
     echo "✅ 已选择 luci-app-openclash，添加 openclash core"
     mkdir -p files/etc/openclash/core
-    # Download clash_meta
-    META_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/master/meta/clash-linux-amd64.tar.gz"
+    META_URL="https://raw.githubusercontent.com/vernesong/OpenClash/core/master/meta/clash-linux-amd64-v1.tar.gz"
     wget -qO- $META_URL | tar xOvz > files/etc/openclash/core/clash_meta
     chmod +x files/etc/openclash/core/clash_meta
-    # Download GeoIP and GeoSite
     wget -q https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat -O files/etc/openclash/GeoIP.dat
     wget -q https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat -O files/etc/openclash/GeoSite.dat
+    URL=$(curl -s https://api.github.com/repos/vernesong/OpenClash/releases/latest \
+      | grep "browser_download_url.*ipk" \
+      | head -n1 \
+      | cut -d '"' -f 4)
+    echo "OpenClash latest ipk: $URL"
+    wget "$URL" -P /home/build/immortalwrt/packages/
 else
     echo "⚪️ 未选择 luci-app-openclash"
 fi
 
-# 构建镜像
+if echo "$PACKAGES" | grep -q "luci-app-ssr-plus"; then
+    echo "✅ 已选择 luci-app-ssr-plus，添加 mihomo core"
+    mkdir -p files/usr/bin
+    MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/v1.19.24/mihomo-linux-amd64-compatible-v1.19.24.gz"
+    mkdir -p files/usr/bin
+    wget -qO- "$MIHOMO_URL" | gzip -dc > files/usr/bin/mihomo
+    chmod +x files/usr/bin/mihomo
+    echo "✅ 已下载 mihomo core"
+    ls -lah files/usr/bin
+else
+    echo "⚪️ 未选择 luci-app-ssr-plus"
+fi
+
+case " $PACKAGES " in
+    *" luci-i18n-aria2"*)
+        mkdir -p files/aria2
+        chown 6800:6800 files/aria2
+        chmod 775 files/aria2
+        echo "✅ aria2 下载目录 /aria2 已建（编译期）"
+        ;;
+    *)
+        echo "⚪️ 未选择 aria2，跳过 /aria2 目录创建"
+        ;;
+esac
+
+# 出镜像前补齐执行位并逐项断言：路径改名或文件漏拷时让构建直接失败。
+# 不再用 2>/dev/null 把 chmod 的错误吞掉——那样后面那句"已确保可执行"就是在撒谎。
+# 99-custom.sh / 98-lxc-auto.sh 走 uci-defaults 的 `.` 载入，不依赖执行位，所以只在 chmod 里，不进断言表。
+chmod +x files/etc/rc.local \
+         files/etc/uci-defaults/99-custom.sh \
+         files/etc/uci-defaults/98-lxc-auto.sh \
+         files/usr/sbin/crowdsec-lxc-bootstrap.sh \
+         files/usr/sbin/crowdsec-lxc-probe.sh \
+         files/usr/sbin/crowdsec-guard.sh \
+         files/etc/init.d/crowdsec-lxc-probe 2>/dev/null
+for _f in files/etc/rc.local \
+          files/usr/sbin/crowdsec-lxc-bootstrap.sh \
+          files/usr/sbin/crowdsec-lxc-probe.sh \
+          files/usr/sbin/crowdsec-guard.sh \
+          files/etc/init.d/crowdsec-lxc-probe; do
+    [ -x "$_f" ] || { echo "::error::缺少执行位: $_f"; exit 1; }
+done
+echo "==> 已确保 CrowdSec 引导脚本可执行"
+
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Building image with the following packages:"
 echo "$PACKAGES"
 

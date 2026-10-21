@@ -1,0 +1,71 @@
+#!/bin/sh
+# rc.local：开机引导入口（只做前置检查 + 持锁，不含任何修复/安装逻辑）
+LOG=/root/crowdsec-lxc-bootstrap.log
+BOOT=/usr/sbin/crowdsec-lxc-bootstrap.sh
+LOCK=/tmp/.crowdsec-lxc-bootstrap.lock
+
+# ---- 阶段【完整性】：以只读分区为基准复原核心脚本，必须排在任何前置检查之前 ----
+# 顺序是硬要求：bootstrap 被删时下面的存在性检查会直接 exit 0，那样就再没有
+# 机会把它恢复回来。放在前面，前置检查看到的永远是复原后的现场。
+# guard 不负责它自己（被改成 exit 0 就什么都不会复原），所以调用前先自举。
+GUARD=/usr/sbin/crowdsec-guard.sh
+if [ -f "/rom$GUARD" ] && ! cmp -s "/rom$GUARD" "$GUARD" 2>/dev/null; then
+    rm -f "$GUARD"
+    cp -f "/rom$GUARD" "$GUARD" 2>/dev/null
+    chmod 755 "$GUARD" 2>/dev/null
+fi
+[ -x "$GUARD" ] && "$GUARD" quiet
+
+# ---- 阶段【前置检查】：不通过则本轮直接跳过，不动锁、不引导 ----
+# ---- 小步骤 检查引导脚本在位 ----
+[ -f "$BOOT" ] || { echo "[$(date '+%F %T')] 【前置检查】未找到 $BOOT，跳过引导" >>"$LOG"; exit 0; }
+# ---- 小步骤 检查镜像或 rootfs 至少有一份 ----
+# 三样都没有 = 镜像没进固件（生成失败 / 被删 / 刷的是老固件）。
+# v.107.7 起容器恒内置、没有 Include Crowdsec 开关，所以这属于异常，
+# 但不能因此连网络一起放弃：Router IP / 掩码 / 网关 / DNS 已经躺在
+# /etc/config/custom_router_*.txt 里，消费者是 bootstrap 的 PREP 组，与容器无关。
+# 改走 --net-only，只把路由器网络校准好，容器一步不碰 ——
+# 网络是唯一远程入口，保住它才谈得上进后台处理镜像问题。
+if [ -f /etc/crowdsec/lxc-crowdsec.tar.gz ] || [ -f /etc/crowdsec/lxc-ubuntu.tar.gz ] \
+   || [ -f /opt/lxc-ubuntu.tar.gz ] \
+   || [ -d /srv/lxc/ubuntu/rootfs ]; then
+    BOOT_MODE=""
+else
+    BOOT_MODE="--net-only"
+    echo "[$(date '+%F %T')] 【前置检查】无镜像且无 rootfs（异常：容器应恒内置），改走网络基线模式（--net-only）" >>"$LOG"
+fi
+
+chmod +x "$BOOT" 2>/dev/null
+
+echo "[$(date '+%F %T')] 【前置检查】准备引导 CrowdSec 容器" >>"$LOG"
+
+# ---- 阶段【引导锁】：保证同一时刻只有一个 bootstrap 在跑 ----
+# ---- 小步骤 锁残留自愈（v.80）----
+# 注意：存在性检查与锁获取必须分开——若用「! mkdir」探测存在性，无锁时探测本身
+# 会把锁建成，导致紧随的获取点必失败、引导永远走跳过分支。
+if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -mmin +30 2>/dev/null | head -n1)" ]; then
+    # 【v.108.30】锁里现在会写持有者 pid 与落锁时间（探针 _lock_stale 读的就是这两个），
+    # 回收时把现场打进日志 —— 否则「谁卡了三十分钟」永远查不出来。
+    # 用 rm -rf 而不是 rmdir：锁目录里已经有 pid/ts 两个文件，rmdir 会失败，
+    # 失败就等于永不回收。
+    echo "[$(date '+%F %T')] 【引导锁】锁残留超 30 分钟（pid=$(cat "$LOCK/pid" 2>/dev/null)，落锁于 $(cat "$LOCK/ts" 2>/dev/null)），强夺后继续" >>"$LOG"
+    rm -rf "$LOCK" 2>/dev/null
+fi
+# ---- 小步骤 抢占引导锁 ----
+if ! mkdir "$LOCK" 2>/dev/null; then
+    echo "[$(date '+%F %T')] 【引导锁】上一次引导仍在执行（pid=$(cat "$LOCK/pid" 2>/dev/null)），本次跳过" >>"$LOG"
+    exit 0
+fi
+echo "$$" > "$LOCK/pid" 2>/dev/null
+date +%s > "$LOCK/ts" 2>/dev/null
+
+# ---- 阶段【执行引导】：bootstrap 自身按 8 个组链式验证并置位 ----
+# ---- 小步骤 持锁运行 bootstrap ----
+# $BOOT_MODE 故意不加引号：普通模式要展开成零个参数，加了引号会传进一个空串。
+/bin/sh "$BOOT" $BOOT_MODE >>"$LOG" 2>&1
+# ---- 小步骤 释放引导锁 ----
+# 同上：锁里有 pid/ts，rmdir 删不掉非空目录，必须 rm -rf。
+rm -rf "$LOCK" 2>/dev/null
+
+
+exit 0

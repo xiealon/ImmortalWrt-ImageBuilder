@@ -1,0 +1,275 @@
+name: Build 25.12.x x86-64
+
+on:
+  workflow_dispatch:
+    inputs:
+      Luci Version:
+        description: "选择luci版本"
+        required: false
+        default: "25.12.1"
+        type: choice
+        options:
+          - 25.12.0
+          - 25.12.1
+      Router IP:
+        description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
+        required: true
+        default: "10.0.0.201"
+      Router Netmask:
+        description: "子网掩码，留空默认 255.255.255.0。非 /24 时必须在下面显式填网关"
+        required: false
+      Router Gateway:
+        description: "网关地址，留空则自动取管理地址同网段的首个地址(如 192.168.100.1)。非 /24 网段请务必手填"
+        required: false
+        default: "10.0.0.10"
+      Router DNS:
+        description: "DNS 地址，留空则跟随网关"
+        required: false
+      Container IP:
+        description: "CrowdSec 容器固定 IP，留空默认 10.1.0.10（须与网桥 IP 同 /24 网段；编译期写入容器 rootfs，开机由引导脚本建网桥）"
+        required: false
+        default: "10.1.0.10"
+      Bridge IP:
+        description: "lxcbr0 网桥 IP，留空默认 10.1.0.1；同时作为容器的网关和 DNS（掩码固定 255.255.255.0）。网桥/接口由开机引导脚本按此值创建"
+        required: false
+        default: "10.1.0.1"
+      Profile:
+        description: '软件包空间大小（最低 2G：内置 CrowdSec 容器的 rootfs 需要，选 1G 会直接构建失败）'
+        required: true
+        type: choice
+        default: '4G'
+        options:
+          - '2G'
+          - '3G'
+          - '4G'
+      Enable Store:
+        description: "集成 store 商店"
+        required: false
+        type: boolean
+        default: true
+      # 【v.107.7】原来这里有个 Include Crowdsec=yes/no 开关，已删除。
+      # 容器是固件的一部分，不是可选件。留开关的后果：选 no 时 185MB 镜像不进固件，
+      # 而 Router IP / 掩码 / 网关 / DNS 照样写进 custom/*.txt、由开机引导的
+      # PREP 组消费 —— 用户填了地址却不生效，固件停在默认 192.168.1.1，
+      # 日志里只有一行「无镜像且无 rootfs」，看不出根因。锁死，不给这个组合留门。
+      Crowdsec Enroll Key:
+        description: "CrowdSec 控制台注册密钥（app.crowdsec.net 的 enrollment key）；留空则只跑本地 bouncer/LAPI，不开通控制台账号绑定"
+        required: false
+        default: ''
+        type: string
+        
+permissions:
+  contents: write
+
+# 两个 workflow 都往固定 tag（Autobuild-x86-64）发资产，同时跑就是互相覆盖成半成品。
+# 串行化同一条流水线（不取消进行中的），避免 A 的产物被 B 覆盖。
+concurrency:
+  group: imagebuilder-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    # docker run / git clone 卡住会吃满 6 小时默认上限，显式收口
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+
+      - name: Set Executable Permissions
+        run: chmod +x ${{ github.workspace }}/x86-64/build25.sh
+
+      - name: Validate Crowdsec Build Parameters
+        env:
+          CS_KEY: ${{ inputs['Crowdsec Enroll Key'] }}
+          CS_PROFILE: ${{ inputs['Profile'] }}
+          CS_CT_IP_IN: ${{ inputs['Container IP'] }}
+          CS_BRIDGE_IP_IN: ${{ inputs['Bridge IP'] }}
+        run: |
+          # 空间不够不再「自动跳过」：跳过等于变相的 include_crowdsec=no，
+          # 会造出一个「勾了却没有容器」的固件，然后开机时网络也不配、查不出原因。
+          # 这里直接失败，让人把 Profile 调大重跑。
+          case "$CS_PROFILE" in
+            2G|3G|4G|10G) ;;
+            *)
+              echo "::error::Profile=$CS_PROFILE 空间不足：CrowdSec 容器需要 2G 以上 rootfs，请把 Profile 调到 2G / 3G / 4G / 10G 后重跑"
+              exit 1
+              ;;
+          esac
+
+          CS_ENROLL=no
+          if [ -n "$CS_KEY" ]; then
+            CS_ENROLL=yes
+            echo "✅ 已提供注册密钥，将开通控制台账号绑定"
+          else
+            echo "✅ 未提供注册密钥，跳过账号绑定（本地 bouncer/LAPI 功能不受影响）"
+          fi
+
+          if [ "$CS_ENROLL" = "yes" ]; then
+            CUSTOM="${{ github.workspace }}/custom"
+            mkdir -p "$CUSTOM"
+            printf '%s\n' "$CS_KEY" > "$CUSTOM/crowdsec_enroll_key.txt"
+            echo "已写入注册密钥 → custom/crowdsec_enroll_key.txt"
+          fi
+
+          CUSTOM="${{ github.workspace }}/custom"
+          mkdir -p "$CUSTOM"
+          _cs_valid_ip() {
+              printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+              for _o in $(printf '%s' "$1" | tr '.' ' '); do
+                  [ "$_o" -ge 0 ] 2>/dev/null && [ "$_o" -le 255 ] 2>/dev/null || return 1
+              done
+              return 0
+          }
+          _cs_net24() { echo "$1" | awk -F. '{print $1"."$2"."$3}'; }
+          [ -n "$CS_CT_IP_IN" ]     || CS_CT_IP_IN='10.1.0.10'
+          [ -n "$CS_BRIDGE_IP_IN" ] || CS_BRIDGE_IP_IN='10.1.0.1'
+          if ! _cs_valid_ip "$CS_CT_IP_IN"; then
+              echo "::error::custom_container_ip=$CS_CT_IP_IN 不是合法 IPv4，已回退默认 10.1.0.10"
+              CS_CT_IP_IN='10.1.0.10'
+          fi
+          if ! _cs_valid_ip "$CS_BRIDGE_IP_IN"; then
+              echo "::error::custom_bridge_ip=$CS_BRIDGE_IP_IN 不是合法 IPv4，已回退默认 10.1.0.1"
+              CS_BRIDGE_IP_IN='10.1.0.1'
+          fi
+          if [ "$(_cs_net24 "$CS_CT_IP_IN")" != "$(_cs_net24 "$CS_BRIDGE_IP_IN")" ]; then
+              echo "::error::容器 IP($CS_CT_IP_IN) 与网桥 IP($CS_BRIDGE_IP_IN) 不在同一 /24 网段（掩码固定 24 位），已回退默认 10.1.0.10 / 10.1.0.1"
+              CS_CT_IP_IN='10.1.0.10'; CS_BRIDGE_IP_IN='10.1.0.1'
+          fi
+          if [ "$CS_CT_IP_IN" = "$CS_BRIDGE_IP_IN" ]; then
+              echo "::error::容器 IP 不能与网桥 IP 相同($CS_CT_IP_IN)，已回退默认 10.1.0.10 / 10.1.0.1"
+              CS_CT_IP_IN='10.1.0.10'; CS_BRIDGE_IP_IN='10.1.0.1'
+          fi
+          printf '%s\n' "$CS_CT_IP_IN"     > "$CUSTOM/custom_container_ip.txt"
+          printf '%s\n' "$CS_BRIDGE_IP_IN" > "$CUSTOM/custom_bridge_ip.txt"
+          echo "CS_CT_IP=$CS_CT_IP_IN"       >> $GITHUB_ENV
+          echo "CS_BRIDGE_IP=$CS_BRIDGE_IP_IN" >> $GITHUB_ENV
+          echo "容器网络: IP=$CS_CT_IP_IN 网关/DNS=$CS_BRIDGE_IP_IN 掩码=255.255.255.0（已写 custom/*.txt）"
+
+          echo "CS_ENROLL=$CS_ENROLL" >> $GITHUB_ENV
+          echo "校验结果: CS_ENROLL=$CS_ENROLL（容器恒内置，无开关）"
+
+      - name: Save Router Network Config Into OpenWrt Files
+        env:
+          # 走 env 中转：把用户输入直接内插进 run: 时，${{ }} 会先被当作脚本片段展开，
+          # 值里带双引号 / $( ) / ; 就等于一次命令注入。
+          IN_IP: ${{ github.event.inputs['Router IP'] }}
+          IN_NETMASK: ${{ github.event.inputs['Router Netmask'] }}
+          IN_GATEWAY: ${{ github.event.inputs['Router Gateway'] }}
+          IN_DNS: ${{ github.event.inputs['Router DNS'] }}
+        run: |
+          CUSTOM="${{ github.workspace }}/custom"
+          mkdir -p "$CUSTOM"
+
+          printf '%s\n' "$IN_IP"      > "$CUSTOM/custom_router_ip.txt"
+          printf '%s\n' "$IN_NETMASK" > "$CUSTOM/custom_router_netmask.txt"
+          printf '%s\n' "$IN_GATEWAY" > "$CUSTOM/custom_router_gateway.txt"
+          printf '%s\n' "$IN_DNS"     > "$CUSTOM/custom_router_dns.txt"
+
+          echo "已写入: IP=$(cat "$CUSTOM/custom_router_ip.txt")"
+          echo "        掩码=[$(tr -d '\r\n' < "$CUSTOM/custom_router_netmask.txt")]"
+          echo "        网关=[$(tr -d '\r\n' < "$CUSTOM/custom_router_gateway.txt")]"
+          echo "        DNS=[$(tr -d '\r\n' < "$CUSTOM/custom_router_dns.txt")]"
+
+
+      - name: Enable Store Integration
+        run: |
+          if [ "${{ github.event.inputs['Enable Store'] }}" == "true" ]; then
+            echo 'CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-store"' >> shell/apk-custom-packages.sh
+            echo "✅ 已追加 luci-app-store"
+          else
+            echo "❎ 未启用 luci-app-store"
+          fi
+
+      - name: Lint Shell Scripts
+        run: |
+          # 极简 rootfs 阶段：容器能不能起来，全看这几个 shell 脚本。
+          # 语法错误拖到 make image 之后才炸要等一小时，这里 10 秒就拦住。
+          for f in shell/prepare-crowdsec-minimal.sh \
+                   files/usr/sbin/crowdsec-lxc-bootstrap.sh \
+                   files/etc/rc.local \
+                   files/etc/uci-defaults/99-custom.sh; do
+            bash -n "$f" || { echo "::error::$f 语法错误"; exit 1; }
+          done
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -S error shell/prepare-crowdsec-minimal.sh \
+              || { echo "::error::shellcheck 在构建脚本上发现硬错误"; exit 1; }
+          else
+            echo "shellcheck 不在，跳过（bash -n 已过）"
+          fi
+
+      - name: Prepare Crowdsec LXC Rootfs (minimal, no distro layer)
+        run: |
+          chmod +x shell/prepare-crowdsec-minimal.sh
+          RUNAS=""
+          [ "$(id -u)" = "0" ] || RUNAS="sudo -n"
+          $RUNAS env CONTAINER_IP="${CS_CT_IP:-10.1.0.10}" BRIDGE_IP="${CS_BRIDGE_IP:-10.1.0.1}" \
+               bash shell/prepare-crowdsec-minimal.sh
+          echo "容器 rootfs 体积（极简：busybox + 静态 crowdsec，不含发行版层）："
+          ls -lh files/etc/crowdsec/lxc-crowdsec.tar.gz
+          echo "⚠️ 若下一步 make image 报空间不足，请把 profile 调到 2G 或更大"
+
+      - name: Build ImmortalWrt x86-64 EFI 25.12.x
+        run: |
+          profile="${{ github.event.inputs['Profile'] }}"
+          case "$profile" in
+            1G)
+              ROOTFS_SIZE=1024
+              ;;
+            2G)
+              ROOTFS_SIZE=2048
+              ;;
+            3G)
+              ROOTFS_SIZE=3072
+              ;;
+            4G)
+              ROOTFS_SIZE=4096
+              ;;
+            *)
+              echo "::error::未知 profile=$profile（可选 1G/2G/3G/4G）"
+              exit 1
+              ;;
+          esac
+          echo "ROOTFS_SIZE=$ROOTFS_SIZE" >> $GITHUB_ENV
+          luci_version="${{ github.event.inputs['Luci Version'] }}"
+          echo "Building for rootfs_size: $profile"
+          docker run --rm -i \
+            --user root \
+            -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
+            -v "${{ github.workspace }}/files:/home/build/immortalwrt/files" \
+            -v "${{ github.workspace }}/custom:/home/build/immortalwrt/custom" \
+            -v "${{ github.workspace }}/x86-64/imm25.config:/home/build/immortalwrt/.config" \
+            -v "${{ github.workspace }}/shell:/home/build/immortalwrt/shell" \
+            -v "${{ github.workspace }}/x86-64/build25.sh:/home/build/immortalwrt/build.sh" \
+            -e PROFILE=$ROOTFS_SIZE \
+          immortalwrt/imagebuilder:x86-64-openwrt-${luci_version} /bin/bash /home/build/immortalwrt/build.sh
+
+
+      - name: Create Info
+        env:
+          IN_IP: ${{ github.event.inputs['Router IP'] }}
+        run: |
+          {
+            echo '- 🏠 **后台地址**: '"${IN_IP}"
+            echo '- 👤 **用户名**: root'
+            echo '- 🔑 **密码**: 无'
+            echo
+            echo '#### 默认带 docker（LXC + Docker 已内置）'
+            if [ "${{ env.CS_ENROLL }}" = "yes" ]; then
+              echo
+              echo '> ⚠️ **本固件内含 CrowdSec enrollment key**（明文：`/etc/config/crowdsec_enroll_key.txt`）'
+              echo '> 该 key 固定有效、可反复使用。公开分享本固件等于公开注册权限，用完请删除此 Release 资产。'
+            fi
+          } > "${{ github.workspace }}/router-info.md"
+
+      - name: Upload ImmortalWrt Release Assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: Autobuild-x86-64
+          body_path: ${{ github.workspace }}/router-info.md
+          files: |
+            ${{ github.workspace }}/bin/targets/x86/64/*squashfs-combined-efi.img.gz
+          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

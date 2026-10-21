@@ -3,12 +3,8 @@ LOGFILE="/etc/config/uci-defaults-log.txt"
 echo "Starting 99-custom.sh at $(date)" >>$LOGFILE
 # WAN/LAN zone input 改由 crowdsec-lxc-bootstrap 按 name 定责管理
 #（单网口放行 WAN / 多网口收紧 WAN + LAN 放开），不再在此硬设 @zone[N] 索引
-#
-# v.75 起，旁路由网络基线全部搬迁至 crowdsec-lxc-bootstrap（每次开机按需校准）：
-#   br-lan 桥接口 / LAN 静态地址(含 custom_router_ip/gateway/dns/netmask 推导) /
-#   DHCP 让权(ignore) / WAN 禁用 / DNS 劫持(time.android.com) / docker 防火墙
-# v.77 起，dropbear/ttyd 监听面改由 bootstrap 按 LAN zone 定责绑定（不再清空=全监听）
-# 本文件只保留非网络的一次性首启设置
+# v.78-bp 起网络基线（桥/地址/DHCP 让权/WAN 禁用/DNS/docker 防火墙/服务监听面）
+# 全部由 bootstrap 每次开机按需校准；本文件只做非网络的一次性首启设置
 
   uci set luci.main.mediaurlbase="/luci-static/bootstrap"
   uci set luci.main.lang='auto'

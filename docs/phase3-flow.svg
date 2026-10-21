@@ -1,0 +1,151 @@
+<svg width="1020" height="1236" viewBox="0 0 1020 1236" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+  <style>
+    .t{font-size:19px;font-weight:700;fill:#1a202c}
+    .ts{font-size:11.5px;fill:#718096}
+    .b{font-size:12px;font-weight:600;fill:#1a202c}
+    .s{font-size:10px;fill:#4a5568}
+    .mono{font-family:ui-monospace,'SFMono-Regular',Consolas,monospace}
+    .ln{stroke:#94a3b8;stroke-width:1.5;fill:none}
+    .tag{font-size:9px;font-weight:700}
+  </style>
+  <rect x="0" y="0" width="1020" height="1236" fill="#ffffff"/>
+
+  <text x="510" y="30" text-anchor="middle" class="t">v.81 开机后步骤：A/B/C 三步 + step_C 决策树 + tier 3 重装自愈（阶段 3 · BACKUP 旁路由锁定线）</text>
+  <text x="510" y="52" text-anchor="middle" class="ts">stamp 分流：安装态 A→B→C 构造；重启态直接 C；每步 verify 跳过 → fix 一次 → 复验 → 不过即 hard（v.81 一次修复）</text>
+
+  <rect x="36" y="96" width="640" height="64" rx="8" fill="#ebf8ff" stroke="#90cdf4" stroke-width="1.2"/>
+  <text x="52" y="118" class="b" style="font-size:12.5px" fill="#2b6cb0">阶段 3 入口：_stamp_present 判别（installed 标记）</text>
+  <text x="52" y="138" class="s" style="font-size:10px"><tspan class="b">安装态</tspan>（无 stamp，首启纯构造）→ A → B → C 依序执行，缺项修复一次 + 复验</text>
+  <text x="52" y="154" class="s" style="font-size:10px"><tspan class="b">重启态</tspan>（有 stamp，曾完整跑通）→ A/B 不主动治理，直接验证 C；仅 C 失败才复验/修 A/B</text>
+<line x1="356.0" y1="163" x2="356.0" y2="177" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="36" y="180" width="640" height="92" rx="8" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <circle cx="60" cy="201" r="12" fill="#ebf8ff" stroke="#90cdf4" stroke-width="1.2"/>
+  <text x="60" y="205" text-anchor="middle" class="b" fill="#2b6cb0" style="font-size:12px">A</text>
+  <text x="80" y="205" class="b" style="font-size:12.5px">容器内配置治理（网络文件/自启/resolv/日志）</text>
+  <rect x="604" y="188" width="60" height="15" rx="7" fill="#bee3f8"/>
+  <text x="634" y="199" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="52" y="227" class="s" style="font-size:10px"><tspan class="b" fill="#2b6cb0">验</tspan>　五判据与：容器网络文件 · 自启软链与机器身份 · resolv.conf · acquis+解析器 · 日志转发</text>
+  <text x="52" y="244" class="s" style="font-size:10px"><tspan class="b" fill="#2b6cb0">修</tspan>　fix_A 按需补写缺项（幂等写入）+ 容器在运行则重启容器内 crowdsec 使配置生效</text>
+  <text x="52" y="263" class="s mono" style="font-size:9px;fill:#a0aec0">verify_A · fix_A（setup_container_network/boot/resolv/acquis/log_forward）</text>
+<line x1="356.0" y1="275" x2="356.0" y2="289" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="36" y="292" width="640" height="92" rx="8" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <circle cx="60" cy="313" r="12" fill="#ebf8ff" stroke="#90cdf4" stroke-width="1.2"/>
+  <text x="60" y="317" text-anchor="middle" class="b" fill="#2b6cb0" style="font-size:12px">B</text>
+  <text x="80" y="317" class="b" style="font-size:12.5px">crowdsec 配置与 bouncer 链路治理</text>
+  <rect x="604" y="300" width="60" height="15" rx="7" fill="#bee3f8"/>
+  <text x="634" y="311" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="52" y="339" class="s" style="font-size:10px"><tspan class="b" fill="#2b6cb0">验</tspan>　listen_uri · trusted_ips · 容器 config 三文件 + 宿主机服务活 + nft 表 + 注册态</text>
+  <text x="52" y="356" class="s" style="font-size:10px"><tspan class="b" fill="#2b6cb0">修</tspan>　fix_B：按需补写三文件 + 屏蔽 online_client → uci_apply → 等 LAPI 90s → 注册一次 → 起服务 → 等 nft 表</text>
+  <text x="52" y="375" class="s mono" style="font-size:9px;fill:#a0aec0">verify_B · fix_B（_bouncer_register_once · _ensure_bouncer_service）</text>
+<line x1="356.0" y1="387" x2="356.0" y2="401" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="36" y="404" width="640" height="92" rx="8" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <circle cx="60" cy="425" r="12" fill="#ebf8ff" stroke="#90cdf4" stroke-width="1.2"/>
+  <text x="60" y="429" text-anchor="middle" class="b" fill="#2b6cb0" style="font-size:12px">C</text>
+  <text x="80" y="429" class="b" style="font-size:12.5px">last_pull 验证（无修复动作）</text>
+  <rect x="604" y="412" width="60" height="15" rx="7" fill="#e9d8fd"/>
+  <text x="634" y="423" text-anchor="middle" class="tag" fill="#6b46c1">验证/决策</text>
+  <text x="52" y="451" class="s" style="font-size:10px"><tspan class="b" fill="#2b6cb0">验</tspan>　_wait_lapi_ready 90 纯等待 + bouncer_pulling（last_pull 600s 新鲜度）</text>
+  <text x="52" y="468" class="s" style="font-size:10px"><tspan class="b" fill="#2b6cb0">修</tspan>　纯等待窗口 60s（12×5s）；仍败 → 决策树：复验 A/B → 一次修复 → 判损坏重装 / hard</text>
+  <text x="52" y="487" class="s mono" style="font-size:9px;fill:#a0aec0">step_C · _sc_wait_pull · bouncer_pulling</text>
+<line x1="356.0" y1="499" x2="356.0" y2="513" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="36" y="516" width="640" height="92" rx="8" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <circle cx="60" cy="537" r="12" fill="#ebf8ff" stroke="#90cdf4" stroke-width="1.2"/>
+  <text x="60" y="541" text-anchor="middle" class="b" fill="#2b6cb0" style="font-size:12px">⑤</text>
+  <text x="80" y="541" class="b" style="font-size:12.5px">CAPI online_client 放出</text>
+  <rect x="604" y="524" width="60" height="15" rx="7" fill="#bee3f8"/>
+  <text x="634" y="535" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="52" y="563" class="s" style="font-size:10px"><tspan class="b" fill="#2b6cb0">验</tspan>　config.yaml 中 online_client 未注释（CAPI 经 LAPI 后启用）</text>
+  <text x="52" y="580" class="s" style="font-size:10px"><tspan class="b" fill="#2b6cb0">修</tspan>　ensure_online_client_on（取消注释 + credentials 回 online）</text>
+  <text x="52" y="599" class="s mono" style="font-size:9px;fill:#a0aec0">verify_online_client_on · ensure_online_client_on</text>
+<line x1="356.0" y1="611" x2="356.0" y2="625" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="36" y="628" width="640" height="92" rx="8" fill="#ffffff" stroke="#fbd38d" stroke-width="1"/>
+  <circle cx="60" cy="649" r="12" fill="#ebf8ff" stroke="#90cdf4" stroke-width="1.2"/>
+  <text x="60" y="653" text-anchor="middle" class="b" fill="#2b6cb0" style="font-size:12px">⑥</text>
+  <text x="80" y="653" class="b" style="font-size:12.5px">console enroll</text>
+  <rect x="604" y="636" width="60" height="15" rx="7" fill="#feebc8"/>
+  <text x="634" y="647" text-anchor="middle" class="tag" fill="#dd6b20">例外</text>
+  <text x="52" y="675" class="s" style="font-size:10px"><tspan class="b" fill="#2b6cb0">验</tspan>　cscli capi status 已 Enrolled</text>
+  <text x="52" y="692" class="s" style="font-size:10px"><tspan class="b" fill="#2b6cb0">修</tspan>　re_enroll 一次 shot：命令成功但 10 秒内未显示 Enrolled（等网站人工 Accept）算过</text>
+  <text x="52" y="711" class="s mono" style="font-size:9px;fill:#a0aec0">phase3_step_enroll · re_enroll</text>
+
+  <rect x="700" y="96" width="284" height="300" rx="8" fill="#faf5ff" stroke="#d6bcfa" stroke-width="1"/>
+  <rect x="700" y="96" width="284" height="26" rx="8" fill="#6b46c1"/>
+  <rect x="700" y="112" width="284" height="10" fill="#6b46c1"/>
+  <text x="842.0" y="114" text-anchor="middle" class="tag" fill="#ffffff" style="font-size:11px">step_C() 决策树（安装态/重启态共用）</text>
+<text x="714" y="138" class="b" style="font-size:9.5px">① _wait_lapi_ready 90（纯等待）</text>
+<text x="714" y="153" class="s" style="font-size:9.5px">　bouncer_pulling 真 → 就绪 return 0</text>
+<text x="714" y="172" class="b" style="font-size:9.5px">② verify_lapi_ready 真 → _sc_wait_pull</text>
+<text x="714" y="187" class="s" style="font-size:9.5px">　60s 纯等待窗口（12×5s，只观察）</text>
+<text x="714" y="202" class="s" style="font-size:9.5px">　last_pull 刷新 → 就绪 return 0</text>
+<text x="714" y="221" class="b" style="font-size:9.5px">③ 仍未就绪 → 复验 A/B 定位根因</text>
+<text x="714" y="237" class="s" style="font-size:9.5px">　├ A/B 全正常 → 配置正确 = 容器损坏</text>
+<text x="714" y="252" class="s" style="font-size:9.5px">　│　→ 五道门 → full_reinstall 重装</text>
+<text x="714" y="267" class="s" style="font-size:9.5px">　│　门拒/exec 未接管 → hard exit 1</text>
+<text x="714" y="286" class="s" style="font-size:9.5px">　└ A/B 有缺项 → fix_A/fix_B 一次</text>
+<text x="714" y="301" class="s" style="font-size:9.5px">　　复验 A/B 正常 → 再等一轮 ①+②</text>
+<text x="714" y="316" class="s" style="font-size:9.5px">　　　├ 恢复 → return 0</text>
+<text x="714" y="331" class="s" style="font-size:9.5px">　　　├ 仍拉不到 → 容器损坏 → 重装</text>
+<text x="714" y="346" class="s" style="font-size:9.5px">　　　└ 修不好 → hard exit 1</text>
+
+  <rect x="710" y="358" width="264" height="28" rx="5" fill="#ffffff" stroke="#d6bcfa" stroke-width="1"/>
+  <text x="842.0" y="376" text-anchor="middle" class="s" style="font-size:9.5px">等待与修复严格分离：①②只 sleep+探测，③ 才动 A/B</text>
+
+  <rect x="712" y="410" width="260" height="150" rx="6" fill="#fffaf0" stroke="#fbd38d" stroke-width="1"/>
+  <text x="724" y="432" class="b" style="font-size:10.5px" fill="#dd6b20">enroll 例外（⑥）</text>
+  <text x="724" y="452" class="s" style="font-size:9.5px">phase3_step_enroll：</text>
+  <text x="724" y="467" class="s" style="font-size:9.5px">fix 返 0 即过，不做事后</text>
+  <text x="724" y="482" class="s" style="font-size:9.5px">复核——命令成功但 10 秒</text>
+  <text x="724" y="497" class="s" style="font-size:9.5px">内未 Enrolled 是等网站</text>
+  <text x="724" y="512" class="s" style="font-size:9.5px">人工 Accept 的合法中间态，</text>
+  <text x="724" y="527" class="s" style="font-size:9.5px">复核会误杀</text>
+  <text x="724" y="546" class="s" style="font-size:9.5px">无注册码（key 文件为空）</text>
+  <text x="724" y="561" class="s" style="font-size:9.5px">→ 记日志跳过，本地防护</text>
+  <text x="724" y="576" class="s" style="font-size:9.5px">不受影响</text>
+
+  <text x="714" y="600" class="b" style="font-size:10.5px" fill="#2b6cb0">与构建七步的分工</text>
+  <text x="714" y="616" class="s" style="font-size:9.5px">构建七步：容器内产物就绪</text>
+  <text x="714" y="631" class="s" style="font-size:9.5px">（rootfs 落盘，boot 组内）</text>
+  <text x="714" y="646" class="s" style="font-size:9.5px">本链：服务真的通（A→B→C）</text>
+  <text x="714" y="671" class="b" style="font-size:10.5px" fill="#c53030">已取消：深修链 9 函数（v.81）</text>
+  <text x="714" y="687" class="s" style="font-size:9.5px">_bouncer_heal · _crowdsec_repair ·</text>
+  <text x="714" y="702" class="s" style="font-size:9.5px">_restart_bouncer_service ·</text>
+  <text x="714" y="717" class="s" style="font-size:9.5px">_fix_lapi_ready · _fix_bouncer_link ·</text>
+  <text x="714" y="732" class="s" style="font-size:9.5px">verify_bouncer_link · verify_container_boot</text>
+  <text x="714" y="747" class="s" style="font-size:9.5px">+ _fix_container_boot · setup_crowdsec_config</text>
+  <text x="714" y="766" class="s" style="font-size:9.5px">→ 剩余动作全是幂等写入，首启不跑修复</text>
+
+  <rect x="712" y="782" width="260" height="142" rx="6" fill="#fff5f5" stroke="#fc8181" stroke-width="1"/>
+  <text x="724" y="804" class="b" style="font-size:10.5px" fill="#c53030">tier 3 重装自愈（C 失败判损坏）</text>
+  <text x="724" y="822" class="s" style="font-size:9.5px">五道门全过才抹 rootfs：</text>
+  <text x="724" y="837" class="s" style="font-size:9.5px">① last_pull 仍失效（已恢复→无益）</text>
+  <text x="724" y="852" class="s" style="font-size:9.5px">② installed 标记在位（曾跑通）</text>
+  <text x="724" y="867" class="s" style="font-size:9.5px">③ 失败计数 &lt; 2（达到转人工）</text>
+  <text x="724" y="882" class="s" style="font-size:9.5px">④ 非重装后流程（禁递归）</text>
+  <text x="724" y="897" class="s" style="font-size:9.5px">⑤ 镜像 gzip -t 过</text>
+  <text x="724" y="915" class="s" style="font-size:9.5px">全过 → 备份凭证 → 强停 → 抹 rootfs</text>
+
+  <rect x="36" y="948" width="948" height="252" rx="10" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="52" y="970" class="b" style="font-size:12.5px">两个刻意保留的合法放行</text>
+  <text x="52" y="990" class="s" style="font-size:10px">① enroll 的「命令成功但 10 秒内未显示 Enrolled」（等网站人工 Accept）算通过——phase3_step_enroll 信 fix 自带终态判定；</text>
+  <text x="52" y="1007" class="s" style="font-size:10px">② 未配置注册码（$ENROLL_KEY_FILE 缺失或为空）→ 明确记日志跳过 enroll，本地防护不受影响（不因可选功能让开机失败）。</text>
+  <text x="52" y="1030" class="b" style="font-size:12.5px">开机已并入 DAG boot 组（v.81）</text>
+  <text x="52" y="1050" class="s" style="font-size:10px">build_ct_boot 开头做启动链内容级前置检查（verify_ct_config + verify_rootfs）：缺链不开机、不重写、不重建，复核不过即 hard——</text>
+  <text x="52" y="1067" class="s" style="font-size:10px">容器级损坏不在此处盲目施救，留给 C 失败链判重装；_ct_revive 退为纯 revive（启动链共用）。</text>
+  <text x="52" y="1090" class="b" style="font-size:12.5px">一次修复 + stamp 分流 + 等待与修复分离（v.81 三原则）</text>
+  <text x="52" y="1110" class="s" style="font-size:10px">① 三处循环（ensure / ensure_sub / phase3_step）全部单次化：安装顺序保证前置就绪，修一次不过即 hard，「多修复一次没必要」；</text>
+  <text x="52" y="1127" class="s" style="font-size:10px">② 首启/重启以 installed stamp 判别：重启态健康路径只跑 C（last_pull 为健康信号），A/B 退化静默由 C 失败兜底；</text>
+  <text x="52" y="1144" class="s" style="font-size:10px">③ C 的等待（90s + 60s 窗口）不夹带任何写入/重启——刚注册完 bouncer 有拉取周期，无窗口会把「刚修好」误判「容器损坏」。</text>
+  <text x="52" y="1167" class="b" style="font-size:12.5px" fill="#c53030">tier 3 重装自愈（C 失败且 A/B 复验正常 → 判容器损坏）</text>
+  <text x="52" y="1186" class="s" style="font-size:10px">安装态（无 stamp）门② 必拒——初次安装不运行，防开机反复重置；五门全过：备份凭证 → 强停容器 → 抹 rootfs → REINSTALL=1 二遍，成功写 stamp 即清零</text>
+  <text x="52" y="1194" class="s mono" style="font-size:9px;fill:#a0aec0">main() 阶段 3：[REINSTALL=1 → _cred_restore] → [_recovering → shield] → _stamp_present ? step_C : (verify_A→fix_A) → (verify_B→fix_B) → step_C → online_client 放出</text>
+</svg>

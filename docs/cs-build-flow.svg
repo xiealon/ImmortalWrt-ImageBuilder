@@ -1,0 +1,148 @@
+<svg width="1020" height="1080" viewBox="0 0 1020 1080" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+  <style>
+    .t{font-size:19px;font-weight:700;fill:#1a202c}
+    .ts{font-size:11.5px;fill:#718096}
+    .b{font-size:12px;font-weight:600;fill:#1a202c}
+    .s{font-size:10px;fill:#4a5568}
+    .mono{font-family:ui-monospace,'SFMono-Regular',Consolas,monospace}
+    .ln{stroke:#94a3b8;stroke-width:1.5;fill:none}
+    .tag{font-size:9px;font-weight:700}
+  </style>
+  <rect x="0" y="0" width="1020" height="1080" fill="#ffffff"/>
+
+  <text x="510" y="30" text-anchor="middle" class="t">v.81 容器内构建七步 ensure+hard 全貌（构建 crowdsec 的每一步 · BACKUP 旁路由锁定线）</text>
+  <text x="510" y="52" text-anchor="middle" class="ts">boot 组 prepare_container 节点内部：每步 verify 就绪跳过 → 构建 → 复核，至多一次，一次不过即 hard 终止引导</text>
+
+  <rect x="36" y="96" width="640" height="86" rx="8" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <circle cx="60" cy="117" r="12" fill="#faf5ff" stroke="#d6bcfa" stroke-width="1.2"/>
+  <text x="60" y="121" text-anchor="middle" class="b" fill="#6b46c1" style="font-size:12px">①</text>
+  <text x="80" y="121" class="b" style="font-size:12.5px">容器网络文件（IP/网关/DNS）</text>
+  <rect x="618" y="104" width="46" height="15" rx="7" fill="#bee3f8"/>
+  <text x="641" y="115" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="52" y="142" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">验</tspan>　10-eth0.network 三值：Address=CONTAINER_IP/24 · Gateway=BRIDGE_IP · DNS 一致</text>
+  <text x="52" y="159" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">建</tspan>　setup_container_network（产物不符才跑；就绪则整步跳过）</text>
+  <text x="52" y="175" class="s mono" style="font-size:9px;fill:#a0aec0">verify_sub_ct_net · setup_container_network</text>
+<line x1="356.0" y1="185" x2="356.0" y2="205" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="36" y="208" width="640" height="86" rx="8" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <circle cx="60" cy="229" r="12" fill="#faf5ff" stroke="#d6bcfa" stroke-width="1.2"/>
+  <text x="60" y="233" text-anchor="middle" class="b" fill="#6b46c1" style="font-size:12px">②</text>
+  <text x="80" y="233" class="b" style="font-size:12.5px">自启软链与机器身份</text>
+  <rect x="618" y="216" width="46" height="15" rx="7" fill="#bee3f8"/>
+  <text x="641" y="227" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="52" y="254" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">验</tspan>　multi-user.target.wants 软链（rootfs 内有 service 文件才要求）· hostname=crowdsec · machine-id</text>
+  <text x="52" y="271" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">建</tspan>　setup_container_boot（产物不符才跑；就绪则整步跳过）</text>
+  <text x="52" y="287" class="s mono" style="font-size:9px;fill:#a0aec0">verify_sub_ct_bootlink · setup_container_boot</text>
+<line x1="356.0" y1="297" x2="356.0" y2="317" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="36" y="320" width="640" height="86" rx="8" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <circle cx="60" cy="341" r="12" fill="#faf5ff" stroke="#d6bcfa" stroke-width="1.2"/>
+  <text x="60" y="345" text-anchor="middle" class="b" fill="#6b46c1" style="font-size:12px">③</text>
+  <text x="80" y="345" class="b" style="font-size:12.5px">resolv.conf</text>
+  <rect x="618" y="328" width="46" height="15" rx="7" fill="#bee3f8"/>
+  <text x="641" y="339" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="52" y="366" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">验</tspan>　内容 = nameserver「容器 DNS」（custom_router_dns.txt → BRIDGE_IP → 10.1.0.1 回落链）</text>
+  <text x="52" y="383" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">建</tspan>　setup_resolv（产物不符才跑；就绪则整步跳过）</text>
+  <text x="52" y="399" class="s mono" style="font-size:9px;fill:#a0aec0">verify_sub_ct_resolv · setup_resolv</text>
+<line x1="356.0" y1="409" x2="356.0" y2="429" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="36" y="432" width="640" height="86" rx="8" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <circle cx="60" cy="453" r="12" fill="#faf5ff" stroke="#d6bcfa" stroke-width="1.2"/>
+  <text x="60" y="457" text-anchor="middle" class="b" fill="#6b46c1" style="font-size:12px">④</text>
+  <text x="80" y="457" class="b" style="font-size:12.5px">日志源与解析器（acquis/parsers）</text>
+  <rect x="618" y="440" width="46" height="15" rx="7" fill="#bee3f8"/>
+  <text x="641" y="451" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="52" y="478" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">验</tspan>　acquis.d/router.yaml · parsers/s01-parse/openwrt-dropbear.yaml · parsers/s02-enrich/openwrt-whitelist.yaml</text>
+  <text x="52" y="495" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">建</tspan>　setup_acquis（产物不符才跑；就绪则整步跳过）</text>
+  <text x="52" y="511" class="s mono" style="font-size:9px;fill:#a0aec0">verify_sub_cs_acquis · setup_acquis</text>
+<line x1="356.0" y1="521" x2="356.0" y2="541" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="36" y="544" width="640" height="86" rx="8" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <circle cx="60" cy="565" r="12" fill="#faf5ff" stroke="#d6bcfa" stroke-width="1.2"/>
+  <text x="60" y="569" text-anchor="middle" class="b" fill="#6b46c1" style="font-size:12px">⑤</text>
+  <text x="80" y="569" class="b" style="font-size:12.5px">listen_uri 监听地址</text>
+  <rect x="618" y="552" width="46" height="15" rx="7" fill="#bee3f8"/>
+  <text x="641" y="563" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="52" y="590" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">验</tspan>　config.yaml 的 listen_uri = 0.0.0.0:LAPI_PORT（bouncer 要经网桥连进来）</text>
+  <text x="52" y="607" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">建</tspan>　ensure_listen_uri（产物不符才跑；就绪则整步跳过）</text>
+  <text x="52" y="623" class="s mono" style="font-size:9px;fill:#a0aec0">verify_sub_cs_listen · ensure_listen_uri</text>
+<line x1="356.0" y1="633" x2="356.0" y2="653" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="36" y="656" width="640" height="86" rx="8" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <circle cx="60" cy="677" r="12" fill="#faf5ff" stroke="#d6bcfa" stroke-width="1.2"/>
+  <text x="60" y="681" text-anchor="middle" class="b" fill="#6b46c1" style="font-size:12px">⑥</text>
+  <text x="80" y="681" class="b" style="font-size:12.5px">trusted_ips 网桥地址</text>
+  <rect x="618" y="664" width="46" height="15" rx="7" fill="#bee3f8"/>
+  <text x="641" y="675" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="52" y="702" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">验</tspan>　config.yaml 的 trusted_ips 含 BRIDGE_IP（放行容器网段来源的 API 调用）</text>
+  <text x="52" y="719" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">建</tspan>　ensure_trusted_ip（产物不符才跑；就绪则整步跳过）</text>
+  <text x="52" y="735" class="s mono" style="font-size:9px;fill:#a0aec0">verify_sub_cs_trusted · ensure_trusted_ip</text>
+<line x1="356.0" y1="745" x2="356.0" y2="765" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="36" y="768" width="640" height="86" rx="8" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <circle cx="60" cy="789" r="12" fill="#faf5ff" stroke="#d6bcfa" stroke-width="1.2"/>
+  <text x="60" y="793" text-anchor="middle" class="b" fill="#6b46c1" style="font-size:12px">⑦</text>
+  <text x="80" y="793" class="b" style="font-size:12.5px">容器 config 落盘</text>
+  <rect x="618" y="776" width="46" height="15" rx="7" fill="#bee3f8"/>
+  <text x="641" y="787" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="52" y="814" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">验</tspan>　$CFG 内容完整：rootfs.path / utsname / net.0.type 三键在位（不只验文件名）</text>
+  <text x="52" y="831" class="s" style="font-size:10px"><tspan class="b" fill="#6b46c1">建</tspan>　apply_cfg（原子写 tmp + 非空校验才落盘；lxc-info 解析 trim）（产物不符才跑；就绪则整步跳过）</text>
+  <text x="52" y="847" class="s mono" style="font-size:9px;fill:#a0aec0">verify_sub_ct_cfg · apply_cfg · apply_cfg（原子写 tmp + 非空校验才落盘；lxc-info 解析 trim）</text>
+
+  <rect x="700" y="96" width="284" height="758" rx="8" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="700" y="96" width="284" height="30" rx="8" fill="#6b46c1"/>
+  <rect x="700" y="116" width="284" height="10" fill="#6b46c1"/>
+  <text x="842.0" y="116" text-anchor="middle" class="gt" fill="#ffffff" style="font-size:12px;font-weight:700">单步内部机制 ensure_sub()</text>
+<text x="718" y="146" class="b" style="font-size:10.5px">verify 判定（即时探测产物）</text>
+<line x1="722" y1="154" x2="722" y2="178" class="ln"/>
+<text x="730" y="168" class="s" style="font-size:9.5px">就绪 → 跳过，return 0</text>
+<line x1="722" y1="178" x2="722" y2="200" class="ln" marker-end="url(#ar)"/>
+<text x="730" y="192" class="s" style="font-size:9.5px">不符 → 进入修复</text>
+<text x="718" y="218" class="b" style="font-size:10.5px">一次构建 → 复核</text>
+<line x1="722" y1="226" x2="722" y2="250" class="ln"/>
+<text x="730" y="240" class="s" style="font-size:9.5px">通过 → return 0</text>
+<line x1="722" y1="250" x2="722" y2="272" class="ln" marker-end="url(#ar)"/>
+<text x="730" y="264" class="s" style="font-size:9.5px">失败/仍不符 ↓</text>
+
+  <rect x="712" y="282" width="260" height="34" rx="6" fill="#fff5f5" stroke="#fc8181" stroke-width="1"/>
+  <text x="842.0" y="303" text-anchor="middle" class="b" fill="#c53030" style="font-size:10.5px">hard：日志 + exit 1 终止引导</text>
+<text x="718" y="344" class="s" style="font-size:9.5px">与 DAG ensure() 同构（v.81</text>
+<text x="718" y="359" class="s" style="font-size:9.5px">起均单次）；但不写</text>
+<text x="718" y="374" class="s" style="font-size:9.5px">_done/_dirty/_failed——外层</text>
+<text x="718" y="389" class="s" style="font-size:9.5px">prepare_container 同为一次</text>
+<text x="718" y="404" class="s" style="font-size:9.5px">机会，内层状态不得残留误跳过</text>
+<text x="718" y="440" class="b" style="font-size:10.5px" fill="#6b46c1">失败定位到步</text>
+<text x="718" y="456" class="s" style="font-size:9.5px">日志精确到步名；且后续步</text>
+<text x="718" y="471" class="s" style="font-size:9.5px">不执行——失败即停，不跑无用步</text>
+
+  <rect x="712" y="494" width="260" height="104" rx="6" fill="#fffaf0" stroke="#fbd38d" stroke-width="1"/>
+  <text x="724" y="516" class="b" style="font-size:10.5px" fill="#dd6b20">为什么只修一次（v.81）</text>
+  <text x="724" y="535" class="s" style="font-size:9.5px">安装顺序保证前置条件已就绪；</text>
+  <text x="724" y="550" class="s" style="font-size:9.5px">修一次不过 = 非瞬态故障，</text>
+  <text x="724" y="565" class="s" style="font-size:9.5px">再修一次大概率同样结果——</text>
+  <text x="724" y="580" class="s" style="font-size:9.5px">直接 hard 让人介入更快</text>
+
+  <rect x="712" y="616" width="260" height="128" rx="6" fill="#faf5ff" stroke="#d6bcfa" stroke-width="1"/>
+  <text x="724" y="638" class="b" style="font-size:10.5px" fill="#6b46c1">与阶段 3 A/B 的归口（v.81）</text>
+  <text x="724" y="657" class="s" style="font-size:9.5px">④ acquis+解析器 → 步骤 A 判据</text>
+  <text x="724" y="672" class="s" style="font-size:9.5px">⑤⑥ listen_uri/trusted_ips → 步骤 B</text>
+  <text x="724" y="687" class="s" style="font-size:9.5px">⑦ 容器 config → 步骤 B</text>
+  <text x="724" y="706" class="s" style="font-size:9.5px">组合函数 setup_crowdsec_config 与</text>
+  <text x="724" y="721" class="s" style="font-size:9.5px">深修链 _crowdsec_repair 已删——</text>
+  <text x="724" y="736" class="s" style="font-size:9.5px">重启态缺项由 fix_A/fix_B 按需补写</text>
+
+  <rect x="36" y="880" width="948" height="176" rx="10" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="52" y="902" class="b" style="font-size:12.5px">为什么每一步都 hard</text>
+  <text x="52" y="924" class="s" style="font-size:10px">非确定性步骤软容忍后，重跑还是会卡到同一处——与其带着坏产物继续（缺 parser 的 crowdsec 等于没防护），不如终止让人介入。</text>
+  <text x="52" y="944" class="s" style="font-size:10px">原 prepare_container 一把梭五连写（任一子失败仅整体 return 1，难定位、且 verify 只认整体快照）已删除，七步判定标准与原整体 verify 完全一致。</text>
+  <text x="52" y="968" class="b" style="font-size:11px" fill="#c53030">enroll 例外</text>
+  <text x="52" y="986" class="s" style="font-size:10px">console enroll 不在此链——它需要人工到网站 Accept（命令成功但 10 秒内未显示 Enrolled 是合法中间态），保留阶段 3 原做法：一次 shot，不进 hard 循环。</text>
+  <text x="52" y="1010" class="b" style="font-size:11px">v.81 一次修复（三处循环单次化）</text>
+  <text x="52" y="1028" class="s" style="font-size:10px">ensure / ensure_sub / phase3_step 的「至多两次」全部改为一次：安装顺序保证前置条件已就绪，多修复一次没必要（用户已确认）。</text>
+  <text x="52" y="1048" class="s mono" style="font-size:9px;fill:#a0aec0">build_prepare_container() → ensure_sub "步名" verify_sub_* build_*（×7） · verify_prepare_container = 七者汇总（快照等价）</text>
+</svg>

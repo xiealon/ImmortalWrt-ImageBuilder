@@ -1,0 +1,16 @@
+# 凭据与密钥：任何情况下都不得入库
+.secrets/
+*.enc
+key.hex
+*.pem
+*.key
+id_rsa*
+.env
+.env.*
+token.txt
+*_token.txt
+
+# 本地构建/临时产物
+*.log
+*.tmp
+.DS_Store

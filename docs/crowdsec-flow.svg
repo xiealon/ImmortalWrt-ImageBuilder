@@ -1,4 +1,4 @@
-<svg width="740" height="4020" viewBox="0 0 740 4020" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+<svg width="740" height="4128" viewBox="0 0 740 4128" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
   <defs>
     <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#4a5568"/></marker>
     <marker id="arrRed" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 z" fill="#c53030"/></marker>
@@ -32,7 +32,7 @@
   </style>
   <rect x="0" y="0" width="740" height="4096" fill="#ffffff"/>
   <text x="370" y="26" class="title" text-anchor="middle">CrowdSec LXC · 详细流程架构图</text>
-  <text x="370" y="44" class="ver" text-anchor="middle">v.2026-10-17.76 ｜ ①.a 式小步骤框；◆=判定框，分支轨迹绕右车道连到目标步（竖排标签）｜ 重建=强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
+  <text x="370" y="44" class="ver" text-anchor="middle">v.2026-10-18.78-bp ｜ ①.a 式小步骤框；◆=判定框，分支轨迹绕右车道连到目标步（竖排标签）｜ 重建=强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
   <text x="370" y="58" class="ver" text-anchor="middle">实线=正常流 ｜ 紫框+标签=判定分支 ｜ 红虚线+红块=失败/exit 1 ｜ 灰虚线+灰块=exit 0 ｜ 橙虚线=告警/放弃/回路 ｜ 绿=有效</text>
 
   <rect x="14" y="66" width="692" height="58" rx="7" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>
@@ -490,4 +490,10 @@
   <text x="32" y="3968" class="ndl">令成功即放行，60s 等不到 Enrolled 不回滚，提示前往网站 Accept</text>
   <text x="32" y="3982" class="ndl">SNAT 与 CAPI 分流：bouncer↔LAPI 走本地桥接不经 SNAT；SNAT 只管容器上外网——拉黑名单、enroll 连 app.crowdsec.net；last_p</text>
   <text x="32" y="3996" class="ndl">ull 失效不依赖 SNAT，故校验放在 enroll 步（⑪，v.66）</text>
+  <rect x="20" y="4016" width="660" height="96" rx="7" fill="#fffaf0" stroke="#f6ad55" stroke-width="1"/>
+  <text x="32" y="4032" class="sub2">注意事项</text>
+  <text x="32" y="4052" class="ndl">注意 1：开机需要先进行一次重启，刷新设备的网络接口</text>
+  <text x="32" y="4066" class="ndl">注意 2：crowdsec 的初次运行需要时间自动进行初始化安装，无需网络也可以自动集成（大概 30s）</text>
+  <text x="32" y="4080" class="ndl">注意 3：防火墙里面的 NAT 规则 LXC-SNAT 不要动它，它会在编译时自动修改对应 IP 地址到出接口的 IP（src 区域固定为</text>
+  <text x="32" y="4094" class="ndl">lan，即出口区域；网络部分按对象独立验证，enroll 前按需校验 SNAT 规则与 ip_forward，不符自动重建）</text>
 </svg>

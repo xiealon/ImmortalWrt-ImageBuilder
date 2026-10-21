@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1360" height="1266" viewBox="0 0 1360 1266">
+<style>
+  .t   { font: 600 22px "Noto Sans CJK SC",sans-serif; fill:#1a202c; }
+  .ts  { font: 400 12.5px "Noto Sans CJK SC",sans-serif; fill:#4a5568; }
+  .g   { font: 700 15px "JetBrains Mono","Consolas",monospace; }
+  .gt  { font: 500 12.5px "Noto Sans CJK SC",sans-serif; fill:#2d3748; }
+  .n   { font: 400 11.5px "JetBrains Mono","Consolas",monospace; fill:#2d3748; }
+  .lg  { font: 400 12.5px "Noto Sans CJK SC",sans-serif; fill:#2d3748; }
+  .lb  { font: 600 12.5px "Noto Sans CJK SC",sans-serif; }
+  .sm  { font: 400 11px "Noto Sans CJK SC",sans-serif; fill:#4a5568; }
+  .code{ font: 400 11px "JetBrains Mono","Consolas",monospace; fill:#2d3748; }
+</style>
+<rect width="1360" height="1266" fill="#ffffff"/>
+<text x="680" y="38" text-anchor="middle" class="t">LAPI 组细部：取 LAPI → 填入 bouncer → 重启宿主机服务</text>
+<text x="680" y="60" text-anchor="middle" class="ts">crowdsec-lxc-bootstrap.sh · LAPI 组 · lapi_fetch + bouncer_fill · 排在 BOOT 之后、BOUNCERVERIFY 之前</text>
+<defs>
+  <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+    <path d="M0,0 L9,4.5 L0,9 z" fill="#a0aec0"/>
+  </marker>
+  <marker id="arR" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+    <path d="M0,0 L9,4.5 L0,9 z" fill="#c53030"/>
+  </marker>
+</defs>
+<rect x="40" y="96" width="1280" height="74" rx="8" fill="#f0fff4" stroke="#38a169" stroke-width="1.6"/>
+<circle cx="76" cy="126" r="16" fill="#2c7a7b"/>
+<text x="76" y="132" text-anchor="middle" font-weight="700" font-size="16" fill="#ffffff" font-family="sans-serif">6</text>
+<text x="102" y="124" class="g" fill="#2c7a7b">LAPI</text>
+<text x="192" y="124" class="gt">取 LAPI 地址并填入路由器 bouncer</text>
+<text x="1302" y="124" text-anchor="end" class="sm">前置组：BOOT</text>
+<text x="102" y="148" class="lg">门禁：GSET_BOOT = 1 才执行 · 两个小步骤全通才置位 GSET_LAPI=1 · 任一 build 失败 → hard 终止</text>
+<rect x="40" y="226" width="1280" height="214" rx="8" fill="#ffffff" stroke="#2c7a7b" stroke-width="1.6"/>
+<rect x="40" y="226" width="6" height="214" rx="3" fill="#2c7a7b"/>
+<circle cx="76" cy="254" r="13" fill="#2c7a7b"/>
+<text x="76" y="259" text-anchor="middle" font-weight="700" font-size="13" fill="#ffffff" font-family="sans-serif">1</text>
+<text x="100" y="259" class="g" fill="#2c7a7b">lapi_fetch</text>
+<text x="220" y="259" class="gt">从容器里把 LAPI 地址与密钥取出来</text>
+<text x="100" y="286" class="lb" fill="#2c7a7b">verify 三条件（全满足才算已就绪）</text>
+<text x="100" y="308" class="lg">① 容器在跑（ct_running）</text>
+<text x="100" y="329" class="lg">② LAPI 能响应：容器内 cscli bouncers list 有回显</text>
+<text x="100" y="350" class="lg">③ local_api_credentials.yaml 里 url: 与 login: 两个字段都在</text>
+<text x="740" y="286" class="lb" fill="#2c7a7b">build 做什么（只在 verify 不过时）</text>
+<text x="740" y="308" class="lg">等待 LAPI 起来：最多 60 秒，每 5 秒探一次</text>
+<text x="740" y="329" class="lg">读出 url / login 两个值</text>
+<text x="740" y="350" class="lg">缓存到 .bootstrap/lapi.env（权限 600）</text>
+<rect x="100" y="366" width="1160" height="56" rx="5" fill="#e6fffa" stroke="#81e6d9"/>
+<text x="114" y="386" class="lg" fill="#234e52">「拿到」的判据是能从容器读出来，不是「文件存在」——文件可能是旧的。</text>
+<text x="114" y="407" class="lg" fill="#234e52">缓存 lapi.env 有两个作用：证明取到过、给下一步 bouncer_fill 用，不必再进容器读。</text>
+<path d="M 680 440 L 680 496" stroke="#a0aec0" stroke-width="1.6" marker-end="url(#ar)"/>
+<rect x="40" y="504" width="1280" height="320" rx="8" fill="#ffffff" stroke="#b7791f" stroke-width="1.6"/>
+<rect x="40" y="504" width="6" height="320" rx="3" fill="#b7791f"/>
+<circle cx="76" cy="532" r="13" fill="#b7791f"/>
+<text x="76" y="537" text-anchor="middle" font-weight="700" font-size="13" fill="#ffffff" font-family="sans-serif">2</text>
+<text x="100" y="537" class="g" fill="#b7791f">bouncer_fill</text>
+<text x="236" y="537" class="gt">填进路由器 bouncer，并让宿主机服务重新读配置</text>
+<text x="100" y="570" class="lb" fill="#b7791f">2.1 先补 uci（_bouncer_uci_apply）</text>
+<text x="100" y="592" class="lg">找 /etc/config/crowdsec 的 bouncer 段，没有就新建</text>
+<text x="100" y="612" class="code">api_url = http://&lt;容器IP&gt;:8080/   enabled = 1</text>
+<text x="100" y="631" class="code">deny_action = drop   interface = br-lan</text>
+<text x="100" y="652" class="lg">→ uci commit crowdsec</text>
+<text x="740" y="570" class="lb" fill="#b7791f">2.2 向容器 LAPI 注册，换回 api_key</text>
+<text x="740" y="592" class="lg">cscli bouncers add openwrt-fw -o raw</text>
+<text x="740" y="612" class="sm">同名已存在拿不到新 key → 先 delete 再 add</text>
+<text x="740" y="633" class="lg">拿到 key → 写进 uci → commit crowdsec</text>
+<text x="740" y="655" class="sm">拿不到 key → build 失败 → hard 终止</text>
+<rect x="80" y="718" width="1200" height="146" rx="7" fill="#fff5f5" stroke="#c53030" stroke-width="2" stroke-dasharray="6 3"/>
+<text x="98" y="746" class="lb" fill="#c53030">2.3 重启宿主机 bouncer 服务（v.94 补上，之前缺这一步）</text>
+<text x="98" y="776" class="lg">先判 cs_active_on_host：服务没在跑就不抢跑，交给后续服务拉起流程</text>
+<text x="98" y="802" class="code">service crowdsec-firewall-bouncer restart</text>
+<text x="98" y="830" class="lg">重启后等 nft 表就位（最多 10 秒）；没等到只记日志、不阻断，交给下一步判定</text>
+<path d="M 680 654 L 680 710" stroke="#c53030" stroke-width="1.8" marker-end="url(#arR)"/>
+<rect x="40" y="910" width="1280" height="168" rx="8" fill="#faf5ff" stroke="#805ad5" stroke-width="1.6"/>
+<text x="58" y="936" class="lb" fill="#553c9a">为什么只重启宿主机那一个？容器内 crowdsec 刻意不重启</text>
+<text x="58" y="962" class="lg">① 容器内 crowdsec 读的是容器里的 /etc/crowdsec/config.yaml，从来不读宿主机的 /etc/config/crowdsec。</text>
+<text x="58" y="984" class="lg">　　所以在宿主机 uci 里写 api_key，对它没有影响 —— 重启它不会让它"读到新配置"。</text>
+<text x="58" y="1008" class="lg">② 重启容器内 crowdsec 会让 LAPI 短暂不可用，last_pull 时间戳断档。</text>
+<text x="58" y="1030" class="ts" fill="#c53030">　　紧接着的 BOUNCERVERIFY 正是靠 last_pull 新鲜度（600 秒）判成功 —— 重启反而把自己判失败。</text>
+<text x="58" y="1056" class="lg">③ 容器内 crowdsec 该重启的时机是改 config.yaml 之后：那件事由 capi_release 自己负责（解 CAPI 后重启）。</text>
+<rect x="40" y="1100" width="1280" height="132" rx="8" fill="#f7fafc" stroke="#cbd5e0"/>
+<text x="58" y="1126" class="lb" fill="#2b6cb0">两步各自的「算通过」判据</text>
+<text x="58" y="1152" class="lg">lapi_fetch  →  容器在跑 + LAPI 有回显 + url/login 两字段可读出</text>
+<text x="58" y="1174" class="lg">bouncer_fill →  api_url 等于 http://容器IP:8080/ + enabled=1 + api_key 非空</text>
+<text x="58" y="1200" class="ts" fill="#c53030">注意：bouncer_fill 的 verify 只查「填对没」，不查「生效没」。</text>
+<text x="58" y="1220" class="lg">「生效没」是下一组 BOUNCERVERIFY 的事：bouncer 在列表里 + last_pull 不超过 600 秒。</text>
+</svg>

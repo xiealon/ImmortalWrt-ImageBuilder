@@ -116,7 +116,7 @@ parts.append(f'''<svg viewBox="0 0 {W} 2960" xmlns="http://www.w3.org/2000/svg" 
   </style>
   <rect x="0" y="0" width="740" height="4096" fill="#ffffff"/>
   <text x="370" y="26" class="title" text-anchor="middle">CrowdSec LXC · 详细流程架构图</text>
-  <text x="370" y="44" class="ver" text-anchor="middle">v.2026-10-17.76 ｜ ①.a 式小步骤框；◆=判定框，分支轨迹绕右车道连到目标步（竖排标签）｜ 重建=强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
+  <text x="370" y="44" class="ver" text-anchor="middle">v.2026-10-18.78-bp ｜ ①.a 式小步骤框；◆=判定框，分支轨迹绕右车道连到目标步（竖排标签）｜ 重建=强停→删容器→exec 重跑（CS_REBUILT 防循环）</text>
   <text x="370" y="58" class="ver" text-anchor="middle">实线=正常流 ｜ 紫框+标签=判定分支 ｜ 红虚线+红块=失败/exit 1 ｜ 灰虚线+灰块=exit 0 ｜ 橙虚线=告警/放弃/回路 ｜ 绿=有效</text>
 ''')
 
@@ -476,7 +476,23 @@ for j, s in enumerate(kl4):
 for j, s in enumerate(kl5):
     text(32, ky+16+14*(len(kl1)+len(kl2)+len(kl3)+len(kl4)+j), s, "ndl")
 
-total_h = ky + kh + 16
+# ---- 注意事项区块（v.78-bp：原 README「注意 1/2/3」并入图内）----
+nl1 = wrapw("注意 1：开机需要先进行一次重启，刷新设备的网络接口", 66)
+nl2 = wrapw("注意 2：crowdsec 的初次运行需要时间自动进行初始化安装，无需网络也可以自动集成（大概 30s）", 66)
+nl3 = wrapw("注意 3：防火墙里面的 NAT 规则 LXC-SNAT 不要动它，它会在编译时自动修改对应 IP 地址到出接口的 IP（src 区域固定为 lan，即出口区域；网络部分按对象独立验证，enroll 前按需校验 SNAT 规则与 ip_forward，不符自动重建）", 66)
+nn = len(nl1) + len(nl2) + len(nl3)
+nh = 14*nn + 40
+ny = ky + kh + 12
+parts.append(f'  <rect x="20" y="{ny}" width="660" height="{nh}" rx="7" fill="#fffaf0" stroke="#f6ad55" stroke-width="1"/>')
+text(32, ny+16, "注意事项", "sub2")
+for j, s in enumerate(nl1):
+    text(32, ny+36+14*j, s, "ndl")
+for j, s in enumerate(nl2):
+    text(32, ny+36+14*(len(nl1)+j), s, "ndl")
+for j, s in enumerate(nl3):
+    text(32, ny+36+14*(len(nl1)+len(nl2)+j), s, "ndl")
+
+total_h = ny + nh + 16
 parts.append("</svg>")
 
 svg = "\n".join(parts).replace(

@@ -14,3 +14,17 @@ shell/**    text eol=lf
 *.tar.gz    binary
 *.img       binary
 *.img.gz    binary
+
+# files/** 被上面强制当文本（text eol=lf），将来往里放图片/字体会被 git 改写损坏。
+# 这几条兜底：files/ 下的二进制仍按二进制存。
+files/**/*.png    binary
+files/**/*.jpg    binary
+files/**/*.jpeg   binary
+files/**/*.gif    binary
+files/**/*.ico    binary
+files/**/*.woff   binary
+files/**/*.woff2  binary
+files/**/*.ttf    binary
+files/**/*.gz     binary
+files/**/*.xz     binary
+files/**/*.zip    binary

@@ -1,0 +1,293 @@
+<svg width="1760" height="1260" viewBox="0 0 1760 1260" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a0aec0"/>
+    </marker>
+  </defs>
+  <style>
+    .t{font-size:19px;font-weight:700;fill:#1a202c}
+    .ts{font-size:11.5px;fill:#718096}
+    .gt{font-size:13.5px;font-weight:700}
+    .gts{font-size:10.5px}
+    .b{font-size:12px;font-weight:600;fill:#1a202c}
+    .s{font-size:10px;fill:#4a5568}
+    .mono{font-family:ui-monospace,'SFMono-Regular',Consolas,monospace}
+    .ln{stroke:#94a3b8;stroke-width:1.5;fill:none}
+    .lng{stroke:#a0aec0;stroke-width:1.3;fill:none;stroke-dasharray:4 3}
+    .tag{font-size:9px;font-weight:700}
+  </style>
+  <rect x="0" y="0" width="1760" height="1260" fill="#ffffff"/>
+
+  <text x="880" y="30" text-anchor="middle" class="t">v.81 层级 DAG + 阶段 3 A/B/C 服务链全貌（统一 ensure + hard 一次修复 + tier 3 重装自愈 · BACKUP 旁路由锁定线 · crowdsec-lxc-bootstrap.sh）</text>
+  <text x="880" y="52" text-anchor="middle" class="ts">大步骤(GROUP) → 小步骤(node)：GROUP_SEQ 定先后，GROUP_DEP 定绑定，DEP_ 定组内依赖；每个小步骤必须 NODE_GROUP 归属一个大步骤</text>
+
+  <rect x="30" y="96" width="380" height="556" rx="10" fill="#ebf8ff" stroke="#90cdf4" stroke-width="1.2"/>
+  <rect x="30" y="96" width="380" height="34" rx="10" fill="#2b6cb0"/>
+  <rect x="30" y="120" width="380" height="10" fill="#2b6cb0"/>
+  <text x="44" y="118" class="gt" fill="#ffffff">大步骤 ① container · 容器就绪</text>
+  <text x="396" y="118" text-anchor="end" class="gts" fill="#ffffff">3 个小步骤</text>
+
+  <rect x="45" y="142" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="52" y="149" width="52" height="15" rx="7" fill="#feebc8"/>
+  <text x="78" y="160" text-anchor="middle" class="tag" fill="#dd6b20">install</text>
+  <text x="111" y="161" class="b">img_migrate</text>
+  <text x="111" y="177" class="s">镜像迁移到 LXC 目录（tarball 就位）</text>
+<line x1="220.0" y1="186" x2="220.0" y2="199" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="45" y="199" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="52" y="206" width="52" height="15" rx="7" fill="#feebc8"/>
+  <text x="78" y="217" text-anchor="middle" class="tag" fill="#dd6b20">install</text>
+  <text x="111" y="218" class="b">ct_config</text>
+  <text x="111" y="234" class="s">容器 config 落盘（lxc.conf 等）</text>
+<line x1="220.0" y1="243" x2="220.0" y2="256" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="45" y="256" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="52" y="263" width="52" height="15" rx="7" fill="#feebc8"/>
+  <text x="78" y="274" text-anchor="middle" class="tag" fill="#dd6b20">install</text>
+  <text x="111" y="275" class="b">rootfs</text>
+  <text x="111" y="291" class="s">rootfs 解压 / 恢复（置 _recovering）</text>
+
+  <rect x="44" y="534" width="352" height="104" rx="6" fill="#ffffff" stroke="#90cdf4" stroke-dasharray="4 3"/>
+  <text x="56" y="554" class="b" fill="#2b6cb0">install 类 · 一次性</text>
+  <text x="56" y="570" class="s">verify = 产物在不在（tarball / config / rootfs）</text>
+  <text x="56" y="586" class="s">ct_config / rootfs 为 hard：失败即终止引导</text>
+  <text x="56" y="602" class="s">日志：[container] 容器就绪 完成（3/3）</text>
+  <text x="56" y="622" class="s mono" style="font-size:9.5px">DEP_ct_config=img_migrate</text>
+  <text x="56" y="636" class="s mono" style="font-size:9.5px">DEP_rootfs=img_migrate</text>
+
+  <rect x="470" y="96" width="380" height="556" rx="10" fill="#f0fff4" stroke="#9ae6b4" stroke-width="1.2"/>
+  <rect x="470" y="96" width="380" height="34" rx="10" fill="#276749"/>
+  <rect x="470" y="120" width="380" height="10" fill="#276749"/>
+  <text x="484" y="118" class="gt" fill="#ffffff">大步骤 ② net · 网络就绪（路由器网桥 → 容器网络）</text>
+  <text x="836" y="118" text-anchor="end" class="gts" fill="#ffffff">8 个小步骤</text>
+
+  <rect x="485" y="142" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="492" y="149" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="518" y="160" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="551" y="161" class="b">br_lan_ports</text>
+  <text x="551" y="177" class="s">br-lan 桥 + 挂载全部物理口</text>
+<line x1="660.0" y1="186" x2="660.0" y2="199" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="485" y="199" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="492" y="206" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="518" y="217" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="551" y="218" class="b">lan_static</text>
+  <text x="551" y="234" class="s">LAN 静态地址 10.0.0.201/24</text>
+<line x1="660" y1="243" x2="660" y2="248" class="ln"/>
+<line x1="568" y1="248" x2="744" y2="248" class="ln"/>
+
+  <rect x="485" y="260" width="167" height="52" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="491" y="266" width="44" height="13" rx="6" fill="#bee3f8"/>
+  <text x="513" y="276" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="568" y="292" text-anchor="middle" class="b" style="font-size:10.5px">dhcp_ignore</text>
+  <text x="568" y="305" text-anchor="middle" class="s" style="font-size:9px">DHCP 让权 ignore=1</text>
+<line x1="568" y1="248" x2="568" y2="260" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="660" y="260" width="167" height="52" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="666" y="266" width="44" height="13" rx="6" fill="#bee3f8"/>
+  <text x="688" y="276" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="744" y="292" text-anchor="middle" class="b" style="font-size:10.5px">dns_domain</text>
+  <text x="744" y="305" text-anchor="middle" class="s" style="font-size:9px">DNS 劫持 time.android.com</text>
+<line x1="744" y1="248" x2="744" y2="260" class="ln" marker-end="url(#ar)"/>
+<text x="489" y="242" class="s" style="font-size:9.5px">并列（无依赖，同轮 verify）</text>
+<line x1="568" y1="312" x2="568" y2="322" class="ln"/>
+<line x1="744" y1="312" x2="744" y2="322" class="ln"/>
+<line x1="568" y1="322" x2="744" y2="322" class="ln"/>
+<line x1="660" y1="322" x2="660" y2="329" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="485" y="329" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="492" y="336" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="518" y="347" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="551" y="348" class="b">bridge</text>
+  <text x="551" y="364" class="s">容器网桥 lxcbr0 10.1.0.1</text>
+<line x1="660.0" y1="373" x2="660.0" y2="386" class="ln" marker-end="url(#ar)"/>
+<text x="668.0" y="382" class="s" style="font-size:9.5px">DEP_bridge=lan_static</text>
+
+  <rect x="485" y="386" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="492" y="393" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="518" y="404" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="551" y="405" class="b">lxc_zone</text>
+  <text x="551" y="421" class="s">防火墙 lxc zone（ACCEPT）</text>
+<line x1="660.0" y1="430" x2="660.0" y2="443" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="485" y="443" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="492" y="450" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="518" y="461" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="551" y="462" class="b">fwd_rules</text>
+  <text x="551" y="478" class="s">lxc↔lan/docker/vpn 转发</text>
+
+  <rect x="484" y="534" width="352" height="104" rx="6" fill="#ffffff" stroke="#9ae6b4" stroke-dasharray="4 3"/>
+  <text x="496" y="554" class="b" fill="#276749">绑定 + 先后（开机引导的核心约束）</text>
+  <text x="496" y="570" class="s">路由器网桥(br_lan_ports→lan_static) 先于容器网络</text>
+  <text x="496" y="586" class="s">(bridge→lxc_zone→fwd_rules)：SNAT/防火墙依赖 LAN 侧</text>
+  <text x="496" y="602" class="s">组内任一失败 → 整组未完成 → boot 组整组跳过</text>
+  <text x="496" y="622" class="s mono" style="font-size:9.5px">DEP_bridge=lan_static  DEP_lxc_zone=bridge</text>
+  <text x="496" y="636" class="s mono" style="font-size:9.5px">DEP_fwd_rules=lxc_zone</text>
+
+  <rect x="910" y="96" width="380" height="556" rx="10" fill="#fffaf0" stroke="#fbd38d" stroke-width="1.2"/>
+  <rect x="910" y="96" width="380" height="34" rx="10" fill="#c05621"/>
+  <rect x="910" y="120" width="380" height="10" fill="#c05621"/>
+  <text x="924" y="118" class="gt" fill="#ffffff">大步骤 ③ fw · 防火墙与服务就绪</text>
+  <text x="1276" y="118" text-anchor="end" class="gts" fill="#ffffff">6 个小步骤</text>
+
+  <rect x="925" y="142" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="932" y="149" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="958" y="160" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="991" y="161" class="b">lan_input</text>
+  <text x="991" y="177" class="s">LAN zone 放行 ACCEPT</text>
+<line x1="1100.0" y1="186" x2="1100.0" y2="199" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="925" y="199" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="932" y="206" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="958" y="217" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="991" y="218" class="b">snat</text>
+  <text x="991" y="234" class="s">SNAT snat_ip←lan.ipaddr</text>
+<line x1="1100.0" y1="243" x2="1100.0" y2="256" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="925" y="256" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="932" y="263" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="958" y="274" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="991" y="275" class="b">ip_forward</text>
+  <text x="991" y="291" class="s">ip_forward=1</text>
+<line x1="1100.0" y1="300" x2="1100.0" y2="313" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="925" y="313" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="932" y="320" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="958" y="331" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="991" y="332" class="b">svc_bind</text>
+  <text x="991" y="348" class="s">dropbear/ttyd 绑 LAN 口</text>
+<line x1="1100.0" y1="357" x2="1100.0" y2="370" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="925" y="370" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="932" y="377" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="958" y="388" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="991" y="389" class="b">docker_fw</text>
+  <text x="991" y="405" class="s">docker zone + 三向转发</text>
+<line x1="1100.0" y1="414" x2="1100.0" y2="427" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="924" y="534" width="352" height="104" rx="6" fill="#ffffff" stroke="#fbd38d" stroke-dasharray="4 3"/>
+  <text x="936" y="554" class="b" fill="#c05621">组绑定：fw 绑 net</text>
+  <text x="936" y="570" class="s">snat 的 snat_ip 读 _lan_ip()（net 组 lan_static）</text>
+  <text x="936" y="586" class="s">net 组未完成 → 本组整组跳过（不建半截防火墙）</text>
+  <text x="936" y="602" class="s">svc_bind 局部 commit，不进 flush 分组</text>
+  <text x="936" y="622" class="s mono" style="font-size:9.5px">GROUP_DEP_fw=net   DEP_snat=lan_static</text>
+  <text x="936" y="636" class="s mono" style="font-size:9.5px">docker 无 dockerd → verify 直接跳过</text>
+
+  <rect x="1350" y="96" width="380" height="556" rx="10" fill="#faf5ff" stroke="#d6bcfa" stroke-width="1.2"/>
+  <rect x="1350" y="96" width="380" height="34" rx="10" fill="#6b46c1"/>
+  <rect x="1350" y="120" width="380" height="10" fill="#6b46c1"/>
+  <text x="1364" y="118" class="gt" fill="#ffffff">大步骤 ④ boot · 容器启动</text>
+  <text x="1716" y="118" text-anchor="end" class="gts" fill="#ffffff">2 个小步骤</text>
+
+  <rect x="1365" y="142" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="1372" y="149" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="1398" y="160" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="1431" y="161" class="b">prepare_container</text>
+  <text x="1431" y="177" class="s">容器内配置生成（五子步骤产物校验）</text>
+<line x1="1540.0" y1="186" x2="1540.0" y2="199" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="1365" y="199" width="350" height="44" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <rect x="1372" y="206" width="52" height="15" rx="7" fill="#bee3f8"/>
+  <text x="1398" y="217" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text>
+  <text x="1431" y="218" class="b">ct_boot</text>
+  <text x="1431" y="234" class="s">启动链前置检查 + lxc-autostart</text>
+
+  <rect x="1364" y="534" width="352" height="104" rx="6" fill="#ffffff" stroke="#d6bcfa" stroke-dasharray="4 3"/>
+  <text x="1376" y="554" class="b" fill="#6b46c1">组绑定：boot 绑 ①+②+③ · 七步各自 ensure+hard</text>
+  <text x="1376" y="570" class="s">每步 verify 就绪跳过 → 构建 → 复核，至多一次，不过即 hard</text>
+  <text x="1376" y="586" class="s">ct_boot：启动链内容级前置检查，缺链不开机不重建（v.81）</text>
+  <text x="1376" y="602" class="s">开机引导的最终断言：容器+网络+防火墙就绪才启动容器</text>
+  <text x="1376" y="622" class="s mono" style="font-size:9.5px">GROUP_DEP_boot="container net fw"</text>
+  <text x="1376" y="636" class="s mono" style="font-size:9.5px">DEP_ct_boot=ct_config rootfs prepare_container lxc_zone snat</text>
+<line x1="414" y1="334.0" x2="464" y2="334.0" class="ln" marker-end="url(#ar)"/>
+<line x1="854" y1="334.0" x2="904" y2="334.0" class="ln" marker-end="url(#ar)"/>
+<line x1="1294" y1="334.0" x2="1344" y2="334.0" class="ln" marker-end="url(#ar)"/>
+<text x="418" y="326.0" class="s" style="font-size:9.5px;font-weight:600">GROUP_SEQ ①②③④</text>
+<text x="858" y="326.0" class="s" style="font-size:9.5px;font-weight:600">fw 绑 net</text>
+<text x="1298" y="326.0" class="s" style="font-size:9.5px;font-weight:600">boot 绑 ①+②+③</text>
+
+  <rect x="30" y="678" width="1700" height="142" rx="10" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="48" y="702" class="b" style="font-size:13px">机制图例</text>
+<rect x="48" y="714" width="52" height="15" rx="7" fill="#feebc8"/><text x="74" y="725" text-anchor="middle" class="tag" fill="#dd6b20">install</text><text x="108" y="725" class="s">install 类：verify=产物存在，缺才 build（一次性）</text>
+<rect x="608" y="714" width="52" height="15" rx="7" fill="#bee3f8"/><text x="634" y="725" text-anchor="middle" class="tag" fill="#2b6cb0">ensure</text><text x="668" y="725" class="s">ensure 类：verify=目标状态，不符才 build（每次校准）</text>
+<rect x="1168" y="714" width="52" height="15" rx="7" fill="#fed7d7"/><text x="1194" y="725" text-anchor="middle" class="tag" fill="#c53030">hard</text><text x="1228" y="725" class="s">统一 hard：build 后复核，至多一次，一次不过即终止引导</text>
+<text x="48" y="753" class="s"><tspan class="b" fill="#c53030">阶段 3 A/B/C</tspan>：与 DAG ensure 同构一次修复——verify 就绪跳过 → fix 一次 → 复核，不过即 exit 1；开机并入 DAG boot 组（build_ct_boot 启动链前置检查），深修链 9 函数已删，修复止于 A/B 文件补写与注册</text>
+<text x="48" y="776" class="s"><tspan class="b">失败沿链传播</tspan>：依赖未就绪 → 本级跳过且入 _failed → 下游连带跳过（跳过即未完成，不建半截）</text><text x="880" y="776" class="s"><tspan class="b">flush_uci</tspan>：按 _dirty_* 分 network / dhcp / firewall 三组，每组至多一次 commit+reload，flush 后清脏标志</text>
+<text x="48" y="799" class="s"><tspan class="b" fill="#c53030">运行期探针（v.82）</tspan>：只验证 last_pull（--probe-check 复用 bouncer_pulling 600s 新鲜度，与 step_C 同一判据），60s 巡检、连续停滞 3 轮 → 持同一把引导锁重跑 bootstrap 复验/修复；探针零修复动作，持锁期与开机引导互斥（lock-busy）</text>
+
+  <rect x="30" y="842" width="1700" height="86" rx="10" fill="#fff5f5" stroke="#fc8181" stroke-width="1"/>
+  <text x="48" y="866" class="b" style="font-size:13px" fill="#c53030">声明即架构：dag_order() 三层校验（不合法直接终止，不带病引导）</text>
+  <text x="48" y="888" class="s">① 每个小步骤必须 NODE_GROUP_&lt;node&gt; 归属一个大步骤——漏声明 / 归属组不在 GROUP_SEQ → 终止</text>
+  <text x="48" y="908" class="s">② 组间依赖不得倒置：GROUP_DEP_&lt;g&gt; 绑定的组必须排在本组之前（fw 依赖 boot=倒置 → 终止）</text>
+  <text x="880" y="888" class="s">③ 组内 Kahn 迭代拓扑排序：环 / 跨组依赖未就绪 → 终止</text>
+  <text x="880" y="908" class="s">扩展方式：新步骤=写 verify_/build_ + 声明 NODE_GROUP/DEP，调度器零改动</text>
+
+  <rect x="30" y="952" width="1700" height="252" rx="10" fill="#fff5f5" stroke="#fc8181" stroke-width="1.2"/>
+  <rect x="30" y="952" width="1700" height="32" rx="10" fill="#c53030"/>
+  <rect x="30" y="974" width="1700" height="10" fill="#c53030"/>
+  <text x="46" y="973" class="gt" fill="#ffffff">阶段 3 · A/B/C 步骤化服务链（DAG 调度完成后执行：verify 就绪跳过 → fix 一次 → 复核，与 DAG ensure 同构，一次不过即 hard 终止）</text>
+  <text x="1714" y="973" text-anchor="end" class="gts" fill="#ffffff">shield 仅 _recovering（新装/重恢复）时执行 · enroll 除外 · C 失败判损坏 → tier 3 重装自愈</text>
+
+  <rect x="52" y="998" width="222" height="82" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="62" y="1014" class="b" style="font-size:11px">shield</text>
+  <text x="62" y="1030" class="s" style="font-size:8.5px">验：新装恢复中先断中央 API</text>
+  <text x="62" y="1045" class="s" style="font-size:8.5px">修：online_client 已注释</text>
+  <text x="62" y="1060" class="s mono" style="font-size:8px;fill:#a0aec0">ensure_online_client_off</text>
+  <text x="62" y="1074" class="s mono" style="font-size:8px;fill:#a0aec0">仅 _recovering 时执行</text>
+<line x1="277" y1="1039" x2="288" y2="1039" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="291" y="998" width="222" height="82" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="301" y="1014" class="b" style="font-size:11px">stamp 分流</text>
+  <text x="301" y="1030" class="s" style="font-size:8.5px">验：阶段 3 入口判别</text>
+  <text x="301" y="1045" class="s" style="font-size:8.5px">修：安装态：A→B→C 依序构造</text>
+  <text x="301" y="1060" class="s mono" style="font-size:8px;fill:#a0aec0">_stamp_present：有 stamp→重启态</text>
+  <text x="301" y="1074" class="s mono" style="font-size:8px;fill:#a0aec0">重启态 A/B 不治理，直接 C</text>
+<line x1="516" y1="1039" x2="527" y2="1039" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="530" y="998" width="222" height="82" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="540" y="1014" class="b" style="font-size:11px">A 容器内配置</text>
+  <text x="540" y="1030" class="s" style="font-size:8.5px">验：网络文件/自启/resolv/acquis/日志</text>
+  <text x="540" y="1045" class="s" style="font-size:8.5px">修：fix_A 按需补写+重启 crowdsec</text>
+  <text x="540" y="1060" class="s mono" style="font-size:8px;fill:#a0aec0">verify_A · fix_A</text>
+  <text x="540" y="1074" class="s mono" style="font-size:8px;fill:#a0aec0">幂等写入，缺啥补啥</text>
+<line x1="755" y1="1039" x2="766" y2="1039" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="769" y="998" width="222" height="82" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="779" y="1014" class="b" style="font-size:11px">B 配置与 bouncer 链路</text>
+  <text x="779" y="1030" class="s" style="font-size:8.5px">验：三文件+服务活+nft+注册态</text>
+  <text x="779" y="1045" class="s" style="font-size:8.5px">修：fix_B：补写+屏蔽 CAPI+注册+起服务</text>
+  <text x="779" y="1060" class="s mono" style="font-size:8px;fill:#a0aec0">verify_B · fix_B</text>
+  <text x="779" y="1074" class="s mono" style="font-size:8px;fill:#a0aec0">LAPI 不可达→记日志放行</text>
+<line x1="994" y1="1039" x2="1005" y2="1039" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="1008" y="998" width="222" height="82" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="1018" y="1014" class="b" style="font-size:11px">C last_pull 验证</text>
+  <text x="1018" y="1030" class="s" style="font-size:8.5px">验：等 LAPI 90s + pull 600s 新鲜度</text>
+  <text x="1018" y="1045" class="s" style="font-size:8.5px">修：无修复：60s 纯等待 → 决策树</text>
+  <text x="1018" y="1060" class="s mono" style="font-size:8px;fill:#a0aec0">step_C · _sc_wait_pull</text>
+  <text x="1018" y="1074" class="s mono" style="font-size:8px;fill:#a0aec0">复验 A/B→一次修复→判损坏</text>
+<line x1="1233" y1="1039" x2="1244" y2="1039" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="1247" y="998" width="222" height="82" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="1257" y="1014" class="b" style="font-size:11px">online_client 放出</text>
+  <text x="1257" y="1030" class="s" style="font-size:8.5px">验：config 中 online_client 未注释</text>
+  <text x="1257" y="1045" class="s" style="font-size:8.5px">修：ensure_online_client_on</text>
+  <text x="1257" y="1060" class="s mono" style="font-size:8px;fill:#a0aec0">verify_online_client_on</text>
+  <text x="1257" y="1074" class="s mono" style="font-size:8px;fill:#a0aec0">取消注释放出 CAPI</text>
+<line x1="1472" y1="1039" x2="1483" y2="1039" class="ln" marker-end="url(#ar)"/>
+
+  <rect x="1486" y="998" width="222" height="82" rx="6" fill="#ffffff" stroke="#cbd5e0" stroke-width="1"/>
+  <text x="1496" y="1014" class="b" style="font-size:11px">console enroll</text>
+  <text x="1496" y="1030" class="s" style="font-size:8.5px">验：capi status 已 Enrolled</text>
+  <text x="1496" y="1045" class="s" style="font-size:8.5px">修：re_enroll</text>
+  <text x="1496" y="1060" class="s mono" style="font-size:8px;fill:#a0aec0">phase3_step_enroll</text>
+  <text x="1496" y="1074" class="s mono" style="font-size:8px;fill:#a0aec0">等网站 Accept 算过</text>
+<text x="46" y="1102" class="s" style="font-size:10px"><tspan class="b">与 DAG 同构（一次修复）</tspan>：verify 就绪跳过 → fix 一次 → 复核，不过即 hard；开机并入 DAG boot 组（build_ct_boot 启动链内容级前置检查：缺链不开机、不重写、不重建），深修链 9 函数已删</text>
+<text x="46" y="1122" class="s" style="font-size:10px"><tspan class="b">A/B/C 划分</tspan>：A=容器内配置治理（网络文件/自启软链/resolv/acquis+解析器/日志转发）；B=crowdsec 配置与 bouncer 链路（listen_uri/trusted_ips/容器 config/宿主机服务活/nft 表/注册态）；C=last_pull 验证（纯等待 + 600s 新鲜度）</text>
+<text x="46" y="1142" class="s" style="font-size:10px"><tspan class="b">合法中间态与门</tspan>：enroll 命令成功但 10 秒内未显示 Enrolled（等网站人工 Accept）算通过；未配置注册码（$ENROLL_KEY_FILE 为空）→ 明确记日志跳过，本地防护不受影响</text>
+<text x="46" y="1162" class="s" style="font-size:10px"><tspan class="b">日志形态</tspan>：[阶段3] 无 installed 标记：安装态，依序执行 A → B → C ／ [步骤C] A/B 状态均正常：容器配置正确，判定容器损坏，转入重装自愈 ／ [步骤A] 一次修复未通过复核，hard 失败，引导终止</text>
+<text x="46" y="1182" class="s" style="font-size:10px"><tspan class="b" fill="#c53030">tier 3 重装自愈（v.81）</tspan>：C 失败且 A/B 复验正常（含一次修复后仍失效）= 配置正确但 LAPI 不可达 = 容器损坏 → 五道门（last_pull 仍失效 / installed 标记在位 / 失败计数 &lt; 2 / 非重装后流程 / 镜像 gzip -t）全过才抹 rootfs 重跑；安装态门② 必拒，防开机反复重置</text>
+</svg>

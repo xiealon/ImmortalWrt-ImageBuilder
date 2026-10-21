@@ -15,12 +15,12 @@ jobs:
       actions: write
 
     steps:
-      - name: 安装 jq
+      - name: Install Jq
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
 
-      - name: 删除指定天数前的已完成运行
+      - name: Delete Old Workflow Runs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           KEEP_DAYS: ${{ github.event.inputs.keep_days }}

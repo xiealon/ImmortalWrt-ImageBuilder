@@ -87,7 +87,7 @@ jobs:
             --user root \
             -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
             -v "${{ github.workspace }}/files:/home/build/immortalwrt/files" \
-            -v "${{ github.workspace }}/custom:/home/build/immortalwrt/files/etc/config" \
+            -v "${{ github.workspace }}/custom:/home/build/immortalwrt/custom" \
             -v "${{ github.workspace }}/x86-64/imm25.config:/home/build/immortalwrt/.config" \
             -v "${{ github.workspace }}/shell:/home/build/immortalwrt/shell" \
             -v "${{ github.workspace }}/x86-64/build25.sh:/home/build/immortalwrt/build.sh" \

@@ -1,0 +1,25 @@
+#!/bin/sh /etc/rc.common
+# crowdsec-lxc-probe：运行期 last_pull 监视探针服务壳（v.82）
+# 本体 /usr/sbin/crowdsec-lxc-probe.sh：只验证 last_pull，停滞则持引导锁
+# 拉起 crowdsec-lxc-bootstrap.sh 复验/修复。开机自启（START=99，早于 rc.local
+# 收尾）：重启态直接进监视；首启时安装未完成则探针静默等待 installed 标记。
+
+START=99
+USE_PROCD=1
+
+start_service() {
+    # 起服务前先复原核心脚本。本文件自己也在保护表里，被改过时靠 rc.local 和探针补回；
+    # guard 不负责它自己（被改成 exit 0 就什么都不会复原），所以调用前先自举。
+    local _g=/usr/sbin/crowdsec-guard.sh
+    if [ -f "/rom$_g" ] && ! cmp -s "/rom$_g" "$_g" 2>/dev/null; then
+        rm -f "$_g"
+        cp -f "/rom$_g" "$_g" 2>/dev/null
+        chmod 755 "$_g" 2>/dev/null
+    fi
+    [ -x "$_g" ] && "$_g" quiet
+
+    procd_open_instance
+    procd_set_param command /usr/sbin/crowdsec-lxc-probe.sh
+    procd_set_param respawn
+    procd_close_instance
+}

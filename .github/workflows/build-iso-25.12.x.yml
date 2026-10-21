@@ -1,141 +1,100 @@
-# 此工作流是为了构建一个immortalwrt固件的安装器 格式为iso 可用于所有的虚拟机 和 物理机
-# 所谓安装器就是用来安装用的 iso引导的是一个启动速度极快的debian live系统 跑码后输入命令 ddd 即可调出安装菜单
-# 安装时 若是多张硬盘 你可以选择 需要安装的硬盘 此类方法安装的openwrt 安装后是有剩余空间的 更多信息请参考 wukongdaily/img-installer 项目
-# 几乎所有linux 都有各自的安装器 唯独openwrt和armbian 没有, 希望此工作流 弥补这个遗憾 让你更优雅的 安装openwrt 
+# 安装器 ISO（25.12.x / apk 线）：把已经构建好的固件包成可引导安装的 ISO。
+#
+# 【v.108.38 重写】与 24.10 版同样的原因重写：原来自己重编一遍固件，
+# 但不跑 shell/prepare-crowdsec-rootfs.sh，profile 默认还是 1G，
+# 编出来的固件没有 CrowdSec 容器，和 Release 里发布的不是同一个东西。
+# 现在只做打包：取 build-x86-64-25.12.x.yml 末尾上传的 firmware-img artifact。
 
 name: Build 25.12.x ISO x86-64
 
 on:
   workflow_dispatch:
     inputs:
-      luci_version:
-        description: "选择luci版本"
+      source_run_id:
+        description: "源构建 run id（留空 = 自动取最近一次成功的 build-x86-64-25.12.x.yml）"
         required: false
-        default: "25.12.1"
-        type: choice
-        options:
-          - 25.12.0
-          - 25.12.1
-      profile:
-        description: '选择软件包空间大小'
-        required: true
-        type: choice
-        default: '1G'
-        options:
-          - '1G'
-          - '2G'
-          - '3G'
-          - '4G'
-      enable_store:
-        description: "集成 store 商店"
-        required: false
-        type: boolean
-        default: false
-      include_docker:
-        description: "是否编译 Docker 插件"
-        required: true
-        default: 'yes'
-        type: choice
-        options:
-          - 'yes'
-          - 'no'
+        default: ""
+        type: string
+
 permissions:
   contents: write
+  actions: read
+
+concurrency:
+  group: iso-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build_immortalwrt:
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Set executable permissions
-        run: chmod +x ${{ github.workspace }}/x86-64/build25.sh
-      
-      - name: Enable Store integration
-        run: |
-          if [ "${{ github.event.inputs.enable_store }}" == "true" ]; then
-            echo 'CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-store"' >> shell/apk-custom-packages.sh
-            echo "✅ 已追加 luci-app-store"
-          else
-            echo "❎ 未启用 luci-app-store"
-          fi
-
-      - name: ✅ 正在构建ImmortalWrt固件25.12.x
-        run: |
-          profile="${{ github.event.inputs.profile }}"
-          case "$profile" in
-            1G)
-              ROOTFS_SIZE=1024
-              ;;
-            2G)
-              ROOTFS_SIZE=2048
-              ;;
-            3G)
-              ROOTFS_SIZE=3072
-              ;;
-            4G)
-              ROOTFS_SIZE=4096
-              ;;
-          esac
-          echo "ROOTFS_SIZE=$ROOTFS_SIZE" >> $GITHUB_ENV
-          include_docker="${{ github.event.inputs.include_docker }}"
-          luci_version="${{ github.event.inputs.luci_version }}"
-          echo "Building for rootfs_size: $profile"
-          docker run --rm -i \
-            --user root \
-            -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
-            -v "${{ github.workspace }}/files:/home/build/immortalwrt/files" \
-            -v "${{ github.workspace }}/custom:/home/build/immortalwrt/custom" \
-            -v "${{ github.workspace }}/x86-64/imm25.config:/home/build/immortalwrt/.config" \
-            -v "${{ github.workspace }}/shell:/home/build/immortalwrt/shell" \
-            -v "${{ github.workspace }}/x86-64/build25.sh:/home/build/immortalwrt/build.sh" \
-            -e PROFILE=$ROOTFS_SIZE \
-            -e INCLUDE_DOCKER=$include_docker \
-          immortalwrt/imagebuilder:x86-64-openwrt-${luci_version} /bin/bash /home/build/immortalwrt/build.sh
-
-      - name: ✅ 复制固件到根目录
-        run: |
-          cp ${{ github.workspace }}/bin/targets/x86/64/*squashfs-combined-efi.img.gz ${{ github.workspace }}
-
-      - name: ✅ 上传固件到 artifact (for ISO generation)
-        uses: actions/upload-artifact@v6
-        with:
-          name: firmware-img
-          path: |
-            *.img.gz
-
   build_installer_iso:
     runs-on: ubuntu-22.04
-    needs: build_immortalwrt
+    timeout-minutes: 60
 
     steps:
-      - name: Download firmware artifact
+      - name: Resolve Source Run
+        id: src
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IN_RUN: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "$IN_RUN" ]; then
+            RUN_ID="$IN_RUN"
+            echo "使用手工指定的源构建 run: $RUN_ID"
+          else
+            RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow "build-x86-64-25.12.x.yml" --status success \
+              --limit 1 --json databaseId --jq '.[0].databaseId')
+            echo "自动选中的源构建 run: ${RUN_ID:-<空>}"
+          fi
+          case "$RUN_ID" in
+            ''|null)
+              echo "::error::找不到可用的源构建：请先成功跑一次 build-x86-64-25.12.x.yml，或在 source_run_id 里手填 run id"
+              exit 1
+              ;;
+          esac
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download Firmware Artifact
         uses: actions/download-artifact@v7
         with:
           name: firmware-img
+          run-id: ${{ steps.src.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: .
 
-      - name: ⏬ 同步 img-installer 项目 准备制作ISO
+      - name: Verify Firmware Package
         run: |
-          git clone https://github.com/wukongdaily/img-installer.git
+          set -euo pipefail
+          ls -lh ./*.img.gz
+          _n=0
+          for _f in ./*.img.gz; do
+            [ -f "$_f" ] || continue
+            [ -s "$_f" ] || { echo "::error::$_f 是空文件"; exit 1; }
+            gzip -t "$_f" || { echo "::error::$_f gzip CRC 校验失败（下载被截断？）"; exit 1; }
+            echo "OK: $_f"
+            _n=$((_n + 1))
+          done
+          [ "$_n" -ge 1 ] || { echo "::error::artifact firmware-img 里没有任何 *.img.gz"; exit 1; }
+
+      - name: Sync img-installer
+        run: git clone --depth 1 https://github.com/wukongdaily/img-installer.git
+
+      - name: Make ISO
+        run: |
+          set -euo pipefail
+          chmod +x img-installer/custom.sh \
+                   img-installer/supportFiles/custom/build.sh \
+                   img-installer/autobuild/autobuild.sh
+          firmware_file=$(ls ./*squashfs-combined-efi.img.gz | head -n1)
+          echo "打包固件: $firmware_file"
           cd img-installer
+          bash autobuild/autobuild.sh "../$(basename "$firmware_file")"
+          ls -lh output/
 
-      - name: Set executable permissions for scripts
-        run: |
-          chmod +x "${{ github.workspace }}/img-installer/custom.sh"
-          chmod +x "${{ github.workspace }}/img-installer/supportFiles/custom/build.sh"
-
-      - name: ✅ 制作 25.12.x ISO
-        run: |
-          firmware_file=$(ls *squashfs-combined-efi.img.gz)
-          cd img-installer
-          bash autobuild/autobuild.sh "../$firmware_file"
-
-      - name: 🚀 上传 ISO 到 Release
+      - name: Upload ISO To Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: "Custom-Installer-x86_64-ISO"
+          tag_name: "Custom-Installer-x86_64-25.12-ISO"
           body_path: "${{ github.workspace }}/img-installer/autobuild/info.md"
           files: |
             img-installer/output/custom-installer-x86_64.iso

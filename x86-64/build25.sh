@@ -121,11 +121,18 @@ esac
 # 【v.108.45】容器内脚本进固件，供 crowdsec-guard 拿 /rom 只读副本当基准。
 # 为什么放这里而不是只在 tarball 里：tarball 是个压缩包，guard 没法用 cmp 比它；
 # 只有在 squashfs 里有同路径的散文件，guard 才能「同路径比对」而不必改逻辑。
-# 只放需要逐字节固定的 6 个。acquis.yaml / config.yaml / crowdsec-net.conf /
-# resolv.conf 由 bootstrap 的 logconf / capi / ct_net / ct_resolv 每轮重写，
-# 放进固件会变成「bootstrap 写 → guard 改回去 → 死循环」。
+# 只放需要逐字节固定的 9 个（init.d 四个 + inittab + supervise，加上
+# passwd / group / nsswitch.conf —— 后三个是 crowdsec 解析用户和名字服务的静态依赖，
+# 改坏了会以「找不到用户」这种很难查的方式挂掉）。
+# acquis.yaml / config.yaml / crowdsec-net.conf / resolv.conf 由 bootstrap 的
+# logconf / capi / ct_net / ct_resolv 每轮重写，放进固件会变成
+# 「bootstrap 写 → guard 改回去 → 死循环」。
 # 特别不放 os-release：它是 verify_rootfs 判「rootfs 已解压」的依据，
 # 放进 squashfs 会让首启（rootfs 还没解压）被误判成就绪。
+[ -d rootfs-skel ] || {
+    echo "::error::找不到 rootfs-skel/（当前目录 $(pwd)）—— workflow 的 docker run 必须把仓库根下的 rootfs-skel 挂进来：-v \"\$GITHUB_WORKSPACE/rootfs-skel:/home/build/immortalwrt/rootfs-skel\"。没有它，容器内那批受保护文件既进不了 tarball 也进不了固件。"
+    exit 1
+}
 ROOTFS_GUARD_DIR="files/srv/lxc/ubuntu/rootfs"
 for _rel in \
     etc/passwd \

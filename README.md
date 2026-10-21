@@ -1796,6 +1796,27 @@ SSH 仍然只绑 LAN 侧，不再有「无差别监听所有口」的风险；�
 - `tests/test_bp_*.sh` 是 v.99 前的历史套件，内部仍引用 `wan_removed` / `wan_input` 等
   已删节点，早已不参与回归；活跃回归是 `tests/probe_*.sh`。
 
+## v.108.41：恢复脚本可执行位（100644 → 100755）
+
+把 BACKUP 与主仓库对齐时，逐 blob 比对发现**内容完全相同、只有 mode 不同**：
+主仓库 `files/` 下那 6 个脚本一直是 `100644`，BACKUP 是 `100755`。
+
+| 文件 | 谁来执行它 | 没有 x 位会怎样 |
+|---|---|---|
+| `files/etc/rc.local` | `/etc/init.d/done` 里 `[ -x /etc/rc.local ]` 判断后执行 | 判断为假，整段引导不跑 |
+| `files/etc/init.d/lxc-auto` | procd 直接 exec | 容器不自启 |
+| `files/etc/init.d/crowdsec-lxc-probe` | 同上 | 开机探测不跑 |
+| `files/usr/sbin/crowdsec-lxc-bootstrap.sh` | rc.local 里 `/bin/sh "$BOOT"` 调用 | 用 `sh` 显式调用时不受影响，但别处直接执行会失败 |
+| `files/usr/sbin/crowdsec-guard.sh`、`crowdsec-lxc-probe.sh` | 被 init.d 调用 | 同上 |
+
+`tests/` 下 5 个 `probe_*.sh` 一并对齐 755，与 BACKUP 保持一致。
+
+一句话：**固件里靠 `[ -x ]` 判断的链路，权限属于功能的一部分，不是文件属性**。
+之前几版固件能跑起来，说明打包链路上还有别的补权路径；但那条路径不在本仓库里，
+不该被依赖——git 里存成 755 才是硬保证。
+
+核对：两仓库 74 个文件的 blob sha 与 mode 完全一致（`ls-tree -r HEAD` 逐项比对）。
+
 # crowdsec 引导流程图
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)

@@ -36,7 +36,17 @@
 #   而且**内容一致时只 chmod、绝不重写文件** —— 权限漂移不该付出重写 246KB 的代价。
 #
 # 【v.108.46】再扩 5 个静态配置（net.conf / resolv.conf / hosts /
-#   acquis.d/router.yaml / parsers 两个），共「宿主 6 + 容器内 14」= 20 个。
+#   acquis.d/router.yaml / parsers 两个），共「宿主 6 + 容器内 15」= 21 个。
+#
+# 【v.108.47】真机抓到的路径 bug：容器组从 v.108.45 起就没生效过。
+#   GUARD_CT_FILES 存的是容器内路径（/etc/passwd），主循环却直接拿它拼
+#   $ROM_DIR$_rel 与 $ROOT$_rel —— 拼出来是「/rom/etc/passwd 对 /etc/passwd」，
+#   也就是拿固件里宿主自己的 passwd 当基准，去覆盖宿主自己的 passwd。
+#   真机日志（2026-10-22 11:02:22）两条复原记录都是宿主的 /etc/passwd、/etc/group；
+#   而用户实测「改坏 /srv/lxc/ubuntu/rootfs/etc/init.d/rcS 后 70 秒无人复原」，
+#   因为 guard 从头到尾没看过那个文件（它比的是宿主 /etc/init.d/rcS）。
+#   修法：进循环前给容器组补上 GUARD_CT_PREFIX（见 _CT_LIST），_src/_f 就都对了；
+#   _ct_gate 也从「在循环里 case 判断」变成「决定要不要拼这批条目」，语义更直白。
 #   这 5 个以前由 bootstrap 每轮重写（所以进不了 guard），v.108.46 起改为构建期固定：
 #   IP / DNS 写死在 rootfs-skel 里，acquis/parsers 本来就是纯静态 YAML。
 #   注意 hosts 也在此列 —— 它含 `10.1.0.10 crowdsec`，改坏了容器内解析自己都成问题。
@@ -158,15 +168,31 @@ _ct_gate() {
 _CT_OK=0
 _ct_gate && _CT_OK=1
 
-for _rel in $GUARD_FILES $GUARD_CT_FILES; do
+# 【v.108.47】容器组必须先补前缀再进循环，这是真机抓到的 bug。
+# GUARD_CT_FILES 里写的是「容器内绝对路径」（/etc/passwd），而循环用 _rel 直接拼
+# $ROM_DIR$_rel / $ROOT$_rel。不补前缀就变成：
+#     _src=/rom/etc/passwd    ← 固件里宿主自己的 passwd
+#     _f=/etc/passwd          ← 宿主自己的 passwd
+# 于是这一组从头到尾都在「拿固件版覆盖宿主版」，容器里那 15 个文件一次都没比过。
+# 而且 case "$GUARD_CT_PREFIX"/* 永远不匹配，_ct_gate 的两道门形同虚设（算了不用）。
+# 真机 2026-10-22 11:02:22 那两条「/etc/passwd、/etc/group 与只读基准不一致，已复原」
+# 就是宿主被误伤，不是容器。
+# 两个后果都是静默的，所以从 v.108.45 到 v.108.46 一直没被发现：
+#   · 容器里的 rcS 被改坏 → 不复原、不报警（用户实测确认）；
+#   · 宿主被改 → 复原一次后 cmp 就相等了，从此安静，日志只留一条看不出规模。
+_CT_LIST=""
+if [ "$_CT_OK" = "1" ]; then
+    for _rel in $GUARD_CT_FILES; do
+        _CT_LIST="$_CT_LIST $GUARD_CT_PREFIX$_rel"
+    done
+fi
+
+for _rel in $GUARD_FILES $_CT_LIST; do
     _src="$ROM_DIR$_rel"
     _f="$ROOT$_rel"
-    # 基准里没有这个文件 = 该平台没这个组件，不臆造
+    # 基准里没有这个文件 = 该平台没这个组件，不臆造。
+    # 容器组走到这里时 _rel 已带 GUARD_CT_PREFIX，_src 就是 /rom/srv/lxc/... 的副本。
     [ -f "$_src" ] || continue
-    # 容器组：门前置不满足就整个跳过（原因见 _ct_gate 注释）
-    case "$_rel" in
-        "$GUARD_CT_PREFIX"/*) [ "$_CT_OK" = "1" ] || continue ;;
-    esac
     # 权限只比「有没有执行位」这一维：squashfs 保留权限位，清单里脚本是 755、配置是 644，
     # -x 判足够。**不要用 stat -c %a** —— 本固件 busybox 没编 stat，取到空串就会让
     # 下面的比较恒假（v.108.44 的真机事故：每分钟把 6 个文件全重写一遍）。

@@ -1817,6 +1817,89 @@ SSH 仍然只绑 LAN 侧，不再有「无差别监听所有口」的风险；�
 
 核对：两仓库 74 个文件的 blob sha 与 mode 完全一致（`ls-tree -r HEAD` 逐项比对）。
 
+## v.108.42：dockerd 起不来 —— 删掉 cgroupfs-mount
+
+### A. 症状
+
+LuCI「Docker → 网络」页**完全空白**。往上追四层：
+
+| 层 | 现场证据 |
+|---|---|
+| LuCI 网络页 | 空的，一条记录都没有 |
+| `docker network ls` | `Cannot connect to the Docker daemon` |
+| `/etc/init.d/dockerd status` | `not running`（rc=5） |
+| `logread` | `failed to start daemon: Devices cgroup isn't mounted` ×3 |
+| `ip -br link` | 只有 `br-lan` / `veth*`，**没有 `docker0`** |
+
+所以「网络不自己建立」不是网络配置的问题：**daemon 根本没起来，docker0 从未创建**，
+`verify_docker_fw` / `build_docker_fw` 写的 zone 和 forwarding 自然无从生效。
+
+### B. 三层因果，缺一条都推不出来
+
+| # | 事实 | 怎么证明 |
+|---|---|---|
+| ① | 内核没编 devices 控制器 | `zcat /proc/config.gz` → `# CONFIG_CGROUP_DEVICE is not set`；`/proc/cgroups` 只有 8 个控制器；`mount -t cgroup -o devices none ...` 回 `Unknown subsys name 'devices'`（rc=32） |
+| ② | `cgroupfs-mount` 把 procd 的 cgroup2 换成 v1 | 官方 init 全文 7 行：`START=01` + `boot() { if mountpoint -q /sys/fs/cgroup; then umount /sys/fs/cgroup/; fi; cgroupfs-mount }`，注释原文写着「Procd mounts non-hierarchical cgroupfs so unmount first」 |
+| ③ | dockerd 用 `statfs("/sys/fs/cgroup")` 判 v1/v2 | 根是 `tmpfs`（`mount` 第一行 `cgroup on /sys/fs/cgroup type tmpfs`）→ 判为 v1 → 找 `/sys/fs/cgroup/devices` → 不存在 → 退出 |
+
+**结论：v1 这条路在本固件上物理不通，与 docker 版本、参数、防火墙配置都无关。**
+
+### C. 为什么是「删包」而不是「补挂载」
+
+`cgroupfs-mount` 是 `shell/custom-packages.sh` 自己加的（v.99 时代）。
+它挂出来的是 `/proc/cgroups` 里**全部 8 个**可用控制器，一个不少——它尽职了，是内核没给 devices。
+
+先做过一轮可逆实验（运行态手工挂 `mount -t cgroup2 none /sys/fs/cgroup`）：
+
+| 现象 | 说明 |
+|---|---|
+| `dockerd status` → `running`，`docker network ls` 出 bridge/host/none | v2 路径通 |
+| `cgroup.controllers` 为空 | v1 层级还占着控制器，v2 是空壳 |
+| `umount /sys/fs/cgroup/{cpuset,...}` 全报 `not mounted` | cgroup2 盖上后 v1 挂载点被遮蔽，卸载路径有歧义 |
+
+所以叠加只是救急。**正解是让 procd 的 cgroup2 留下来**：删包。
+
+### D. 删包后的实测（重启验证）
+
+```
+cgroup2 on /sys/fs/cgroup type cgroup2 (rw,nosuid,nodev,noexec,relatime,nsdelegate)
+cgroup on /sys/fs/cgroup/systemd type cgroup (rw,...,name=systemd)     ← bootstrap 自己挂的
+
+cgroup.controllers = cpuset cpu io memory pids rdma                   ← v2 完整
+
+/etc/init.d/dockerd status → running
+docker network ls → bridge / host / none
+
+lxc-ls -f → ubuntu RUNNING 10.1.0.10                                  ← LXC 无恙
+```
+
+`/sys/fs/cgroup/` 下出现 `services` / `lxc.monitor.ubuntu` / `lxc.payload.ubuntu` / `lxc.pivot`，
+`lxc.pivot` 只有 LXC 在 v2 路径下才会建 —— procd 与 LXC 6.0.5 本来就支持 v2，
+v1 纯属 `cgroupfs-mount` 的残留。
+
+### E. 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `shell/custom-packages.sh` | 删 `cgroupfs-mount`，保留 `cgroup-tools`（libcgroup 2.x 在 v2 下仍可用），注释里写清整条因果链 |
+| `files/etc/init.d/cgroup2-guard`（新增，755） | `START=02` 兜底：若 `/sys/fs/cgroup` 根不是 cgroup2（例如该包被别的依赖链拉回来）就补挂；挂不上 `return 1`；若挂上但 `cgroup.controllers` 为空，`logger -p warning` 明说「docker 可用但资源限制不可用」 |
+| `tests/probe_v10842.sh`（新增，755） | 12 条断言：包列表两版一致、guard 的 shebang/START/判据/返回码、仓库内无任何非注释行调用 cgroupfs-mount |
+
+### F. 边界与不做的事
+
+| 项 | 说明 |
+|---|---|
+| `--memory` / `--cpus` | 删包后 controllers 完整，**可用**。只有在 guard 走兜底、v1 仍占着控制器时才会失效——那种情况 guard 会记 warning |
+| v1 的 `name=systemd` 层 | 仍然由 `_mount_systemd_cgroup` 挂（容器内 systemd 需要）。它挂在 cgroup2 根的子目录下，不影响根的 statfs 判定，实测 docker 与 LXC 均正常 |
+| `CONFIG_CGROUP_DEVICE` | ImageBuilder 只打预编译内核，`.config` 改不动内建选项。所以「把 devices 控制器补回来」这条路不存在，不必再试 |
+| 25.12 分支 | `apk-custom-packages.sh` 从来没有 `cgroupfs-mount`，本来就没这个坑 |
+| docker 拉镜像 | 现场 `docker run hello-world` 报 `registry-1.docker.io ... context deadline exceeded`，是直连 Docker Hub 超时，与 cgroup 无关，单独处理 |
+
+### G. 核对
+
+`tests/probe_v10842.sh` 12 条断言语义复算 12/12 通过；两仓库同步推送，
+内容与 mode 逐 blob 一致。
+
 # crowdsec 引导流程图
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)

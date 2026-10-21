@@ -45,7 +45,21 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-wechatpush-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-xfrpc-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES xz tar liblzma gnupg getopt"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES cgroupfs-mount cgroup-tools"
+# v.108.42：**不再装 cgroupfs-mount**。
+# 它的 boot() 第一件事就是把 procd 已经挂好的 cgroup2 卸掉（官方脚本原文注释：
+#   "Procd mounts non-hierarchical cgroupfs so unmount first before cgroupfs-mount"），
+# 然后按 /proc/cgroups 逐条挂 cgroup v1。而本固件内核是
+#   # CONFIG_CGROUP_DEVICE is not set
+# 实测 /proc/cgroups 只有 8 个控制器（cpuset cpu cpuacct blkio memory net_cls
+# pids rdma），没有 devices；`mount -t cgroup -o devices none ...` 直接回
+#   cgroup: Unknown subsys name 'devices'.   (rc=32)
+# 于是 dockerd 用 statfs("/sys/fs/cgroup") 判到 tmpfs → 走 v1 → 找 devices
+# 控制器 → 必然 `failed to start daemon: Devices cgroup isn't mounted` 退出，
+# docker0 永远不建，LuCI「Docker → 网络」页因此全空。
+# 删包后 procd 的 cgroup2 保住，dockerd 判到 cgroup2fs → 走 v2，设备控制改由
+# BPF 负责（CONFIG_CGROUP_BPF=y），不再需要那个控制器。
+# cgroup-tools 保留：libcgroup 2.x 在 v2 下仍可用，且无副作用。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES cgroup-tools"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES ip-full"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-ikconfig kmod-veth"
 # docker 的桥接过滤（v.99-bp.3）：dockerd 的官方 DEPENDS 里**没有**它

@@ -127,6 +127,17 @@ probe_tick() {
     # 冷却与失败计数都沿用 last_pull 停滞那一套：不缺耐心，也不刷 flash——
     # 60s 一轮的探针若无冷却，一台配置写不进去的机器会每分钟重跑一次完整引导。
     if [ ! -s "$STAMP_FILE" ]; then
+        # 【v.108.34】达到失败阈值后彻底停手。原来达到阈值只打一条「需人工介入」，
+        # 下一轮冷却一过照样重跑 —— 于是变成「每 5 分钟重建一次网桥 + 重启一次容器」
+        # 的永久循环（首台真机实测：capi_block 误判 → exit 1 → 5 分钟一轮不停）。
+        # 重跑同一套脚本换不来新结果，代价却是真实的：每轮 PREP 都会重建 lxcbr0，
+        # veth 就有一次被甩掉的机会。停手比乱修安全。
+        # 解除方式三种：引导修好后自己写回 installed、重启探针、删 $STATE_FILE。
+        if [ "${P_HUMAN:-0}" = "1" ]; then
+            P_ACTION="need-human-hold"
+            plog "【需人工介入】已停止重跑（installed 仍缺：$STAMP_FILE）。修好后重启探针或删除 $STATE_FILE 解除"
+            return 0
+        fi
         _rs_now="$(date +%s)"
         if [ $((_rs_now - ${P_LAST_TRIG:-0})) -lt "$PROBE_COOLDOWN" ]; then
             P_ACTION="restamp-cooldown"
@@ -151,12 +162,14 @@ probe_tick() {
         if [ "$_rs_rc" = 0 ] && [ -s "$STAMP_FILE" ]; then
             P_ACTION="restamp-ok"
             P_FAIL=0
+            P_HUMAN=0
             plog "【补印】引导退出 0，installed 已落位（$STAMP_FILE）"
         else
             P_FAIL=$((${P_FAIL:-0} + 1))
             if [ "$P_FAIL" -ge "$PROBE_FAIL_ALERT" ]; then
                 P_ACTION="need-human"
-                plog "【需人工介入】补印连续 $P_FAIL 次仍失败（本次退出 $_rs_rc），installed 依然缺失：$STAMP_FILE"
+                P_HUMAN=1
+                plog "【需人工介入】补印连续 $P_FAIL 次仍失败（本次退出 $_rs_rc），installed 依然缺失：$STAMP_FILE。已停止自动重跑"
             else
                 P_ACTION="restamp-fail"
                 plog "【补印】引导退出 $_rs_rc，installed 仍缺失（连续第 $P_FAIL/${PROBE_FAIL_ALERT} 次，日志见 $BOOT_LOG）"
@@ -257,9 +270,9 @@ probe_tick() {
 
 # ---- 状态落盘 / 恢复：让停滞轮数、冷却、失败计数跨重启仍然准确 ----
 _probe_save() {
-    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s\n' \
+    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s\n' \
         "${P_STALL:-0}" "${P_LAST_TRIG:-0}" "${P_FAIL:-0}" "${P_ACTION:-none}" "$(date +%s)" \
-        "${P_ROUND:-0}" "${P_AUDIT_BAD:-0}" \
+        "${P_ROUND:-0}" "${P_AUDIT_BAD:-0}" "${P_HUMAN:-0}" \
         > "$STATE_FILE" 2>/dev/null
 }
 _probe_load() {
@@ -275,6 +288,8 @@ _probe_load() {
     [ -n "$_v" ] && P_ROUND="$_v"
     _v=$(printf '%s\n' "$_pl" | sed -n 's/.*audit_bad=\([0-9][0-9]*\).*/\1/p')
     [ -n "$_v" ] && P_AUDIT_BAD="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*human=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_HUMAN="$_v"
     return 0
 }
 
@@ -285,6 +300,7 @@ P_FAIL=0
 P_LOCK_RECLAIMED=0
 P_ROUND=0
 P_AUDIT_BAD=0
+P_HUMAN=0
 _probe_load
 while true; do
     P_LOCK_RECLAIMED=0

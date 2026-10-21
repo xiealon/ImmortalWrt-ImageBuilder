@@ -37,14 +37,14 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-21.108.40-bp"
+SCRIPT_VER="2026-10-21.108.44-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
 LXC_PATH="${LXC_PATH:-/srv/lxc}"
 ROOTFS="$LXC_PATH/$LXC_NAME/rootfs"
 CFG="$LXC_PATH/$LXC_NAME/config"
-TARBALL="${TARBALL:-$CS_HOME/lxc-ubuntu.tar.gz}"
+TARBALL="${TARBALL:-$CS_HOME/lxc-crowdsec.tar.gz}"
 LEGACY_TARBALL="/opt/lxc-ubuntu.tar.gz"
 LAPI_PORT="${LAPI_PORT:-8080}"
 BOUNCER_NAME="${BOUNCER_NAME:-openwrt-fw}"
@@ -129,6 +129,31 @@ ct_exists() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; }
 ct_pid() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>/dev/null | sed -n 's/^PID:[[:space:]]*//p' | head -n1; }
 _pgrep_bouncer() { pgrep -f "crowdsec-firewall-bouncer" >/dev/null 2>&1; }
 _ct_env() { ct sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; '"$1"; }
+
+# ---- 容器 init 类型判别（v.109-min）----
+# 本仓库有两种 rootfs 产物，同一份引导脚本必须都能带：
+#   · systemd 版（lxc-ubuntu.tar.gz，历史产物）：PID1=systemd，网络走 systemd-networkd，
+#     自启走 multi-user.target.wants 软链，cgroup 需要宿主提供 name=systemd 层级；
+#   · 极简版（lxc-crowdsec.tar.gz，C 方案）：PID1=busybox init，网络走 /etc/crowdsec-net.conf
+#     + /etc/init.d/netconf，自启走 /etc/inittab + /etc/init.d/crowdsec，不需要 cgroup 层级。
+# 判据取「inittab 在 + 没有 systemd 二进制」两条同时成立，而不是只看 inittab：
+# 只判 inittab 会把「ubuntu rootfs 里恰好有个 inittab」误判成极简版。
+# rootfs 可能在脚本启动后才解压出来，所以这里必须是函数、不能是启动期求值。
+_is_minimal_init() {
+    [ -f "$ROOTFS/etc/inittab" ] || return 1
+    [ ! -e "$ROOTFS/lib/systemd/systemd" ] || return 1
+    return 0
+}
+
+# 容器内 crowdsec 重启：两种 init 统一入口。
+# systemd 版原先是 systemctl → service → init.d 三级回落；极简版没有 systemctl/service，
+# 直接落到 /etc/init.d/crowdsec。抽成一个函数是为了让 4 个调用点行为一致
+# （原先只有 _ensure_lapi_exposed 写了 init.d 回落，enroll 之后的重启在极简版里是空转）。
+_ct_restart_crowdsec() {
+    _ct_env 'systemctl restart crowdsec' >/dev/null 2>&1 \
+        || _ct_env 'service crowdsec restart' >/dev/null 2>&1 \
+        || _ct_env '/etc/init.d/crowdsec restart' >/dev/null 2>&1
+}
 
 cs_active_on_host() { _pgrep_bouncer; }
 nft_table_ready() { nft list table ip crowdsec >/dev/null 2>&1; }
@@ -358,6 +383,42 @@ verify_ip_forward() {
     [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = "1" ] || return 1
 }
 
+# 容器 veth 掉线重接（首台真机 2026-10-22 现场新增）
+#
+# 现象：lxcbr0 有 IP 但 <NO-CARRIER>，容器 eth0 有 IP 且 LAPI 在 :::8080 LISTEN，
+#       宿主 ping 容器 100% 丢包。两边都"正常"，中间那根线不在。
+# 成因：/etc/init.d/network reload 让 netifd 按 uci 重建 lxcbr0（拆了重加），
+#       而容器已经在跑 —— LXC 只在 lxc-start 时插 veth，之后没人负责接回端口。
+# 判据：宿主侧 veth 的 iflink == 容器 eth0 的 ifindex（veth 对端的编号关系）。
+# 兜底：找不到对端就什么都不做，绝不 ip link del 网桥（那会把容器网彻底打死）。
+_reattach_ct_veth() {
+    ip link show lxcbr0 >/dev/null 2>&1 || return 1
+    # 已经有端口挂着了：说明没掉，什么都不用做
+    ip -d link show master lxcbr0 2>/dev/null | grep -q 'veth' && return 0
+    ct_running || return 0
+    _rv_idx=$(ct sh -c 'cat /sys/class/net/eth0/ifindex' 2>/dev/null | tr -dc '0-9')
+    [ -n "$_rv_idx" ] || { log "[网桥] 容器 eth0 ifindex 取不到，放弃重接（veth 对端无法确认）"; return 1; }
+    for _rv_v in /sys/class/net/veth*; do
+        [ -e "$_rv_v" ] || continue
+        [ "$(cat "$_rv_v/iflink" 2>/dev/null)" = "$_rv_idx" ] || continue
+        _rv_n=$(basename "$_rv_v")
+        ip link set "$_rv_n" master lxcbr0 2>/dev/null || continue
+        ip link set "$_rv_n" up 2>/dev/null || true
+        ip link set lxcbr0 up 2>/dev/null || true
+        log "[网桥] 容器 veth 掉线，已重接回 lxcbr0（宿主 $_rv_n ↔ 容器 eth0 if${_rv_idx}）"
+        # 立刻用 ping 证明修好了；修不好也要说出来，不能假绿
+        _rv_i=0
+        while [ "$_rv_i" -lt 10 ]; do
+            ping -c 1 -W 1 "$CONTAINER_IP" >/dev/null 2>&1 && { log "[网桥] 重接后 ping $CONTAINER_IP 已通"; return 0; }
+            _rv_i=$((_rv_i+1)); sleep 1
+        done
+        log "[网桥] 重接后仍 ping 不通 $CONTAINER_IP（可能还有防火墙/路由问题，不在此函数职责内）"
+        return 1
+    done
+    log "[网桥] 未找到与容器 eth0 if${_rv_idx} 配对的宿主 veth（容器网络需重启容器恢复）"
+    return 1
+}
+
 verify_bridge() {
     # 【v.108.24】uci 侧三项（proto/device/ipaddr）与内核侧地址一起比。
     # build 写的是 network.lxc = interface / proto=static / device=lxcbr0 /
@@ -380,6 +441,14 @@ verify_bridge() {
     [ "$(uci -q get network.lxcbr0.name 2>/dev/null)" = "lxcbr0" ] || return 1
     # 空网桥没有 bridge_empty='1' 时 netifd 直接不建（端口要等容器 veth 接进来）
     [ "$(uci -q get network.lxcbr0.bridge_empty 2>/dev/null)" = "1" ] || return 1
+    # 【首台真机 2026-10-22】端口在位才算就绪。
+    #   netifd reload 会把 lxcbr0 拆了重建，端口跟着掉光变成 NO-CARRIER，
+    #   而上面这些判据（device/proto/ipaddr/netmask/bridge_empty/地址）**全都还成立** ——
+    #   这正是「两边各自都正常、中间断链」能藏住的根本原因：判据里没有一条问「桥里有谁」。
+    #   容器在跑就必须有 veth 挂在桥上；容器没跑时不要求（空桥是常态，bridge_empty=1 就是为此）。
+    if ct_running; then
+        ip -d link show master lxcbr0 2>/dev/null | grep -q 'veth' || return 1
+    fi
     ip link show lxcbr0 >/dev/null 2>&1 || return 1
     _vb=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
     [ -n "$_vb" ] && [ "$_vb" = "$BRIDGE_IP" ]
@@ -1124,14 +1193,29 @@ _bs_flag_dump() {
 # 「现在能不能等一个还不存在的东西」。重装（标记被清）也算首次装机，因为它确实要从头等。
 _first_install() { ! _stamp_present; }
 
-# 构建后复核的豁免名单（v.108.33）。默认全都复核：build 返回 0 只代表命令没报错。
-# 唯一一项是 bouncer_verify，而且只在首次装机时豁免 —— 它等的是 bouncer 的首次心跳，
-# 装机那一刻心跳必然还没有，这正是 v.108.21 把它列进 SOFT_NODES 的原因。
-# 重启态不给豁免：那时 bouncer 早该在拉了，验不过就是真有问题。
+# 构建后复核的豁免名单（v.108.33，v.108.34 增补 capi_block）。默认全都复核：
+# build 返回 0 只代表命令没报错。
+#
+# ① bouncer_verify：只在首次装机时豁免 —— 它等的是 bouncer 的首次心跳，
+#    装机那一刻心跳必然还没有，这正是 v.108.21 把它列进 SOFT_NODES 的原因。
+#    重启态不给豁免：那时 bouncer 早该在拉了，验不过就是真有问题。
+#
+# ② capi_block：**永远豁免**，因为它和 capi_release 是同一处配置的两个互斥状态：
+#      capi_block   → 容器启动前把 config.yaml 的 online_client 注释掉（要求 off）
+#      capi_release → bouncer 验证通过后把它放回来（要求 on）
+#    收尾复核发生在 DAG 全部跑完之后，那一刻按设计就是「已放出」，拿 off 去判
+#    必然不符。首台真机实测（v.108.34）：capi_block 是唯一不符节点 → exit 1 →
+#    置位全部归零 → installed 不写 → 探针【补印】分支每 5 分钟重跑一次全量引导
+#    → 每轮重建一次 lxcbr0 → veth 被反复甩掉。这就是「重跑副作用」的真身。
+#    capi_block 的时序义务由 DEP_ct_boot 的硬前置保证（不 off 就不许启容器），
+#    「真的没写成」由 build_capi_block 内部的立即复核当场抓，收尾不必再判一次。
 _post_verify_skip() {
     case " $1 " in
         *" bouncer_verify "*)
             _first_install && return 0
+            ;;
+        *" capi_block "*)
+            return 0
             ;;
     esac
     return 1
@@ -1159,7 +1243,16 @@ _post_verify_after_boot() {
     _pva_bad=""
     for _pva_n in $_built_nodes; do
         if _post_verify_skip "$_pva_n"; then
-            log "[复核][$_pva_n] 首次装机：跳过（等首次心跳的柔性节点）"
+            # v.108.41：两种情况豁免理由不同，日志不能共用一句话（原来 capi_block
+            # 会打成「等首次心跳」，看日志的人会去查一个根本不存在的 bouncer 心跳）。
+            case " $_pva_n " in
+                *" capi_block "*)
+                    log "[复核][$_pva_n] 与 capi_release 互斥，收尾不再判（终态由 capi_release 决定）"
+                    ;;
+                *)
+                    log "[复核][$_pva_n] 首次装机：跳过（等首次心跳的柔性节点）"
+                    ;;
+            esac
             continue
         fi
         _post_verify_confirm "$_pva_n" || _pva_bad="$_pva_bad $_pva_n"
@@ -1350,6 +1443,14 @@ flush_uci() {
         fi
         if /etc/init.d/network reload >/dev/null 2>&1; then
             log "[flush] network 已重载"
+            # 【首台真机 2026-10-22 现场】netifd reload 会按 uci 重建 lxcbr0：
+            # 网桥被拆了重加，而容器已经在跑 —— LXC 只在 lxc-start 时插 veth，
+            # 没有任何东西会把端口接回去。结果就是现场那副样子：
+            #     lxcbr0: <NO-CARRIER,UP> inet 10.1.0.1/24 state DOWN
+            #     容器侧 eth0 有 IP、LAPI 在 :::8080 上 LISTEN
+            #     宿主 ping 10.1.0.10 100% 丢包、curl 等 2.6 秒才 Failed to connect
+            # 后面所有「LAPI 探测不通」的日志都是这一条的下游症状，别被它带偏。
+            _reattach_ct_veth
         else
             _fu_bad="$_fu_bad network-reload"
             log "[flush] network 重载失败（配置已落盘，下次网络重载/重启仍生效）"
@@ -1479,13 +1580,37 @@ build_rootfs() {
 # 容器内构建子步骤判定（v.93 起由 ct_net/ct_bootlink/ct_resolv/acquis 等节点各自闭环）：
 # 每一步独立 verify 就绪探测，供 ensure_sub 循环与整体快照判定共用，判定标准不变
 verify_sub_ct_net() {
-    [ -f "$ROOTFS/etc/systemd/network/10-eth0.network" ] || return 1
     _vs_dns="$(_container_dns)"
+    if _is_minimal_init; then
+        # 极简版：静态网络写在一份 shell 变量文件里，由 /etc/init.d/netconf 在 rcS 里套用。
+        # 判据同 systemd 版一样是「三问齐全」，只是取值方式不同：
+        #   systemd → Address=/Gateway=/DNS= ；极简版 → ADDRESS=/GATEWAY=/DNS=
+        _vs_net="$ROOTFS/etc/crowdsec-net.conf"
+        [ -f "$_vs_net" ] || return 1
+        grep -qx "ADDRESS=${CONTAINER_IP}/24" "$_vs_net" 2>/dev/null || return 1
+        grep -qx "GATEWAY=${BRIDGE_IP}" "$_vs_net" 2>/dev/null || return 1
+        grep -qx "DNS=${_vs_dns}" "$_vs_net" 2>/dev/null || return 1
+        return 0
+    fi
+    [ -f "$ROOTFS/etc/systemd/network/10-eth0.network" ] || return 1
     grep -q "Address=${CONTAINER_IP}/24" "$ROOTFS/etc/systemd/network/10-eth0.network" 2>/dev/null || return 1
     grep -q "Gateway=${BRIDGE_IP}" "$ROOTFS/etc/systemd/network/10-eth0.network" 2>/dev/null || return 1
     grep -q "DNS=${_vs_dns}" "$ROOTFS/etc/systemd/network/10-eth0.network" 2>/dev/null || return 1
 }
 verify_sub_ct_bootlink() {
+    if _is_minimal_init; then
+        # 极简版没有 systemd，自启语义换成 inittab + init.d：
+        #   · /etc/inittab 在 —— 有 init 的启动表，PID1 起来才走得下去；
+        #   · /etc/init.d/crowdsec 非空 —— 容器的全部意义，缺了必须当场判不符（同 systemd 版口径）；
+        #   · /etc/init.d/rcS 可执行 —— sysinit 入口，缺了网络/syslog 都不起。
+        [ -s "$ROOTFS/etc/inittab" ] || return 1
+        [ -s "$ROOTFS/etc/init.d/crowdsec" ] || return 1
+        [ -x "$ROOTFS/etc/init.d/rcS" ] || return 1
+        [ "$(cat "$ROOTFS/etc/hostname" 2>/dev/null)" = "crowdsec" ] || return 1
+        _vb_mid=$(tr -d ' \t\r\n' < "$ROOTFS/etc/machine-id" 2>/dev/null)
+        printf '%s' "$_vb_mid" | grep -qE '^[0-9a-f]{32}$' || return 1
+        return 0
+    fi
     _wants="$ROOTFS/etc/systemd/system/multi-user.target.wants"
     for _svc in systemd-networkd crowdsec; do
         if [ ! -f "$ROOTFS/lib/systemd/system/$_svc.service" ]; then
@@ -1568,7 +1693,12 @@ build_ct_net() {
     setup_container_network || return 1
     # 容器已在跑的情况下文件改了需要生效：尝试不重启地拉起网络
     if ct_running; then
-        _ct_env "systemctl restart systemd-networkd" >/dev/null 2>&1 || true
+        if _is_minimal_init; then
+            # 极简版没有 networkd：netconf 用 `ip ... replace` 套用，幂等、不会断掉已有连接
+            _ct_env "/etc/init.d/netconf restart" >/dev/null 2>&1 || true
+        else
+            _ct_env "systemctl restart systemd-networkd" >/dev/null 2>&1 || true
+        fi
     fi
     return 0
 }
@@ -1586,6 +1716,9 @@ _cg_host_ok() {
 
 # LXC 以 systemd 方式引导，缺 /sys/fs/cgroup/systemd 容器起不来或起一半就死。
 verify_cgroup_mount() {
+    # 极简版容器里没有 systemd，也就没有「systemd 自己去 mount cgroup」这一步，
+    # 这个宿主侧挂载点对它毫无意义 —— 直接判就绪，避免为了不存在的消费者去动宿主。
+    _is_minimal_init && return 0
     # ① 唯一可靠判据：/proc/mounts 里真有这个挂载点，且是 cgroup/name=systemd
     _cg_host_ok && return 0
     # ② 只有「纯 cgroup v2 unified」才允许跳过：内核里压根没有 v1 命名层级时，
@@ -1593,14 +1726,32 @@ verify_cgroup_mount() {
     #    v.108.3 之前这里只判 `cgroup2 存在` 就 return 0 —— hybrid 宿主（同时挂了
     #    cgroup v1 和 v2）会因此永远跳过挂载，容器内 systemd 起不来，
     #    而宿主这边判「已就绪」。这就是那条 Failed to mount API filesystems 的来源之一。
-    if grep -qE 'cgroup2[[:space:]]' /proc/mounts 2>/dev/null \
-       && ! grep -qE 'type cgroup[[:space:]]' /proc/mounts 2>/dev/null; then
+    #
+    #    【v.108.43】原写法是：
+    #        ! grep -qE 'type cgroup[[:space:]]' /proc/mounts
+    #    这个条件**恒为真** —— /proc/mounts 的列是
+    #        <设备> <挂载点> <fstype> <挂载选项> <dump> <pass>
+    #    里面压根没有 "type " 这个字面量（那是 mount(8) 的显示格式，不是 /proc/mounts）。
+    #    于是判据退化成「只要 /proc/mounts 里有 cgroup2 就跳过」，
+    #    v.108.3 想修的 hybrid 误判其实一直没修上。
+    #    首台真机实测正是 hybrid：
+    #        cgroup2 /sys/fs/cgroup         cgroup2 ...
+    #        cgroup  /sys/fs/cgroup/systemd cgroup  ... name=systemd
+    #    而 verify 照样报「就绪」—— 只因为 ① 恰好也命中（name=systemd 真的挂着），
+    #    两个判断互相抵消，问题被藏住了。若哪天 name=systemd 没挂，这里就会假绿：
+    #    宿主说就绪、build_cgroup_mount 不执行、容器内 systemd 起不来。
+    #    改按 fstype 列判：v2 在 且 v1 不在，才算纯 v2。
+    if awk 'BEGIN{v1=0;v2=0} $3=="cgroup"{v1=1} $3=="cgroup2"{v2=1} END{exit !(v2 && !v1)}' \
+            /proc/mounts 2>/dev/null; then
         return 0
     fi
     # ③ 其余情况（v1 可用但没挂 / hybrid）→ 确实缺，交给 _mount_systemd_cgroup
     return 1
 }
 build_cgroup_mount() {
+    # 极简版不需要这个层级（容器里没有 systemd 去 mount cgroup）：
+    # 宿主 CGROUP_DEVICE / CGROUP_FREEZER 都没开，这里少一次 mount 就少一个失败点。
+    _is_minimal_init && return 0
     # 不吞返回值：这里挂不上，容器内 systemd 必然报
     # Failed to mount API filesystems 然后 Exiting PID 1，容器永远起不来。
     # 原先无条件 return 0，等于「日志说挂了、退出码说成功」。
@@ -1613,6 +1764,17 @@ build_cgroup_mount() {
 # 这条补的就是中间那段 —— 它只能在容器起来之后跑，所以挂在 ct_boot 尾部。
 verify_ct_cgroup() {
     ct_running || return 1
+    # 极简版：系统里没有任何 cgroup 消费者，PID1 是 busybox init。
+    # 这一节改成「PID1 是活的 init」，而不是「能读 cgroup.procs」——后者在
+    # 没有 cgroup v1 层级的宿主上本来就不成立（CGROUP_DEVICE 未开）。
+    if _is_minimal_init; then
+        _ct_init=$(_ct_env 'cat /proc/1/comm 2>/dev/null' 2>/dev/null | tr -d '\r' | head -n1)
+        case "$_ct_init" in
+            init|busybox|sh) return 0 ;;
+        esac
+        log "[init] 容器内 PID 1 不是 busybox init（实际「${_ct_init:-空}」）"
+        return 1
+    fi
     # ① 容器内能读到 cgroup 的组织文件：能读 = 这层确实挂进容器且是活的
     if ! _ct_env 'test -r /sys/fs/cgroup/systemd/cgroup.procs || test -r /sys/fs/cgroup/cgroup.procs' \
             >/dev/null 2>&1; then
@@ -1653,7 +1815,15 @@ verify_capi_block() {
     verify_online_client_off
 }
 build_capi_block() {
-    ensure_online_client_off
+    # v.108.34：build 返回 0 只代表 sed 没报错，不代表文件真的变成了 off。
+    # 因为 capi_block 已从收尾复核里豁免（见 _post_verify_skip 的理由），
+    # 「真的没写成」必须在当场抓住 —— 否则它会被 capi_release 悄悄盖过去。
+    ensure_online_client_off || return 1
+    verify_online_client_off || {
+        log "[CAPI] online_client 注释后立即校验仍不符（$CROWDSEC_CFG）"
+        return 1
+    }
+    return 0
 }
 
 # ---- LOGCONF / acquis：容器内日志采集配置（acquis + 解析器 + 白名单）----
@@ -1821,6 +1991,22 @@ build_bouncer_fill() {
     # 宿主机 bouncer 进程仍持着旧 key（或根本还没起来）：uci 写完必须重启一次才读到新值。
     # 不重启的话，紧接着的 BOUNCERVERIFY 会白等 60 秒再判 hard。
     _bouncer_service_restart
+    # 首启补拉（首台真机 2026-10-22 现场确认的真 bug）：
+    #   全新固件第一轮里 bouncer 服务还没被 enable（enable 写在阶段 3 的 fix_B 里），
+    #   _bouncer_service_restart 见进程没跑就直接放行 → 紧接着的 BOUNCERVERIFY 必然
+    #   60 秒后软失败 → 不置位 → ENROLL 跳过 → 无 installed 标记 → 阶段 3 重跑整条 DAG，
+    #   现场表现就是引导日志里「LOGCONF → LAPI → BOUNCERVERIFY → 阶段 3」转圈。
+    #   这里在写完 key 的当下就把服务拉起来（幂等：已在跑且 nft 表就绪则立即返回），
+    #   让 BOUNCERVERIFY 第一次就有东西可验。不改 DAG 结构，只改动作。
+    if ! cs_active_on_host; then
+        log "[bouncer] 服务未运行（首启常态），就地 enable+restart"
+        _ensure_bouncer_service
+        if cs_active_on_host; then
+            log "[bouncer] 首启拉起成功"
+        else
+            log "[bouncer] 首启拉起失败（仍交给 BOUNCERVERIFY 判定 + 探针兜底）"
+        fi
+    fi
     return 0
 }
 
@@ -1852,10 +2038,29 @@ build_capi_release() {
     ensure_online_client_on || return 1
     # 运行中容器需要重载才生效：重启容器内 crowdsec 服务
     if ct_running; then
-        _ct_env "systemctl restart crowdsec" >/dev/null 2>&1 \
-            || _ct_env "service crowdsec restart" >/dev/null 2>&1 \
-            || true
+        _ct_restart_crowdsec || true
         log "[CAPI] online_client 已放出，容器内 crowdsec 已重载"
+        # 【v.108.41】重启会把 8080 摘掉约 10 秒，而收尾复核紧接着就要探它
+        # （verify_lapi_fetch → verify_lapi_reachable，重试窗口只有 3×1s）。
+        # 首台真机实测（06:54 那一轮）：
+        #   06:54:42 [LAPI] 重启后 8080 已对路由器开放      ← 上一步刚把它弄通
+        #   06:54:45 这里重启 crowdsec                      ← 又摘掉
+        #   06:54:47 [复核] 首轮不符： lapi_fetch
+        #   06:54:50 [复核][lapi_fetch] 构建后始终不符      ← 3 秒窗口覆盖不住
+        #   → 整轮 exit 1 → 探针补印又跑一轮。lapi_fetch 本身没问题，
+        #     是这一步的重启把它的现场弄脏了。等 8080 回来再返回，
+        #     收尾复核看到的就是稳定现场。
+        _cw=0
+        while [ "$_cw" -lt "$MAX_WAIT" ]; do
+            verify_lapi_reachable && break
+            sleep 1
+            _cw=$((_cw + 1))
+        done
+        if verify_lapi_reachable; then
+            log "[CAPI] 重启后 8080 已恢复（等待 ${_cw}s）"
+        else
+            log "[CAPI] 重启后 ${MAX_WAIT}s 内 8080 未恢复（收尾复核可能因此误判）"
+        fi
     fi
     return 0
 }
@@ -2213,6 +2418,11 @@ build_bridge() {
         log "[网桥] lxcbr0 地址已校正为 $_nb_ip/$_nb_pfx"
     fi
 
+    # ⑥ 端口在位（首台真机 2026-10-22）：网桥一旦被重建，端口全掉、容器与宿主断链，
+    #    而 uci 与地址全都"看着正常"。这里补一次重接，与 verify_bridge 的端口判据对称：
+    #    verify 判不就绪 → ensure 调本函数 → 本函数把线接回去 → 下一轮 verify 通过。
+    _reattach_ct_veth || true
+
     # ⑤ 脏标记由 ensure() 统一定位（_bs_flag_set "_dirty_$o" B），builder 里不必重复写。
     return 0
 }
@@ -2386,6 +2596,20 @@ _container_dns() {
 setup_container_network() {
     [ -d "$ROOTFS" ] || { log "[网络] rootfs 未就绪"; return 1; }
     _dns="$(_container_dns)"
+    if _is_minimal_init; then
+        # 极简版：写成 shell 变量文件，由 /etc/init.d/netconf 套用（rcS 里调）。
+        # 用变量文件而不是 ip 命令直接下发，是为了让「配置」留在磁盘上：
+        # 容器重启后 rcS 还能照着重放，而 ip 命令下发的东西一重启就没了。
+        _netfile="$ROOTFS/etc/crowdsec-net.conf"
+        atomic_write "$_netfile" "ADDRESS=${CONTAINER_IP}/24" <<EOF || { log "[网络] 容器网络文件写入不完整"; return 1; }
+ADDRESS=${CONTAINER_IP}/24
+GATEWAY=${BRIDGE_IP}
+DNS=${_dns}
+EOF
+        chmod 644 "$_netfile" 2>/dev/null
+        log "[网络] 容器静态 IP ${CONTAINER_IP}/24 网关 ${BRIDGE_IP} DNS ${_dns}（极简 init）"
+        return 0
+    fi
     _netfile="$ROOTFS/etc/systemd/network/10-eth0.network"
     mkdir -p "$(dirname "$_netfile")" 2>/dev/null
     atomic_write "$_netfile" "Address=${CONTAINER_IP}/24" <<EOF || { log "[网络] 容器网络文件写入不完整"; return 1; }
@@ -2403,6 +2627,28 @@ EOF
 
 setup_container_boot() {
     [ -d "$ROOTFS" ] || { log "[自启] rootfs 未就绪"; return 1; }
+    if _is_minimal_init; then
+        # 极简版：自启写在 inittab 里（::sysinit 跑 rcS，::respawn 看住 crowdsec），
+        # 没有软链可建。缺 inittab / init.d/crowdsec 说明 rootfs 残缺，必须判失败——
+        # 口径与 systemd 版「缺 crowdsec.service 就 return 1」一致。
+        [ -s "$ROOTFS/etc/inittab" ] \
+            || { log "[自启] 容器内缺 /etc/inittab（rootfs 残缺），无法引导"; return 1; }
+        [ -s "$ROOTFS/etc/init.d/crowdsec" ] \
+            || { log "[自启] 容器内缺 /etc/init.d/crowdsec（rootfs 残缺）"; return 1; }
+        chmod +x "$ROOTFS/etc/init.d/rcS" "$ROOTFS/etc/init.d/crowdsec" \
+                 "$ROOTFS/etc/init.d/netconf" "$ROOTFS/etc/init.d/syslogd" \
+                 "$ROOTFS/usr/sbin/crowdsec-supervise" 2>/dev/null
+        echo "crowdsec" | atomic_write "$ROOTFS/etc/hostname" "crowdsec" || return 1
+        _mid=$(cat "$ROOTFS/etc/machine-id" 2>/dev/null | tr -d ' \t\r\n')
+        printf '%s' "$_mid" | grep -qE '^[0-9a-f]{32}$' || {
+            _mid=$( (tr -d ' \t\r\n' < /etc/machine-id 2>/dev/null | grep -oE '^[0-9a-f]{32}$') )
+            [ -n "$_mid" ] || _mid=$(sha256sum /proc/sys/kernel/random/uuid 2>/dev/null | cut -c1-32)
+            [ -n "$_mid" ] || _mid=$(date +%s%N 2>/dev/null | sha256sum | cut -c1-32)
+            printf '%s\n' "$_mid" | atomic_write "$ROOTFS/etc/machine-id" "" || return 1
+        }
+        log "[自启] 极简 init：inittab + rcS + init.d/crowdsec 已就绪，hostname/machine-id 已初始化"
+        return 0
+    fi
     _wants="$ROOTFS/etc/systemd/system/multi-user.target.wants"
     mkdir -p "$_wants" 2>/dev/null
     [ -f "$ROOTFS/lib/systemd/system/systemd-networkd.service" ] \
@@ -2556,9 +2802,7 @@ _ensure_lapi_exposed() {
         return 0
     fi
     log "[LAPI] 路由器侧探测不通（容器内 LAPI 可能仍只监听 127.0.0.1），重启容器内 crowdsec"
-    _ct_env 'systemctl restart crowdsec' >/dev/null 2>&1 \
-        || _ct_env 'service crowdsec restart' >/dev/null 2>&1 \
-        || _ct_env '/etc/init.d/crowdsec restart' >/dev/null 2>&1 \
+    _ct_restart_crowdsec \
         || log "[LAPI] 容器内 crowdsec 重启命令均失败"
     _lw=0
     while [ "$_lw" -lt "$MAX_WAIT" ]; do
@@ -2752,9 +2996,25 @@ bouncer_pulling() {
     fi
 
     _now="$(_ct_env "date +%s" 2>/dev/null)"
-    _at="$(_ct_env "date -d '$_lp' +%s" 2>/dev/null)"
-    if [ -z "$_now" ] || [ -z "$_at" ]; then
-        _bp_say "[bouncer] last_pull 判不了（容器内 date 不可用或回显为空：now=[$_now] at=[$_at]），本次放行 —— 这不是「新鲜」"
+    # 【v.108.44】_lp 是 crowdsec 打的 ISO8601（形如 2026-10-21T23:59:53Z），
+    # 原写法直接 `date -d "$_lp"` —— busybox 的 -d 只吃 `YYYY-MM-DD hh:mm:ss` 这类，
+    # 带 T 和 Z 就解析失败，_at 恒为空，于是**每一次**都走下面那条「判不了 → 放行」。
+    # 也就是说 last_pull 新鲜度检查从上线起就没真正执行过：日志写「判不了」，
+    # 看着像容器里 date 坏了，实际是格式没规整。这种「检查静默失效」比判错更危险 ——
+    # bouncer 真停拉了，这里照样说「放行」。
+    # 现在把 T 换成空格、去掉尾部 Z；容器无 tzdata、本地即 UTC，epoch 与 date +%s
+    # 同一基准，所以两种写法结果等同（-u 不被支持时退回无 -u 仍成立）。
+    _lp_norm=$(printf '%s' "$_lp" | sed -e 's/T/ /' -e 's/Z$//')
+    _at="$(_ct_env "date -u -d '$_lp_norm' +%s" 2>/dev/null)"
+    [ -n "$_at" ] || _at="$(_ct_env "date -d '$_lp_norm' +%s" 2>/dev/null)"
+    # 两种失败要分开报：「回显为空」和「格式不认」是两件事，混在一句话里
+    # 会把排查方向带偏（真机日志就是这么误导的：now=[…] at=[] 被写成「date 不可用」）。
+    if [ -z "$_now" ]; then
+        _bp_say "[bouncer] last_pull 判不了（容器内 date +%s 回显为空），本次放行 —— 这不是「新鲜」"
+        return 0
+    fi
+    if [ -z "$_at" ]; then
+        _bp_say "[bouncer] last_pull 判不了（容器内 date 解析不了这个时间串：lp=[$_lp] 规整后=[$_lp_norm]），本次放行 —— 这不是「新鲜」"
         return 0
     fi
     if [ $(( _now - _at )) -gt "$_max_age" ]; then
@@ -2815,10 +3075,37 @@ etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml
 etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml"
 
 # 四个文件逐个算 sha256，输出「sha 相对路径」行；缺任何一个都算算不出来
+#
+# 【v.108.42】config.yaml 不能整文件算进基线。它里面有几行是「设计上每轮必变」的：
+#   capi_block    启动前把 online_client 注释掉
+#   capi_release  bouncer 验证后把它放回来
+# 基线是在 _stamp_write 那一刻写的（那时按设计是「放开态」），而重启态的开机引导
+# 一上来就先跑 capi_block 注释 → 文件变了 → LOGCONF 的 verify_acquis 立刻报
+# 「解析器/配置 sha 与基线不符」→ build_acquis 怎么写都写不回去（它压根不管
+# online_client 那两行）→ hard 退出。
+# 首台真机实测（07:15 那一轮，重启后第一次引导）：
+#   [日志] 解析器/配置 sha 与基线不符（内容被改动）
+#   [日志] 容器内采集配置不符
+#   [配置] 解析器 + 日志源 + 白名单已写入
+#   [日志] 容器内采集配置写入后仍不符
+#   [logconf] 构建执行失败，hard 失败，引导终止（退出码 1）
+# 这不是配置被改坏，是判据把「设计内的状态切换」当成了漂移。
+# 处理：把这四行剔掉再算 sha —— online_client 与它的 online_api credentials_path。
+# （client 段的 local_api credentials_path 不受影响，正则限定了 online_api_credentials.yaml）
 _cfg_sha_now() {
     for _r in $CFG_SHA_LIST; do
         [ -f "$ROOTFS/$_r" ] || return 1
-        _h=$(sha256sum "$ROOTFS/$_r" 2>/dev/null | awk '{print $1}')
+        case "$_r" in
+            etc/crowdsec/config.yaml)
+                _h=$(sed -E \
+                        -e '/^[[:space:]]*#?[[:space:]]*online_client:/d' \
+                        -e '/credentials_path:[[:space:]]*\/etc\/crowdsec\/online_api_credentials\.yaml/d' \
+                        "$ROOTFS/$_r" 2>/dev/null | sha256sum | awk '{print $1}')
+                ;;
+            *)
+                _h=$(sha256sum "$ROOTFS/$_r" 2>/dev/null | awk '{print $1}')
+                ;;
+        esac
         [ -n "$_h" ] || return 1
         printf '%s  %s\n' "$_h" "$_r"
     done
@@ -3019,7 +3306,7 @@ _cred_restore() {
     cp -a "$CRED_BACKUP_DIR/online_api_credentials.yaml" "$ROOTFS/$_CRED_REL" 2>/dev/null \
         || { log "[重装] 凭证恢复失败"; return 1; }
     log "[重装] 凭证已恢复（console enroll 可直接判 Enrolled，无需重注册）"
-    ct_running && _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
+    ct_running && _ct_restart_crowdsec || true
     return 0
 }
 
@@ -3057,8 +3344,15 @@ _structurally_broken() {
     # 判据是「资产还在不在」（-s 比 -f 严一档：空文件等于没装），不是「内容对不对」——
     # 内容对不对由各自的 verify_* 判，这里只回答「重解压镜像能不能救」。
     # 覆盖的是一整类：容器里该有的文件被删/被清空/根本没解压出来。
+    # v.109-min：init 类型决定「哪些文件算必备」——systemd 版看 crowdsec.service，
+    # 极简版看 inittab + init.d/crowdsec。两套都要求 usr/bin/crowdsec 与 os-release。
+    if _is_minimal_init; then
+        _sb_list="$ROOTFS/etc/inittab $ROOTFS/etc/init.d/crowdsec"
+    else
+        _sb_list="$ROOTFS/lib/systemd/system/crowdsec.service"
+    fi
     for _sb_f in \
-        "$ROOTFS/lib/systemd/system/crowdsec.service" \
+        $_sb_list \
         "$ROOTFS/usr/bin/crowdsec" \
         "$ROOTFS/etc/os-release"; do
         if [ ! -s "$_sb_f" ]; then
@@ -3154,6 +3448,27 @@ _bs_clear_flags() {
         _bs_flag_clear "GSET_$_cf_g"
     done
     _failed=""; _group_failed=""; _ro_missing=""
+    return 0
+}
+
+# 【v.108.44】收尾清账：清掉「本来就不归 uci flush 管」的脏标记。
+# 为什么会有残留：_dirty_<节点> 由 ensure() 统一置位（语义是「这个节点动过东西」，
+#   不等于「这个节点动过 uci」）；而 flush_uci 每次把 DAG 里**所有** dirty 清空，
+#   所以只要某节点是在最后一次 flush 之后才置位的，它就会一直留到进程退出。
+#   首台真机实测 #37：done=26 dirty=1 gset=8 built=13，逐项是 _dirty_capi_release=B。
+#   capi_release 改的是容器内 online_api_credentials.yaml / config.yaml（非 uci），
+#   永远不会被 flush_uci 的 commit/reload 认领，于是那条标记永远清不掉。
+# 为什么必须清：留着它只有一个后果 —— 每次退出都打一行 dirty=1。而这个数字的用途
+#   正是「有没有改动没落盘」。常年是 1，真出现落盘失败时也没人会注意到那个 1。
+#   也就是说这条残留不是「多打一行日志」，是让一个安全信号失效。
+# 只清、不提交：该提交的在 flush_uci 里早提交过了，这里清的是「本来就不归它管」的那几笔。
+_settle_dirty() {
+    _sd_list=""
+    for _sd_n in $DAG_NODES; do
+        _bs_flag_on "_dirty_$_sd_n" && _sd_list="$_sd_list $_sd_n"
+    done
+    for _sd_n in $DAG_NODES; do _bs_flag_clear "_dirty_$_sd_n"; done
+    [ -n "$_sd_list" ] && log "[收尾] 脏标记清账：$_sd_list（非 uci 改动，不归 flush 管，清掉以免 dirty 计数失真）"
     return 0
 }
 
@@ -3312,7 +3627,10 @@ _wait_capi_net() {
     _wn_dl=$(( $(date +%s) + _wn_max ))
     while [ "$(date +%s)" -lt "$_wn_dl" ]; do
         ct_running || { log "[enroll] 容器已停止，放弃等待 DNS 就绪"; return 1; }
+        # getent 在极简版里没有（busybox 1.35 静态版不带该 applet），nslookup 一定有 ——
+        # 只写 getent 会让 enroll 永远卡在「30 秒内解析不到」，而容器 DNS 其实是好的。
         _ct_env "timeout 2 getent hosts api.crowdsec.net" >/dev/null 2>&1 && return 0
+        _ct_env "timeout 2 nslookup api.crowdsec.net" >/dev/null 2>&1 && return 0
         sleep 1
     done
     return 1
@@ -3365,7 +3683,7 @@ re_enroll() {
     _ct_env '/usr/bin/cscli console enable --all' >/dev/null 2>&1 \
         || log "[enroll] console enable --all 失败（不影响注册；新版本 enrolled 后自动全开）"
 
-    _ct_env 'systemctl restart crowdsec >/dev/null 2>&1' || true
+    _ct_restart_crowdsec || true
 
     _capi_out="$(_ct_env "$CSCLI capi status" 2>&1)"
     [ -n "$_capi_out" ] && log "[enroll] capi status：$(printf '%s' "$_capi_out" | tr '\n' ' ' | cut -c1-200)"
@@ -3390,6 +3708,9 @@ re_enroll() {
 
 _mount_systemd_cgroup() {
     _cg=/sys/fs/cgroup/systemd
+    # 极简版容器里没有 systemd 会去 mount cgroup，这一层对它不构成前提：
+    # 直接在函数入口拦住，所有调用点（开机链、补挂、重装）一次性都覆盖到。
+    _is_minimal_init && { log "[cgroup] 极简 init 容器：无需 systemd 命名层级，跳过"; return 0; }
     # 判据必须是「/proc/mounts 里真有这个挂载点」，不能是「目录可写」。
     # /sys/fs/cgroup 本身是 tmpfs，`mkdir -p /sys/fs/cgroup/systemd` 出来的空目录
     # 天然可写，旧写法据此直接 return 0 —— 容器内 systemd 随后自己去 mount 就撞：
@@ -4046,6 +4367,10 @@ main() {
         log "[stamp] installed 落位失败（$STAMP_FILE），引导按失败退出"
         exit 1
     fi
+
+    # 【v.108.44】成功路径才清账：失败退出时残留的 dirty 是现场证据，不能抹。
+    # 清掉的是「最后一次 flush 之后才置位、且不归 uci 管」的那些（实测是 capi_release）。
+    _settle_dirty
 
     if [ -x /etc/init.d/crowdsec-lxc-probe ]; then
         /etc/init.d/crowdsec-lxc-probe enable >/dev/null 2>&1 || true

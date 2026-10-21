@@ -23,6 +23,18 @@
 # cgroup 再 lxc-start。这个脚本被改坏时（例如把 /proc/mounts 判据改回「目录存在」）
 # 不会有任何报错，只会让容器静默起不来，正是最该被只读基准兜住的那类文件。
 #
+# 【v.108.44】权限判据原来用 `stat -c '%a'`，本固件的 busybox **没有编 stat**
+#   （真机实测 `-ash: stat: not found`）。后果是一串连锁：
+#     · 基准侧取到空串 → 兜底成 755
+#     · 运行侧取到空串 → `"" = "755"` 恒假
+#     · 于是每一次调用都判「不一致」，连内容一模一样的 5 个文件也被 rm+cp 重写一遍
+#     · 探针每 60 秒调一次 → 每分钟写 ≈246KB overlay，一天 ≈354MB，且每次 rm+cp
+#       都新建 inode，FTL 磨损集中在同一批块上
+#   真机日志（08:28–08:33）每分钟 6 条、连续 6 轮，就是这么来的；而同一个文件
+#   `cmp` 明明返回 0。判据坏了却没人报错，这类"永远为假"的条件比功能缺失更难发现。
+#   现在不再依赖 stat：只看有没有执行位（squashfs 会保留权限位，-x 判足够），
+#   而且**内容一致时只 chmod、绝不重写文件** —— 权限漂移不该付出重写 246KB 的代价。
+#
 # /etc/config/lxc-auto **不进**清单（v.108.8 撤回 v.108.7 的做法）：
 #   v.108.7 假定「容器名由镜像 files/etc/config/lxc-auto 固定、bootstrap 只校验不 commit」，
 #   这个前提是错的 —— workflow 把 custom/ bind mount 到 files/etc/config，整体遮蔽，
@@ -81,14 +93,20 @@ for _rel in $GUARD_FILES; do
     _f="$ROOT$_rel"
     # 基准里没有这个文件 = 该平台没这个组件，不臆造
     [ -f "$_src" ] || continue
-    # 权限以基准为准：脚本是 755，配置文件是 644。原先这里硬判 `[ -x ]`，
-    # 只适合全是脚本的情况；一旦清单里出现 644 的 /etc/config/*，它会认为
-    # 「不可执行 = 不一致」，每轮都复原一次，反而把配置文件搅进死循环。
-    _src_mode=$(stat -c '%a' "$_src" 2>/dev/null)
-    [ -n "$_src_mode" ] || _src_mode=755
-    # 内容一致且权限一致 → 正常路径，零动作
-    if [ -f "$_f" ] && cmp -s "$_src" "$_f" \
-       && [ "$(stat -c '%a' "$_f" 2>/dev/null)" = "$_src_mode" ]; then
+    # 权限只比「有没有执行位」这一维：squashfs 保留权限位，清单里脚本是 755、配置是 644，
+    # -x 判足够。**不要用 stat -c %a** —— 本固件 busybox 没编 stat，取到空串就会让
+    # 下面的比较恒假（v.108.44 的真机事故：每分钟把 6 个文件全重写一遍）。
+    _src_mode=644
+    [ -x "$_src" ] && _src_mode=755
+    # 内容一致 → 正常路径。权限漂移只 chmod，绝不 rm+cp：
+    # 重写一个 226KB 的脚本只为改一个权限位，在 flash 上是纯损耗。
+    if [ -f "$_f" ] && cmp -s "$_src" "$_f"; then
+        _run_mode=644
+        [ -x "$_f" ] && _run_mode=755
+        if [ "$_run_mode" != "$_src_mode" ]; then
+            chmod "$_src_mode" "$_f" 2>/dev/null
+            _glog "【完整性】$_f 权限变成 $_run_mode，已按基准改回 $_src_mode（内容未动）"
+        fi
         continue
     fi
     _had=0

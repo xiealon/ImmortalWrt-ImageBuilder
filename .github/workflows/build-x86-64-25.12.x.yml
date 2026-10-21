@@ -182,13 +182,32 @@ jobs:
             echo "❎ 未启用 luci-app-store"
           fi
 
-      - name: Prepare Crowdsec LXC Rootfs
+      - name: Lint Shell Scripts
         run: |
-          chmod +x shell/prepare-crowdsec-rootfs.sh
-          sudo env CONTAINER_IP="${CS_CT_IP:-10.1.0.10}" BRIDGE_IP="${CS_BRIDGE_IP:-10.1.0.1}" \
-               bash shell/prepare-crowdsec-rootfs.sh
-          echo "容器 rootfs 体积："
-          ls -lh files/etc/crowdsec/lxc-ubuntu.tar.gz
+          # 极简 rootfs 阶段：容器能不能起来，全看这几个 shell 脚本。
+          # 语法错误拖到 make image 之后才炸要等一小时，这里 10 秒就拦住。
+          for f in shell/prepare-crowdsec-minimal.sh \
+                   files/usr/sbin/crowdsec-lxc-bootstrap.sh \
+                   files/etc/rc.local \
+                   files/etc/uci-defaults/99-custom.sh; do
+            bash -n "$f" || { echo "::error::$f 语法错误"; exit 1; }
+          done
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -S error shell/prepare-crowdsec-minimal.sh \
+              || { echo "::error::shellcheck 在构建脚本上发现硬错误"; exit 1; }
+          else
+            echo "shellcheck 不在，跳过（bash -n 已过）"
+          fi
+
+      - name: Prepare Crowdsec LXC Rootfs (minimal, no distro layer)
+        run: |
+          chmod +x shell/prepare-crowdsec-minimal.sh
+          RUNAS=""
+          [ "$(id -u)" = "0" ] || RUNAS="sudo -n"
+          $RUNAS env CONTAINER_IP="${CS_CT_IP:-10.1.0.10}" BRIDGE_IP="${CS_BRIDGE_IP:-10.1.0.1}" \
+               bash shell/prepare-crowdsec-minimal.sh
+          echo "容器 rootfs 体积（极简：busybox + 静态 crowdsec，不含发行版层）："
+          ls -lh files/etc/crowdsec/lxc-crowdsec.tar.gz
           echo "⚠️ 若下一步 make image 报空间不足，请把 profile 调到 2G 或更大"
 
       - name: Build ImmortalWrt x86-64 EFI 25.12.x

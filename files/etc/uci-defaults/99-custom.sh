@@ -16,9 +16,11 @@ NEW_DESCRIPTION="Packaged by wukongdaily"
 sed -i "s/DISTRIB_DESCRIPTION='[^']*'/DISTRIB_DESCRIPTION='$NEW_DESCRIPTION'/" "$FILE_PATH"
 
 CS_HOME='/etc/crowdsec'
-if [ -d "$CS_HOME" ] || [ -f "$CS_HOME/lxc-ubuntu.tar.gz" ] || [ -d /srv/lxc/ubuntu/rootfs ]; then
+if [ -d "$CS_HOME" ] || [ -f "$CS_HOME/lxc-crowdsec.tar.gz" ] || [ -f "$CS_HOME/lxc-ubuntu.tar.gz" ] || [ -d /srv/lxc/ubuntu/rootfs ]; then
     mkdir -p "$CS_HOME" 2>/dev/null
-    for _keep in "$CS_HOME/lxc-ubuntu.tar.gz"; do
+    # 保留清单要覆盖两种镜像名：极简版 lxc-crowdsec.tar.gz 与历史 systemd 版 lxc-ubuntu.tar.gz。
+    # 少了它，sysupgrade 之后镜像被抹掉、rc.local 走 --net-only，容器再也起不来。
+    for _keep in "$CS_HOME/lxc-crowdsec.tar.gz" "$CS_HOME/lxc-ubuntu.tar.gz"; do
         grep -q "^$_keep" /etc/sysupgrade.conf 2>/dev/null \
             || echo "$_keep" >> /etc/sysupgrade.conf 2>/dev/null
     done

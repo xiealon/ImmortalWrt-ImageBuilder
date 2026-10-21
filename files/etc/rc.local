@@ -26,7 +26,8 @@ fi
 # /etc/config/custom_router_*.txt 里，消费者是 bootstrap 的 PREP 组，与容器无关。
 # 改走 --net-only，只把路由器网络校准好，容器一步不碰 ——
 # 网络是唯一远程入口，保住它才谈得上进后台处理镜像问题。
-if [ -f /etc/crowdsec/lxc-ubuntu.tar.gz ] || [ -f /opt/lxc-ubuntu.tar.gz ] \
+if [ -f /etc/crowdsec/lxc-crowdsec.tar.gz ] || [ -f /etc/crowdsec/lxc-ubuntu.tar.gz ] \
+   || [ -f /opt/lxc-ubuntu.tar.gz ] \
    || [ -d /srv/lxc/ubuntu/rootfs ]; then
     BOOT_MODE=""
 else

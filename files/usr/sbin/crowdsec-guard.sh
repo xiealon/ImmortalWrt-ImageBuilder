@@ -35,6 +35,17 @@
 #   现在不再依赖 stat：只看有没有执行位（squashfs 会保留权限位，-x 判足够），
 #   而且**内容一致时只 chmod、绝不重写文件** —— 权限漂移不该付出重写 246KB 的代价。
 #
+# 【v.108.45】保护范围从宿主侧 6 个扩展到「宿主 6 + 容器内 9」= 15 个：
+#   容器内那批（inittab / init.d/{rcS,crowdsec,netconf,syslogd} / usr/sbin/crowdsec-supervise
+#   / etc/{passwd,group,nsswitch.conf}）以前只有「存在且非空」这一档判据，内容被改坏
+#   既不自愈也查不出来，只能靠 last_pull 停滞间接发现，且发现后唯一手段是整盘重解压 288MB。
+#   现在固件里（squashfs）带同一批文件的副本，guard 用同路径比对 + 原子替换，
+#   恢复代价降到几十 KB。三处清单必须始终同版：rootfs-skel/（唯一来源）、
+#   build24/25.sh（拷进固件）、本文件（比对清单）；单一来源写错就退化成
+#   「每分钟把 6 个文件盖一遍」，正是 v.108.44 那个事故的形态。
+#   配套改动：_structurally_broken 不再把 inittab / init.d/crowdsec 当「缺失即损坏」
+#   的判据（固件里有副本，判据会恒真），改用固件里没有的那批文件兜底。
+#
 # /etc/config/lxc-auto **不进**清单（v.108.8 撤回 v.108.7 的做法）：
 #   v.108.7 假定「容器名由镜像 files/etc/config/lxc-auto 固定、bootstrap 只校验不 commit」，
 #   这个前提是错的 —— workflow 把 custom/ bind mount 到 files/etc/config，整体遮蔽，
@@ -59,6 +70,35 @@ GUARD_FILES="${CS_GUARD_FILES:-
 /etc/init.d/crowdsec-lxc-probe
 /etc/init.d/lxc-auto
 }"
+
+# 【v.108.45】容器内脚本也纳入保护，但单独一组：它们的目标在容器 rootfs 里，
+# 恢复动作必须多两道门（见 _ct_gate），不能和宿主侧混在一个循环里无条件执行。
+# 路径与 /rom 严格同构（/rom/srv/lxc/ubuntu/rootfs/etc/init.d/rcS 对
+# /srv/lxc/ubuntu/rootfs/etc/init.d/rcS），靠 build24/25.sh 在出镜像前把
+# rootfs-skel/ 里那 6 个文件拷进 files/srv/lxc/ubuntu/rootfs/。
+#
+# 为什么值得做：这些脚本决定容器能不能起来（inittab 是 PID1 的启动表，rcS 是
+# 服务序列，crowdsec-supervise 是退避重拉）。以前它们只有「存在且非空」这一档判据，
+# 内容被改坏既不会重装也查不出来，只能靠 last_pull 停滞间接发现、且发现后也修不好。
+# 纳入之后：改坏 → 60 秒内被 /rom 副本盖回，恢复代价是几十 KB 而不是整盘重解压 288MB。
+#
+# 代价与风险（都已在构建侧挡住）：
+#   · 两份内容必须始终同版 —— prepare 与 guard 的基准都来自 rootfs-skel/，单一来源；
+#   · rootfs 还没解压时不能写 —— 会污染 verify_rootfs 的就绪判断（门①）；
+#   · systemd 版 rootfs（legacy lxc-ubuntu.tar.gz）语义完全不同 —— 不能碰（门②）。
+GUARD_CT_PREFIX="/srv/lxc/ubuntu/rootfs"
+GUARD_CT_FILES="${CS_GUARD_CT_FILES:-
+/etc/passwd
+/etc/group
+/etc/nsswitch.conf
+/etc/inittab
+/etc/init.d/rcS
+/etc/init.d/crowdsec
+/etc/init.d/netconf
+/etc/init.d/syslogd
+/usr/sbin/crowdsec-supervise
+}"
+ROOTFS="${CS_GUARD_ROOTFS:-$ROOT$GUARD_CT_PREFIX}"
 
 QUIET=0
 [ "$1" = "quiet" ] && QUIET=1
@@ -88,11 +128,33 @@ command -v cmp >/dev/null 2>&1 || {
     exit 0
 }
 
-for _rel in $GUARD_FILES; do
+# 容器侧两道门（v.108.45）。任一不满足 → 这一组整体跳过，一个字节都不碰。
+_ct_gate() {
+    # ① rootfs 必须已经解压完。判据用 os-release：它是 verify_rootfs 的就绪标志，
+    #    而且**故意没有**放进固件（见 build24/25.sh 的注释），所以它只可能来自
+    #    tarball 解压。它不在就说明 rootfs 还没就绪 —— 此时写文件会提前造出
+    #    etc/、etc/inittab 这些路径，把「rootfs 是否已解压」的判断搅浑。
+    [ -s "$ROOTFS/etc/os-release" ] || return 1
+    # ② 必须是极简 init 的 rootfs。systemd 版（legacy /opt/lxc-ubuntu.tar.gz）里
+    #    这些路径语义完全不同，把 busybox 的 inittab / rcS 盖进去等于直接把容器毁掉。
+    #    这条不是优化，是硬门：宁可不管，也不能管错对象。
+    [ -f "$ROOTFS/etc/inittab" ] || return 1
+    [ -e "$ROOTFS/lib/systemd/systemd" ] && return 1
+    return 0
+}
+
+_CT_OK=0
+_ct_gate && _CT_OK=1
+
+for _rel in $GUARD_FILES $GUARD_CT_FILES; do
     _src="$ROM_DIR$_rel"
     _f="$ROOT$_rel"
     # 基准里没有这个文件 = 该平台没这个组件，不臆造
     [ -f "$_src" ] || continue
+    # 容器组：门前置不满足就整个跳过（原因见 _ct_gate 注释）
+    case "$_rel" in
+        "$GUARD_CT_PREFIX"/*) [ "$_CT_OK" = "1" ] || continue ;;
+    esac
     # 权限只比「有没有执行位」这一维：squashfs 保留权限位，清单里脚本是 755、配置是 644，
     # -x 判足够。**不要用 stat -c %a** —— 本固件 busybox 没编 stat，取到空串就会让
     # 下面的比较恒假（v.108.44 的真机事故：每分钟把 6 个文件全重写一遍）。
@@ -118,18 +180,44 @@ for _rel in $GUARD_FILES; do
         _bak="$_f.user-$(date '+%Y%m%d%H%M%S')"
         cp -f "$_f" "$_bak" 2>/dev/null || _bak=""
     fi
-    # 必须先删再拷：文件被删过时这里是 overlay 的 whiteout，不清掉副本建不出来
-    rm -f "$_f" 2>/dev/null
-    if cp -f "$_src" "$_f" 2>/dev/null; then
-        chmod "$_src_mode" "$_f" 2>/dev/null
-        if [ "$_had" = "1" ]; then
-            _glog "【完整性】$_f 与只读基准不一致，已复原${_bak:+（原内容另存 $_bak）}"
+    case "$_rel" in
+    "$GUARD_CT_PREFIX"/*)
+        # 容器侧必须原子替换：容器随时可能在启动，读到半个 rcS / inittab 会让
+        # sh 解析失败、容器直接起不来。做法是「同目录写临时文件 + rename」。
+        # 不用 rm+cp：那条路径中间有一段「文件不存在」的窗口，正好撞上就是事故。
+        _tmp="$_f.guard-tmp"
+        if cp -f "$_src" "$_tmp" 2>/dev/null && chmod "$_src_mode" "$_tmp" 2>/dev/null; then
+            if ! mv -f "$_tmp" "$_f" 2>/dev/null; then
+                # overlayfs 上 rename 下层文件理论上会先 copy-up 再 rename；
+                # 万一内核拒绝（EXDEV），退回 cp 覆盖（有窗口但总比不修好）。
+                cp -f "$_tmp" "$_f" 2>/dev/null
+                rm -f "$_tmp" 2>/dev/null
+            fi
+            if [ "$_had" = "1" ]; then
+                _glog "【完整性】$_f 与只读基准不一致，已原子复原${_bak:+（原内容另存 $_bak）}"
+            else
+                _glog "【完整性】$_f 被删除，已从只读基准复原（容器脚本）"
+            fi
         else
-            _glog "【完整性】$_f 被删除，已从只读基准复原"
+            rm -f "$_tmp" 2>/dev/null
+            _glog "【完整性】$_f 复原失败（容器脚本）：只读基准不可读或目标不可写"
         fi
-    else
-        _glog "【完整性】$_f 复原失败：只读基准不可读或目标不可写"
-    fi
+        ;;
+    *)
+        # 必须先删再拷：文件被删过时这里是 overlay 的 whiteout，不清掉副本建不出来
+        rm -f "$_f" 2>/dev/null
+        if cp -f "$_src" "$_f" 2>/dev/null; then
+            chmod "$_src_mode" "$_f" 2>/dev/null
+            if [ "$_had" = "1" ]; then
+                _glog "【完整性】$_f 与只读基准不一致，已复原${_bak:+（原内容另存 $_bak）}"
+            else
+                _glog "【完整性】$_f 被删除，已从只读基准复原"
+            fi
+        else
+            _glog "【完整性】$_f 复原失败：只读基准不可读或目标不可写"
+        fi
+        ;;
+    esac
 done
 
 exit 0

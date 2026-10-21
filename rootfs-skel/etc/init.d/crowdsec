@@ -1,0 +1,103 @@
+#!/bin/sh
+# 极简 init 下的 crowdsec 控制脚本。宿主侧 bootstrap 的 _ct_restart_crowdsec
+# 会依次试 systemctl → service → 本脚本 restart，前两个在极简 rootfs 里不存在。
+BIN=/usr/bin/crowdsec
+CFG=/etc/crowdsec/config.yaml
+PIDFILE=/run/crowdsec.pid
+FLAG=/run/crowdsec.disabled
+SUP=/usr/sbin/crowdsec-supervise
+
+_running() {
+    for p in /proc/[0-9]*; do
+        [ -r "$p/cmdline" ] || continue
+        tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qx "$BIN" && return 0
+    done
+    return 1
+}
+
+_sup_running() {
+    for p in /proc/[0-9]*; do
+        [ -r "$p/cmdline" ] || continue
+        tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qx "$SUP" && return 0
+    done
+    return 1
+}
+
+_pid() {
+    if [ -s "$PIDFILE" ]; then
+        _p=$(cat "$PIDFILE" 2>/dev/null)
+        [ -d "/proc/$_p" ] && { echo "$_p"; return 0; }
+    fi
+    for p in /proc/[0-9]*; do
+        [ -r "$p/cmdline" ] || continue
+        tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qx "$BIN" && { echo "${p#/proc/}"; return 0; }
+    done
+    return 1
+}
+
+start() {
+    rm -f "$FLAG"
+    if _running; then echo "crowdsec: 已在运行"; return 0; fi
+    # supervise 还活着就不要再起一个：两个 supervise = 两个 crowdsec = 抢同一个 sqlite
+    if _sup_running; then echo "crowdsec: supervise 已在，等待其自行拉起"; return 0; fi
+    mkdir -p /var/lib/crowdsec/data /var/log /run
+    setsid "$SUP" >/dev/console 2>&1 &
+    echo "crowdsec: 已交给 supervise 拉起"
+}
+
+run() {
+    # 给 inittab 的 ::respawn 用：前台阻塞，退出后由 init 重新拉起
+    exec "$SUP"
+}
+
+stop() {
+    touch "$FLAG"
+    _p=$(_pid) || { echo "crowdsec: 未运行"; return 0; }
+    kill -TERM "$_p" 2>/dev/null
+    _i=0
+    while [ "$_i" -lt 20 ]; do
+        [ -d "/proc/$_p" ] || { echo "crowdsec: 已停止"; return 0; }
+        _i=$((_i+1)); sleep 1
+    done
+    kill -9 "$_p" 2>/dev/null
+    echo "crowdsec: 20 秒未退出，已强杀"
+}
+
+restart() {
+    # 语义 deliberately 是「发起一次重启」，不是「等到新进程出现」。
+    # 现场教训（首台真机 2026-10-22）：原来在这里等 25 秒新 pid，而宿主侧
+    # _ct_restart_crowdsec 走的是 `timeout 30 lxc-attach`，两个窗口几乎重叠；
+    # crowdsec 退出本身要十几秒，于是 25 秒时判失败 → 日志「容器内 crowdsec 重启命令均失败」，
+    # 而实际上 10 秒后 8080 就通了。谁等谁就错，改成发起即返回，把「是否真的起来」
+    # 交给宿主侧的轮询（_wait_capi_net / 8080 探测）。
+    _p=$(_pid) || _p=""
+    if [ -n "$_p" ]; then
+        kill -TERM "$_p" 2>/dev/null
+        _i=0
+        while [ "$_i" -lt 5 ]; do
+            [ -d "/proc/$_p" ] || break
+            _i=$((_i+1)); sleep 1
+        done
+        [ -d "/proc/$_p" ] && echo "crowdsec: 旧进程 pid=$_p 仍在退出（不阻塞，init 会补拉）"
+    else
+        echo "crowdsec: 未运行，直接拉起"
+    fi
+    if ! _sup_running; then
+        setsid "$SUP" >/dev/console 2>&1 &
+        echo "crowdsec: supervise 未在，已重新拉起"
+    fi
+    return 0
+}
+
+status() {
+    if _p=$(_pid); then echo "crowdsec: 运行中 pid=$_p"; else echo "crowdsec: 未运行"; return 1; fi
+}
+
+case "${1:-status}" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) restart ;;
+    status)  status ;;
+    run)     run ;;
+    *) echo "用法: $0 {start|stop|restart|status|run}" >&2; exit 1 ;;
+esac

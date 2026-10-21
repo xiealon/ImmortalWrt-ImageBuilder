@@ -1,0 +1,8 @@
+# busybox init 的启动表。
+# ::sysinit  —— 开机先跑一遍 rcS（伪文件系统、网络、syslog）
+# ::respawn  —— crowdsec 看护进程；它退出（或 crowdsec 反复崩）由 init 重新拉起
+# ::shutdown —— 关机前把 crowdsec 收干净，避免 sqlite 留下半截事务
+::sysinit:/etc/init.d/rcS
+::respawn:/etc/init.d/crowdsec run
+::shutdown:/etc/init.d/crowdsec stop
+::ctrlaltdel:/bin/reboot

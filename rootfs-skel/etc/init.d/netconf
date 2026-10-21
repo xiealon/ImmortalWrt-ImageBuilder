@@ -1,0 +1,29 @@
+#!/bin/sh
+# 把 /etc/crowdsec-net.conf 套用到 eth0。
+# 配置留在磁盘上、命令只负责重放：容器重启后 rcS 还能照着重来一遍，
+# 而直接 `ip addr add` 下发的东西一重启就没了。
+CONF=/etc/crowdsec-net.conf
+[ -f "$CONF" ] || { echo "netconf: 缺 $CONF"; exit 1; }
+. "$CONF"
+
+start() {
+    ip link set lo up 2>/dev/null
+    # 先 flush 再加：重启后重复执行要幂等，旧地址留着会出现两个 IP
+    ip addr flush dev eth0 2>/dev/null
+    [ -n "${ADDRESS:-}" ] && ip addr add "$ADDRESS" dev eth0 2>/dev/null
+    ip link set eth0 up 2>/dev/null
+    [ -n "${GATEWAY:-}" ] && ip route add default via "$GATEWAY" dev eth0 2>/dev/null
+    # DNS 写法与宿主侧 setup_resolv 保持一致（一行 nameserver；多个地址用空格分隔）
+    [ -n "${DNS:-}" ] && printf 'nameserver %s\n' "$DNS" > /etc/resolv.conf
+    echo "netconf: eth0=${ADDRESS:-未设} gw=${GATEWAY:-未设} dns=${DNS:-未设}"
+}
+stop() {
+    ip addr flush dev eth0 2>/dev/null
+    ip route del default 2>/dev/null
+}
+case "${1:-start}" in
+    start)   start ;;
+    restart) stop; start ;;
+    stop)    stop ;;
+    *) echo "用法: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac

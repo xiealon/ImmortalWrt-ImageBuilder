@@ -1,0 +1,5 @@
+NAME="CrowdSec Minimal"
+ID=crowdsec-minimal
+ID_LIKE=linux
+VERSION="1.0"
+PRETTY_NAME="CrowdSec Minimal Rootfs (busybox init)"

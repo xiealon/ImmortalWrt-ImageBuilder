@@ -36,6 +36,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 【v.108.45】容器内脚本的单一来源：rootfs-skel/ 既进 tarball（下面 install 进来），
+# 也被 build24/25.sh 拷进固件 files/srv/lxc/ubuntu/rootfs/，供 crowdsec-guard 做只读基准。
+# 为什么不能两处各写一遍：改了一处忘了另一处，guard 就会每分钟把旧版盖回去
+# （和 v.108.44 那个 stat 事故同一形态：不是功能坏了，是判据永远对不上）。
+SKEL="${SKEL:-$REPO_ROOT/rootfs-skel}"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/files/etc/crowdsec}"
 OUT_NAME="${OUT_NAME:-lxc-crowdsec.tar.gz}"
 WORK="${WORK:-/tmp/lxc-crowdsec-minimal}"
@@ -183,31 +188,15 @@ grep -q 'BEGIN CERTIFICATE' "$R/etc/ssl/certs/ca-certificates.crt" || die "CA bu
 #    plugin_config 指向它们；运行期 crowdsec 会解析这两个名字）
 # ---------------------------------------------------------------------------
 say "写 passwd/group/hosts/nsswitch/os-release"
-cat > "$R/etc/passwd" <<'EOF'
-root:x:0:0:root:/root:/bin/sh
-nobody:x:65534:65534:nobody:/nonexistent:/bin/false
-EOF
-cat > "$R/etc/group" <<'EOF'
-root:x:0:
-nogroup:x:65534:
-EOF
+install -m 0644 "$SKEL/etc/passwd" "$R/etc/passwd"
+install -m 0644 "$SKEL/etc/group" "$R/etc/group"
 cat > "$R/etc/hosts" <<EOF
 127.0.0.1	localhost
 $CONTAINER_IP	crowdsec
 EOF
-cat > "$R/etc/nsswitch.conf" <<'EOF'
-passwd: files
-group: files
-hosts: files dns
-EOF
+install -m 0644 "$SKEL/etc/nsswitch.conf" "$R/etc/nsswitch.conf"
 # /etc/os-release：宿主引导脚本的 verify_rootfs 要求它有 ^ID= 行，别删
-cat > "$R/etc/os-release" <<'EOF'
-NAME="CrowdSec Minimal"
-ID=crowdsec-minimal
-ID_LIKE=linux
-VERSION="1.0"
-PRETTY_NAME="CrowdSec Minimal Rootfs (busybox init)"
-EOF
+install -m 0644 "$SKEL/etc/os-release" "$R/etc/os-release"
 echo crowdsec > "$R/etc/hostname"
 cat > "$R/etc/resolv.conf" <<EOF
 nameserver $BRIDGE_IP
@@ -222,37 +211,7 @@ ADDRESS=$CONTAINER_IP/24
 GATEWAY=$BRIDGE_IP
 DNS=$BRIDGE_IP
 EOF
-cat > "$R/etc/init.d/netconf" <<'EOF'
-#!/bin/sh
-# 把 /etc/crowdsec-net.conf 套用到 eth0。
-# 配置留在磁盘上、命令只负责重放：容器重启后 rcS 还能照着重来一遍，
-# 而直接 `ip addr add` 下发的东西一重启就没了。
-CONF=/etc/crowdsec-net.conf
-[ -f "$CONF" ] || { echo "netconf: 缺 $CONF"; exit 1; }
-. "$CONF"
-
-start() {
-    ip link set lo up 2>/dev/null
-    # 先 flush 再加：重启后重复执行要幂等，旧地址留着会出现两个 IP
-    ip addr flush dev eth0 2>/dev/null
-    [ -n "${ADDRESS:-}" ] && ip addr add "$ADDRESS" dev eth0 2>/dev/null
-    ip link set eth0 up 2>/dev/null
-    [ -n "${GATEWAY:-}" ] && ip route add default via "$GATEWAY" dev eth0 2>/dev/null
-    # DNS 写法与宿主侧 setup_resolv 保持一致（一行 nameserver；多个地址用空格分隔）
-    [ -n "${DNS:-}" ] && printf 'nameserver %s\n' "$DNS" > /etc/resolv.conf
-    echo "netconf: eth0=${ADDRESS:-未设} gw=${GATEWAY:-未设} dns=${DNS:-未设}"
-}
-stop() {
-    ip addr flush dev eth0 2>/dev/null
-    ip route del default 2>/dev/null
-}
-case "${1:-start}" in
-    start)   start ;;
-    restart) stop; start ;;
-    stop)    stop ;;
-    *) echo "用法: $0 {start|stop|restart}" >&2; exit 1 ;;
-esac
-EOF
+install -m 0755 "$SKEL/etc/init.d/netconf" "$R/etc/init.d/netconf"
 
 # ---------------------------------------------------------------------------
 # 9. syslogd：本地落盘 + 转发给本机 crowdsec 的 UDP 514
@@ -262,30 +221,7 @@ EOF
 #    宿主侧 verify_log_pipeline 因此长期是「假绿」。
 # ---------------------------------------------------------------------------
 say "写 syslogd 启动脚本"
-cat > "$R/etc/init.d/syslogd" <<'EOF'
-#!/bin/sh
-# -O 落盘文件；-R 转发目标；-L 同时本地+网络（不加 -L 时给了 -R 就只发不收）
-start() {
-    mkdir -p /var/log
-    # 按行为判断而不是解析 --help：这份 busybox 支持 -R 就带转发，不支持就退到纯落盘。
-    # （曾经想用 grep '-R' 判 --help，但 busybox 的用法里选项前是制表符，pattern 极易漏判）
-    if syslogd -O /var/log/messages -R 127.0.0.1:514 -L 2>/dev/null; then
-        echo "syslogd: 已启动（落盘 + 转发给本机 crowdsec 的 514）"
-    else
-        syslogd -O /var/log/messages 2>/dev/null
-        echo "syslogd: 已启动（本机 busybox 不支持 -R，仅落盘）"
-    fi
-}
-stop() {
-    killall syslogd 2>/dev/null
-}
-case "${1:-start}" in
-    start)   start ;;
-    restart) stop; sleep 1; start ;;
-    stop)    stop ;;
-    *) echo "用法: $0 {start|stop|restart}" >&2; exit 1 ;;
-esac
-EOF
+install -m 0755 "$SKEL/etc/init.d/syslogd" "$R/etc/init.d/syslogd"
 
 # ---------------------------------------------------------------------------
 # 10. crowdsec 看护：supervise 循环 + init.d 控制脚本
@@ -294,188 +230,17 @@ EOF
 #     crowdsec 内部崩溃由 supervise 自己的退避循环兜住 —— 双层，且不会 fork 风暴。
 # ---------------------------------------------------------------------------
 say "写 crowdsec 看护脚本"
-cat > "$R/usr/sbin/crowdsec-supervise" <<'EOF'
-#!/bin/sh
-# crowdsec 前台常驻 + 退避重启。
-# 为什么要退避：配置坏了 crowdsec 会秒退，无条件立刻重拉就是 CPU 打满的 fork 循环。
-BIN=/usr/bin/crowdsec
-CFG=/etc/crowdsec/config.yaml
-PIDFILE=/run/crowdsec.pid
-FLAG=/run/crowdsec.disabled
+install -m 0755 "$SKEL/usr/sbin/crowdsec-supervise" "$R/usr/sbin/crowdsec-supervise"
 
-[ -x "$BIN" ] || { echo "[supervise] 缺 $BIN" ; exit 1; }
-
-while :; do
-    if [ -f "$FLAG" ]; then
-        echo "[supervise] 已置停止标记 $FLAG，等待"
-        sleep 10
-        continue
-    fi
-    _t0=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
-    "$BIN" -c "$CFG" &
-    _pid=$!
-    echo "$_pid" > "$PIDFILE"
-    echo "[supervise] crowdsec 已启动 pid=$_pid"
-    wait "$_pid"
-    _rc=$?
-    _t1=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
-    _ran=$(( _t1 - _t0 ))
-    echo "[supervise] crowdsec 退出 rc=$_rc 运行 ${_ran}s"
-    # 三分支（首台真机 2026-10-22 修）：rc>128 = 被信号杀掉，那就是「restart 干的」，
-    # 别当崩溃罚 30 秒等待——原来的两分支把它算成「秒退/快速崩溃」，
-    # 结果 init.d restart 之后要等 30 秒才见到新进程，宿主侧 timeout 30 直接判失败。
-    #   · 被信号杀（128+n）  → 2 秒重来（是人为重启，不是故障）
-    #   · 跑满 60 秒才倒下   → 真崩溃，5 秒后重来
-    #   · 秒退且非信号      → 配置大概率有问题，等 30 秒再撞，避免刷日志
-    if [ "$_rc" -ge 128 ]; then sleep 2
-    elif [ "$_ran" -ge 60 ]; then sleep 5
-    else sleep 30
-    fi
-done
-EOF
-
-cat > "$R/etc/init.d/crowdsec" <<'EOF'
-#!/bin/sh
-# 极简 init 下的 crowdsec 控制脚本。宿主侧 bootstrap 的 _ct_restart_crowdsec
-# 会依次试 systemctl → service → 本脚本 restart，前两个在极简 rootfs 里不存在。
-BIN=/usr/bin/crowdsec
-CFG=/etc/crowdsec/config.yaml
-PIDFILE=/run/crowdsec.pid
-FLAG=/run/crowdsec.disabled
-SUP=/usr/sbin/crowdsec-supervise
-
-_running() {
-    for p in /proc/[0-9]*; do
-        [ -r "$p/cmdline" ] || continue
-        tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qx "$BIN" && return 0
-    done
-    return 1
-}
-
-_sup_running() {
-    for p in /proc/[0-9]*; do
-        [ -r "$p/cmdline" ] || continue
-        tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qx "$SUP" && return 0
-    done
-    return 1
-}
-
-_pid() {
-    if [ -s "$PIDFILE" ]; then
-        _p=$(cat "$PIDFILE" 2>/dev/null)
-        [ -d "/proc/$_p" ] && { echo "$_p"; return 0; }
-    fi
-    for p in /proc/[0-9]*; do
-        [ -r "$p/cmdline" ] || continue
-        tr '\0' '\n' < "$p/cmdline" 2>/dev/null | grep -qx "$BIN" && { echo "${p#/proc/}"; return 0; }
-    done
-    return 1
-}
-
-start() {
-    rm -f "$FLAG"
-    if _running; then echo "crowdsec: 已在运行"; return 0; fi
-    # supervise 还活着就不要再起一个：两个 supervise = 两个 crowdsec = 抢同一个 sqlite
-    if _sup_running; then echo "crowdsec: supervise 已在，等待其自行拉起"; return 0; fi
-    mkdir -p /var/lib/crowdsec/data /var/log /run
-    setsid "$SUP" >/dev/console 2>&1 &
-    echo "crowdsec: 已交给 supervise 拉起"
-}
-
-run() {
-    # 给 inittab 的 ::respawn 用：前台阻塞，退出后由 init 重新拉起
-    exec "$SUP"
-}
-
-stop() {
-    touch "$FLAG"
-    _p=$(_pid) || { echo "crowdsec: 未运行"; return 0; }
-    kill -TERM "$_p" 2>/dev/null
-    _i=0
-    while [ "$_i" -lt 20 ]; do
-        [ -d "/proc/$_p" ] || { echo "crowdsec: 已停止"; return 0; }
-        _i=$((_i+1)); sleep 1
-    done
-    kill -9 "$_p" 2>/dev/null
-    echo "crowdsec: 20 秒未退出，已强杀"
-}
-
-restart() {
-    # 语义 deliberately 是「发起一次重启」，不是「等到新进程出现」。
-    # 现场教训（首台真机 2026-10-22）：原来在这里等 25 秒新 pid，而宿主侧
-    # _ct_restart_crowdsec 走的是 `timeout 30 lxc-attach`，两个窗口几乎重叠；
-    # crowdsec 退出本身要十几秒，于是 25 秒时判失败 → 日志「容器内 crowdsec 重启命令均失败」，
-    # 而实际上 10 秒后 8080 就通了。谁等谁就错，改成发起即返回，把「是否真的起来」
-    # 交给宿主侧的轮询（_wait_capi_net / 8080 探测）。
-    _p=$(_pid) || _p=""
-    if [ -n "$_p" ]; then
-        kill -TERM "$_p" 2>/dev/null
-        _i=0
-        while [ "$_i" -lt 5 ]; do
-            [ -d "/proc/$_p" ] || break
-            _i=$((_i+1)); sleep 1
-        done
-        [ -d "/proc/$_p" ] && echo "crowdsec: 旧进程 pid=$_p 仍在退出（不阻塞，init 会补拉）"
-    else
-        echo "crowdsec: 未运行，直接拉起"
-    fi
-    if ! _sup_running; then
-        setsid "$SUP" >/dev/console 2>&1 &
-        echo "crowdsec: supervise 未在，已重新拉起"
-    fi
-    return 0
-}
-
-status() {
-    if _p=$(_pid); then echo "crowdsec: 运行中 pid=$_p"; else echo "crowdsec: 未运行"; return 1; fi
-}
-
-case "${1:-status}" in
-    start)   start ;;
-    stop)    stop ;;
-    restart) restart ;;
-    status)  status ;;
-    run)     run ;;
-    *) echo "用法: $0 {start|stop|restart|status|run}" >&2; exit 1 ;;
-esac
-EOF
+install -m 0755 "$SKEL/etc/init.d/crowdsec" "$R/etc/init.d/crowdsec"
 
 # ---------------------------------------------------------------------------
 # 11. rcS / inittab：容器开机流程
 # ---------------------------------------------------------------------------
 say "写 rcS 与 inittab"
-cat > "$R/etc/init.d/rcS" <<'EOF'
-#!/bin/sh
-# busybox init 的 sysinit 入口。顺序：伪文件系统 → hostname → 网络 → syslog → 业务
-PATH=/usr/bin:/usr/sbin:/bin:/sbin
+install -m 0755 "$SKEL/etc/init.d/rcS" "$R/etc/init.d/rcS"
 
-mkdir -p /dev/pts /dev/shm /run /tmp /var/log /var/lib/crowdsec/data
-
-# LXC 一般已经挂好 proc/sys，重复 mount 会 EBUSY；失败不算错，所以全都忽略返回值
-mount -t proc proc /proc 2>/dev/null
-mount -t sysfs sysfs /sys 2>/dev/null
-mount -t tmpfs tmpfs /run 2>/dev/null
-mount -t devpts devpts /dev/pts 2>/dev/null
-mount -t tmpfs tmpfs /dev/shm 2>/dev/null
-
-hostname -F /etc/hostname 2>/dev/null
-
-/etc/init.d/netconf start
-/etc/init.d/syslogd start
-
-echo "[rcS] 容器初始化完成"
-EOF
-
-cat > "$R/etc/inittab" <<'EOF'
-# busybox init 的启动表。
-# ::sysinit  —— 开机先跑一遍 rcS（伪文件系统、网络、syslog）
-# ::respawn  —— crowdsec 看护进程；它退出（或 crowdsec 反复崩）由 init 重新拉起
-# ::shutdown —— 关机前把 crowdsec 收干净，避免 sqlite 留下半截事务
-::sysinit:/etc/init.d/rcS
-::respawn:/etc/init.d/crowdsec run
-::shutdown:/etc/init.d/crowdsec stop
-::ctrlaltdel:/bin/reboot
-EOF
+install -m 0644 "$SKEL/etc/inittab" "$R/etc/inittab"
 
 chmod +x "$R/etc/init.d/rcS" "$R/etc/init.d/crowdsec" "$R/etc/init.d/netconf" \
          "$R/etc/init.d/syslogd" "$R/usr/sbin/crowdsec-supervise"
@@ -496,14 +261,7 @@ grep -qE '^[[:space:]]*daemonize:[[:space:]]*false' "$CFG" \
 # ② acquis.yaml：deb 不带这个文件，但 config 的 acquisition_path 指着它。
 #    写一个「存在且合法」的占位源（空文件读不了，指向不存在的文件会告警），
 #    真正的采集源由 router 侧 setup_acquis 写进 acquis.d/router.yaml。
-cat > "$R/etc/crowdsec/acquis.yaml" <<'EOF'
-# 占位采集源：真实日志源由 /etc/crowdsec/acquis.d/router.yaml 提供（router 侧写入）
-source: file
-filenames:
-  - /var/log/router.log
-labels:
-  type: syslog
-EOF
+install -m 0644 "$SKEL/etc/crowdsec/acquis.yaml" "$R/etc/crowdsec/acquis.yaml"
 : > "$R/var/log/router.log"
 
 # ---------------------------------------------------------------------------

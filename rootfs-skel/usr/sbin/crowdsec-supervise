@@ -1,0 +1,37 @@
+#!/bin/sh
+# crowdsec 前台常驻 + 退避重启。
+# 为什么要退避：配置坏了 crowdsec 会秒退，无条件立刻重拉就是 CPU 打满的 fork 循环。
+BIN=/usr/bin/crowdsec
+CFG=/etc/crowdsec/config.yaml
+PIDFILE=/run/crowdsec.pid
+FLAG=/run/crowdsec.disabled
+
+[ -x "$BIN" ] || { echo "[supervise] 缺 $BIN" ; exit 1; }
+
+while :; do
+    if [ -f "$FLAG" ]; then
+        echo "[supervise] 已置停止标记 $FLAG，等待"
+        sleep 10
+        continue
+    fi
+    _t0=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+    "$BIN" -c "$CFG" &
+    _pid=$!
+    echo "$_pid" > "$PIDFILE"
+    echo "[supervise] crowdsec 已启动 pid=$_pid"
+    wait "$_pid"
+    _rc=$?
+    _t1=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+    _ran=$(( _t1 - _t0 ))
+    echo "[supervise] crowdsec 退出 rc=$_rc 运行 ${_ran}s"
+    # 三分支（首台真机 2026-10-22 修）：rc>128 = 被信号杀掉，那就是「restart 干的」，
+    # 别当崩溃罚 30 秒等待——原来的两分支把它算成「秒退/快速崩溃」，
+    # 结果 init.d restart 之后要等 30 秒才见到新进程，宿主侧 timeout 30 直接判失败。
+    #   · 被信号杀（128+n）  → 2 秒重来（是人为重启，不是故障）
+    #   · 跑满 60 秒才倒下   → 真崩溃，5 秒后重来
+    #   · 秒退且非信号      → 配置大概率有问题，等 30 秒再撞，避免刷日志
+    if [ "$_rc" -ge 128 ]; then sleep 2
+    elif [ "$_ran" -ge 60 ]; then sleep 5
+    else sleep 30
+    fi
+done

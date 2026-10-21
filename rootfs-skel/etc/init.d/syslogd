@@ -1,0 +1,22 @@
+#!/bin/sh
+# -O 落盘文件；-R 转发目标；-L 同时本地+网络（不加 -L 时给了 -R 就只发不收）
+start() {
+    mkdir -p /var/log
+    # 按行为判断而不是解析 --help：这份 busybox 支持 -R 就带转发，不支持就退到纯落盘。
+    # （曾经想用 grep '-R' 判 --help，但 busybox 的用法里选项前是制表符，pattern 极易漏判）
+    if syslogd -O /var/log/messages -R 127.0.0.1:514 -L 2>/dev/null; then
+        echo "syslogd: 已启动（落盘 + 转发给本机 crowdsec 的 514）"
+    else
+        syslogd -O /var/log/messages 2>/dev/null
+        echo "syslogd: 已启动（本机 busybox 不支持 -R，仅落盘）"
+    fi
+}
+stop() {
+    killall syslogd 2>/dev/null
+}
+case "${1:-start}" in
+    start)   start ;;
+    restart) stop; sleep 1; start ;;
+    stop)    stop ;;
+    *) echo "用法: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac

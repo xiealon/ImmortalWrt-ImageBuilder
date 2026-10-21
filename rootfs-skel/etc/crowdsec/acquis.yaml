@@ -1,0 +1,6 @@
+# 占位采集源：真实日志源由 /etc/crowdsec/acquis.d/router.yaml 提供（router 侧写入）
+source: file
+filenames:
+  - /var/log/router.log
+labels:
+  type: syslog

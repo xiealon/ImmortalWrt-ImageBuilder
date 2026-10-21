@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-21.108.44-bp"
+SCRIPT_VER="2026-10-21.108.45-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -3347,7 +3347,22 @@ _structurally_broken() {
     # v.109-min：init 类型决定「哪些文件算必备」——systemd 版看 crowdsec.service，
     # 极简版看 inittab + init.d/crowdsec。两套都要求 usr/bin/crowdsec 与 os-release。
     if _is_minimal_init; then
-        _sb_list="$ROOTFS/etc/inittab $ROOTFS/etc/init.d/crowdsec"
+        # 【v.108.45】不再列 etc/inittab 与 etc/init.d/crowdsec。
+        # 原因：从这一版起，固件里也有这 6 个容器脚本的副本（供 crowdsec-guard 拿
+        # /rom squashfs 当只读基准），于是 `-s $ROOTFS/etc/inittab` 在 rootfs
+        # 根本没解压时**同样成立**（读的是 squashfs 下层）—— 判据恒真，等于没判。
+        # 它们的「存在 + 内容」交给 guard：guard 每轮 cmp，改坏/删掉 60 秒内补回，
+        # 代价几十 KB，比整盘重解压 288MB 合理得多。
+        # 这里只留**固件里没有**的文件：没有 → 只可能来自 tarball 解压 → 缺了就是真缺。
+        _sb_list="$ROOTFS/etc/os-release $ROOTFS/etc/passwd $ROOTFS/etc/group
+                  $ROOTFS/etc/nsswitch.conf $ROOTFS/bin/busybox
+                  $ROOTFS/usr/bin/crowdsec $ROOTFS/etc/crowdsec/acquis.yaml"
+        # os-release 还有第二重身份：它是 verify_rootfs 的「rootfs 已解压」标志。
+        # 缺它时其余判据都可能因固件副本而恒真，所以这里单独先判、直接定性。
+        if [ ! -s "$ROOTFS/etc/os-release" ]; then
+            log "[结构] rootfs 缺 /etc/os-release（未解压或已损坏），判定结构性损坏"
+            return 0
+        fi
     else
         _sb_list="$ROOTFS/lib/systemd/system/crowdsec.service"
     fi

@@ -1,0 +1,19 @@
+#!/bin/sh
+# busybox init 的 sysinit 入口。顺序：伪文件系统 → hostname → 网络 → syslog → 业务
+PATH=/usr/bin:/usr/sbin:/bin:/sbin
+
+mkdir -p /dev/pts /dev/shm /run /tmp /var/log /var/lib/crowdsec/data
+
+# LXC 一般已经挂好 proc/sys，重复 mount 会 EBUSY；失败不算错，所以全都忽略返回值
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t tmpfs tmpfs /run 2>/dev/null
+mount -t devpts devpts /dev/pts 2>/dev/null
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null
+
+hostname -F /etc/hostname 2>/dev/null
+
+/etc/init.d/netconf start
+/etc/init.d/syslogd start
+
+echo "[rcS] 容器初始化完成"

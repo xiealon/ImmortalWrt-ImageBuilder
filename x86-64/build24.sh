@@ -104,6 +104,32 @@ case " $PACKAGES " in
         ;;
 esac
 
+# 【v.108.45】容器内脚本进固件，供 crowdsec-guard 拿 /rom 只读副本当基准。
+# 为什么放这里而不是只在 tarball 里：tarball 是个压缩包，guard 没法用 cmp 比它；
+# 只有在 squashfs 里有同路径的散文件，guard 才能「同路径比对」而不必改逻辑。
+# 只放需要逐字节固定的 6 个。acquis.yaml / config.yaml / crowdsec-net.conf /
+# resolv.conf 由 bootstrap 的 logconf / capi / ct_net / ct_resolv 每轮重写，
+# 放进固件会变成「bootstrap 写 → guard 改回去 → 死循环」。
+# 特别不放 os-release：它是 verify_rootfs 判「rootfs 已解压」的依据，
+# 放进 squashfs 会让首启（rootfs 还没解压）被误判成就绪。
+ROOTFS_GUARD_DIR="files/srv/lxc/ubuntu/rootfs"
+for _rel in \
+    etc/inittab \
+    etc/init.d/rcS \
+    etc/init.d/crowdsec \
+    etc/init.d/netconf \
+    etc/init.d/syslogd \
+    usr/sbin/crowdsec-supervise; do
+    mkdir -p "$ROOTFS_GUARD_DIR/$(dirname "$_rel")"
+    cp -f "rootfs-skel/$_rel" "$ROOTFS_GUARD_DIR/$_rel" \
+        || { echo "::error::缺 rootfs-skel/$_rel（容器脚本单一来源，prepare 与 guard 都靠它）"; exit 1; }
+done
+chmod 0755 "$ROOTFS_GUARD_DIR"/etc/init.d/rcS "$ROOTFS_GUARD_DIR"/etc/init.d/crowdsec \
+           "$ROOTFS_GUARD_DIR"/etc/init.d/netconf "$ROOTFS_GUARD_DIR"/etc/init.d/syslogd \
+           "$ROOTFS_GUARD_DIR"/usr/sbin/crowdsec-supervise
+chmod 0644 "$ROOTFS_GUARD_DIR/etc/inittab"
+echo "==> 容器内受保护脚本已进固件（6 个，/rom 只读基准）"
+
 # 出镜像前补齐执行位并逐项断言：路径改名或文件漏拷时让构建直接失败。
 # 不再用 2>/dev/null 把 chmod 的错误吞掉——那样后面那句"已确保可执行"就是在撒谎。
 # 99-custom.sh / 98-lxc-auto.sh 走 uci-defaults 的 `.` 载入，不依赖执行位，所以只在 chmod 里，不进断言表。

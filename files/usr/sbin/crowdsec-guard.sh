@@ -35,6 +35,12 @@
 #   现在不再依赖 stat：只看有没有执行位（squashfs 会保留权限位，-x 判足够），
 #   而且**内容一致时只 chmod、绝不重写文件** —— 权限漂移不该付出重写 246KB 的代价。
 #
+# 【v.108.46】再扩 5 个静态配置（net.conf / resolv.conf / hosts /
+#   acquis.d/router.yaml / parsers 两个），共「宿主 6 + 容器内 14」= 20 个。
+#   这 5 个以前由 bootstrap 每轮重写（所以进不了 guard），v.108.46 起改为构建期固定：
+#   IP / DNS 写死在 rootfs-skel 里，acquis/parsers 本来就是纯静态 YAML。
+#   注意 hosts 也在此列 —— 它含 `10.1.0.10 crowdsec`，改坏了容器内解析自己都成问题。
+#
 # 【v.108.45】保护范围从宿主侧 6 个扩展到「宿主 6 + 容器内 9」= 15 个：
 #   容器内那批（inittab / init.d/{rcS,crowdsec,netconf,syslogd} / usr/sbin/crowdsec-supervise
 #   / etc/{passwd,group,nsswitch.conf}）以前只有「存在且非空」这一档判据，内容被改坏
@@ -91,6 +97,12 @@ GUARD_CT_FILES="${CS_GUARD_CT_FILES:-
 /etc/passwd
 /etc/group
 /etc/nsswitch.conf
+/etc/hosts
+/etc/resolv.conf
+/etc/crowdsec-net.conf
+/etc/crowdsec/acquis.d/router.yaml
+/etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml
+/etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml
 /etc/inittab
 /etc/init.d/rcS
 /etc/init.d/crowdsec

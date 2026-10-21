@@ -1,0 +1,8 @@
+name: openwrt/my-whitelist
+description: 'No whitelist configured - placeholder only'
+whitelist:
+  reason: placeholder, nothing is whitelisted
+  ip:
+    - 127.0.0.1
+  cidr:
+    - 240.0.0.0/4

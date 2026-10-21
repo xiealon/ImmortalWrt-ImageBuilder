@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-21.108.45-bp"
+SCRIPT_VER="2026-10-21.108.46-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -104,12 +104,17 @@ REINSTALL_MAX="${CS_BOOTSTRAP_REINSTALL_MAX:-1}"   # 连续重装失败达到即
 _CRED_REL="etc/crowdsec/online_api_credentials.yaml"
 _bs_stamped=0
 
-if [ -z "${CONTAINER_IP:-}" ] && [ -f /etc/config/custom_container_ip.txt ]; then
-    CONTAINER_IP="$(head -n1 /etc/config/custom_container_ip.txt | tr -d ' \t\r\n')"
+# 【v.108.46】IP / 网关固定，唯一来源是容器 rootfs 里的 net.conf —— 构建期由
+# rootfs-skel 写进 tarball 和固件两处（同字节），并纳入 crowdsec-guard 保护。
+# 不再读 /etc/config/custom_container_ip.txt / custom_bridge_ip.txt：那是 action
+# 输入写出来的文件，输入已取消；继续读它等于保留了一份可能过期、且没人再更新的真相。
+_net_conf="$ROOTFS/etc/crowdsec-net.conf"
+if [ -z "${CONTAINER_IP:-}" ] && [ -f "$_net_conf" ]; then
+    CONTAINER_IP="$(sed -n 's/^ADDRESS=\([0-9][0-9.]*\)\/[0-9][0-9]*$/\1/p' "$_net_conf" 2>/dev/null | head -n1)"
 fi
 CONTAINER_IP="${CONTAINER_IP:-10.1.0.10}"
-if [ -z "${BRIDGE_IP:-}" ] && [ -f /etc/config/custom_bridge_ip.txt ]; then
-    BRIDGE_IP="$(head -n1 /etc/config/custom_bridge_ip.txt | tr -d ' \t\r\n')"
+if [ -z "${BRIDGE_IP:-}" ] && [ -f "$_net_conf" ]; then
+    BRIDGE_IP="$(sed -n 's/^GATEWAY=//p' "$_net_conf" 2>/dev/null | head -n1)"
 fi
 BRIDGE_IP="${BRIDGE_IP:-10.1.0.1}"
 
@@ -2595,21 +2600,21 @@ _container_dns() {
 
 setup_container_network() {
     [ -d "$ROOTFS" ] || { log "[网络] rootfs 未就绪"; return 1; }
-    _dns="$(_container_dns)"
     if _is_minimal_init; then
-        # 极简版：写成 shell 变量文件，由 /etc/init.d/netconf 套用（rcS 里调）。
-        # 用变量文件而不是 ip 命令直接下发，是为了让「配置」留在磁盘上：
-        # 容器重启后 rcS 还能照着重放，而 ip 命令下发的东西一重启就没了。
+        # 【v.108.46】极简版的 net.conf 是**静态文件**：构建期由 rootfs-skel 装进 tarball
+        # 和固件两处（同字节），由 crowdsec-guard 逐字节保护。
+        # 这里不再重写 —— 写了就是 bootstrap 和 guard 抢同一个文件（写 v1、盖回 v2），
+        # 每 60 秒一次，正是 v.108.44 那个 flash 磨损事故的形态，只是换了个理由。
+        # 只确认它还在：缺了交给 guard 复原，guard 也补不上就交给 _structurally_broken。
         _netfile="$ROOTFS/etc/crowdsec-net.conf"
-        atomic_write "$_netfile" "ADDRESS=${CONTAINER_IP}/24" <<EOF || { log "[网络] 容器网络文件写入不完整"; return 1; }
-ADDRESS=${CONTAINER_IP}/24
-GATEWAY=${BRIDGE_IP}
-DNS=${_dns}
-EOF
-        chmod 644 "$_netfile" 2>/dev/null
-        log "[网络] 容器静态 IP ${CONTAINER_IP}/24 网关 ${BRIDGE_IP} DNS ${_dns}（极简 init）"
-        return 0
+        if [ -s "$_netfile" ]; then
+            log "[网络] 容器静态 IP ${CONTAINER_IP}/24 网关 ${BRIDGE_IP}（静态文件，guard 保护）"
+            return 0
+        fi
+        log "[网络] 缺 /etc/crowdsec-net.conf（静态文件被删？），等 guard 从 /rom 复原"
+        return 1
     fi
+    _dns="$(_container_dns)"
     _netfile="$ROOTFS/etc/systemd/network/10-eth0.network"
     mkdir -p "$(dirname "$_netfile")" 2>/dev/null
     atomic_write "$_netfile" "Address=${CONTAINER_IP}/24" <<EOF || { log "[网络] 容器网络文件写入不完整"; return 1; }
@@ -2676,8 +2681,17 @@ setup_container_boot() {
 
 setup_resolv() {
     [ -d "$ROOTFS" ] || { log "[DNS] rootfs 未就绪"; return 1; }
-    _dns="$(_container_dns)"
     _resolv="$ROOTFS/etc/resolv.conf"
+    if _is_minimal_init; then
+        # 【v.108.46】同上：resolv.conf 也是静态文件（nameserver 固定为网桥 IP）。
+        if [ -s "$_resolv" ]; then
+            log "[DNS] 容器 resolv.conf 为静态文件（guard 保护）"
+            return 0
+        fi
+        log "[DNS] 缺 /etc/resolv.conf（静态文件被删？），等 guard 从 /rom 复原"
+        return 1
+    fi
+    _dns="$(_container_dns)"
     echo "nameserver ${_dns}" | atomic_write "$_resolv" "nameserver" \
         || { log "[DNS] resolv.conf 写入不完整"; return 1; }
     chmod 644 "$_resolv" 2>/dev/null
@@ -2687,6 +2701,19 @@ setup_resolv() {
 
 setup_acquis() {
     [ -d "$ROOTFS/etc/crowdsec" ] || { log "[配置] rootfs 内无 crowdsec"; return 1; }
+    if _is_minimal_init; then
+        # 【v.108.46】采集源 / 解析器 / 白名单全部静态化：内容在构建期就确定，
+        # 由 rootfs-skel 进 tarball 与固件，guard 逐字节保护。
+        # 以前这三个文件由本函数每轮重写，所以不能进 guard（写了就被盖回去）。
+        for _sf in etc/crowdsec/acquis.d/router.yaml \
+                   etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml \
+                   etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml; do
+            [ -s "$ROOTFS/$_sf" ] \
+                || { log "[配置] 缺 /$_sf（静态文件被删？），等 guard 从 /rom 复原"; return 1; }
+        done
+        log "[配置] 解析器 + 日志源 + 白名单为静态文件（guard 保护）"
+        return 0
+    fi
     mkdir -p "$ROOTFS/etc/crowdsec/acquis.d" \
              "$ROOTFS/etc/crowdsec/parsers/s01-parse" \
              "$ROOTFS/etc/crowdsec/parsers/s02-enrich" 2>/dev/null

@@ -35,6 +35,11 @@
 # =============================================================================
 set -euo pipefail
 
+# 输出/退出：定义必须在使用之前 —— shellcheck SC2218 会把它当 error，
+# 而 v.108.46 新增的 die/say 调用在变量区（L58/L65），所以这两个函数上移到这里。
+say() { echo "==> $*"; }
+die() { echo "!! $*" >&2; exit 1; }
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 【v.108.45】容器内脚本的单一来源：rootfs-skel/ 既进 tarball（下面 install 进来），
 # 也被 build24/25.sh 拷进固件 files/srv/lxc/ubuntu/rootfs/，供 crowdsec-guard 做只读基准。
@@ -65,9 +70,6 @@ BRIDGE_IP="${BRIDGE_IP:-$_skel_bridge_ip}"
 say "容器网络（固定值，来自 rootfs-skel）：IP=$CONTAINER_IP 网关=$BRIDGE_IP"
 COLLECTIONS="${COLLECTIONS:-crowdsecurity/linux crowdsecurity/sshd}"
 MIN_MB="${MIN_MB:-40}"
-
-say() { echo "==> $*"; }
-die() { echo "!! $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 0. 前置检查：这套流程只在 Linux + root 下成立（chroot 要 root）

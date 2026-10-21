@@ -114,6 +114,9 @@ esac
 # 放进 squashfs 会让首启（rootfs 还没解压）被误判成就绪。
 ROOTFS_GUARD_DIR="files/srv/lxc/ubuntu/rootfs"
 for _rel in \
+    etc/passwd \
+    etc/group \
+    etc/nsswitch.conf \
     etc/inittab \
     etc/init.d/rcS \
     etc/init.d/crowdsec \
@@ -127,8 +130,9 @@ done
 chmod 0755 "$ROOTFS_GUARD_DIR"/etc/init.d/rcS "$ROOTFS_GUARD_DIR"/etc/init.d/crowdsec \
            "$ROOTFS_GUARD_DIR"/etc/init.d/netconf "$ROOTFS_GUARD_DIR"/etc/init.d/syslogd \
            "$ROOTFS_GUARD_DIR"/usr/sbin/crowdsec-supervise
-chmod 0644 "$ROOTFS_GUARD_DIR/etc/inittab"
-echo "==> 容器内受保护脚本已进固件（6 个，/rom 只读基准）"
+chmod 0644 "$ROOTFS_GUARD_DIR/etc/passwd" "$ROOTFS_GUARD_DIR/etc/group" \
+           "$ROOTFS_GUARD_DIR/etc/nsswitch.conf" "$ROOTFS_GUARD_DIR/etc/inittab"
+echo "==> 容器内受保护文件已进固件（9 个，/rom 只读基准）"
 
 # 出镜像前补齐执行位并逐项断言：路径改名或文件漏拷时让构建直接失败。
 # 不再用 2>/dev/null 把 chmod 的错误吞掉——那样后面那句"已确保可执行"就是在撒谎。

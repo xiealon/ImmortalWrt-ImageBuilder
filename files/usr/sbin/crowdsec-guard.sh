@@ -35,10 +35,10 @@
 #   现在不再依赖 stat：只看有没有执行位（squashfs 会保留权限位，-x 判足够），
 #   而且**内容一致时只 chmod、绝不重写文件** —— 权限漂移不该付出重写 246KB 的代价。
 #
-# 【v.108.45】保护范围从宿主侧 6 个扩展到「宿主 6 + 容器内 6」= 12 个：
-#   容器内那批（inittab / init.d/{rcS,crowdsec,netconf,syslogd} / usr/sbin/crowdsec-supervise）
-#   以前只有「存在且非空」这一档判据，内容被改坏既不自愈也查不出来，只能靠
-#   last_pull 停滞间接发现，且发现后唯一手段是整盘重解压 288MB。
+# 【v.108.45】保护范围从宿主侧 6 个扩展到「宿主 6 + 容器内 9」= 15 个：
+#   容器内那批（inittab / init.d/{rcS,crowdsec,netconf,syslogd} / usr/sbin/crowdsec-supervise
+#   / etc/{passwd,group,nsswitch.conf}）以前只有「存在且非空」这一档判据，内容被改坏
+#   既不自愈也查不出来，只能靠 last_pull 停滞间接发现，且发现后唯一手段是整盘重解压 288MB。
 #   现在固件里（squashfs）带同一批文件的副本，guard 用同路径比对 + 原子替换，
 #   恢复代价降到几十 KB。三处清单必须始终同版：rootfs-skel/（唯一来源）、
 #   build24/25.sh（拷进固件）、本文件（比对清单）；单一来源写错就退化成
@@ -88,6 +88,9 @@ GUARD_FILES="${CS_GUARD_FILES:-
 #   · systemd 版 rootfs（legacy lxc-ubuntu.tar.gz）语义完全不同 —— 不能碰（门②）。
 GUARD_CT_PREFIX="/srv/lxc/ubuntu/rootfs"
 GUARD_CT_FILES="${CS_GUARD_CT_FILES:-
+/etc/passwd
+/etc/group
+/etc/nsswitch.conf
 /etc/inittab
 /etc/init.d/rcS
 /etc/init.d/crowdsec

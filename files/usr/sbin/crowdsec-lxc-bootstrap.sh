@@ -3354,8 +3354,7 @@ _structurally_broken() {
         # 它们的「存在 + 内容」交给 guard：guard 每轮 cmp，改坏/删掉 60 秒内补回，
         # 代价几十 KB，比整盘重解压 288MB 合理得多。
         # 这里只留**固件里没有**的文件：没有 → 只可能来自 tarball 解压 → 缺了就是真缺。
-        _sb_list="$ROOTFS/etc/os-release $ROOTFS/etc/passwd $ROOTFS/etc/group
-                  $ROOTFS/etc/nsswitch.conf $ROOTFS/bin/busybox
+        _sb_list="$ROOTFS/etc/os-release $ROOTFS/bin/busybox
                   $ROOTFS/usr/bin/crowdsec $ROOTFS/etc/crowdsec/acquis.yaml"
         # os-release 还有第二重身份：它是 verify_rootfs 的「rootfs 已解压」标志。
         # 缺它时其余判据都可能因固件副本而恒真，所以这里单独先判、直接定性。

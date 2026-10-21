@@ -316,16 +316,21 @@ ck "R15.17 write_cfg 按 LXC 版本选容器名键" \
 ck "R15.18 write_cfg 不再写死 lxc.utsname" \
    "$(grep -c '^lxc\.utsname = ' "$BS_C")" "0"
 
-echo "== 10d 网页终端 ttyd：interface 必须是 all =="
-# 现场日志：E: _lws_vhost_init_server_af: VH default: iface lan port 7681
-# DOESN'T EXIST —— `ttyd -i` 认的是内核接口名，填 netifd 逻辑名 lan 会 bind 失败，
-# 进程仍 running、端口一个不听，表现就是「网页终端连不上、SSH 正常」。
-ck "R15.19 build_svc_bind 把 ttyd 设为 all" \
-   "$(sed -n '/^build_svc_bind() {/,/^}/p' "$BS_C" | grep -c 'interface=.all.')" "1"
-ck "R15.20 verify_svc_bind 校验端口真在听" \
-   "$(sed -n '/^verify_svc_bind() {/,/^}/p' "$BS_C" | grep -c 'netstat -lnt')" "1"
-ck "R15.21 verify_svc_bind 按 all 校验 ttyd" \
-   "$(sed -n '/^verify_svc_bind() {/,/^}/p' "$BS_C" | grep -c 'interface 2>/dev/null)" = "all"')" "1"
+echo "== 10d 管理服务绑定：只钉 dropbear，ttyd 整块移除（v.108.40） =="
+# 原来那两条 ttyd 判据是「interface 必须 all」+「netstat -lnt 查端口真在听」。
+# 翻车点是后者：ImmortalWrt 默认固件通常不带 netstat 这个 applet，命令不存在 →
+# 管道为空 → grep 必失败 → 配置写得完全正确也被判成「写了没生效」，收口复核直接
+# exit 1，连带 _stamp_write 不执行、installed 永远写不下，每次开机全量重跑并重赌
+# bouncer_verify 的 60 秒窗口 —— 这才是「时好时坏」的根源。
+# 本机不用网页终端，verify/build 两侧的 ttyd 全部删除，判据只剩 dropbear 一条。
+ck "R15.19 build_svc_bind 不再写 ttyd" \
+   "$(sed -n '/^build_svc_bind() {/,/^}/p' "$BS_C" | grep -c 'ttyd')" "0"
+ck "R15.20 verify_svc_bind 不再引用 ttyd" \
+   "$(sed -n '/^verify_svc_bind() {/,/^}/p' "$BS_C" | grep -c 'ttyd')" "0"
+ck "R15.21 verify_svc_bind 不再依赖 netstat" \
+   "$(sed -n '/^verify_svc_bind() {/,/^}/p' "$BS_C" | grep -c 'netstat')" "0"
+ck "R15.21b verify_svc_bind 仍校验 dropbear 绑定 LAN 网络" \
+   "$(sed -n '/^verify_svc_bind() {/,/^}/p' "$BS_C" | grep -c 'dropbear.@dropbear\[0\].Interface')" "1"
 
 echo "== 10e cgroup：判据必须是真挂载，不是目录可写 =="
 # 现场：容器内 systemd 报 Failed to mount cgroup at /sys/fs/cgroup/systemd:

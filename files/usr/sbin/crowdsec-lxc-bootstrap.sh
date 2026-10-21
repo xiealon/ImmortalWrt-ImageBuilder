@@ -14,11 +14,11 @@
 #                firewall → firewall reload（fw4 重建整张 nft 表）。
 #   脚本会写的东西（按配置面分）：
 #     · /etc/config/network   桥端口 / lan 静态地址 / 删 wan+wan6 段 / lxcbr0 段与地址
-#     · /etc/config/dhcp      lan.ignore / time.android.com 的 domain 段
+#     · /etc/config/dhcp      lan.ignore（关 DHCP / RA / authoritative）
 #     · /etc/config/firewall  lxc zone + 3 条 forwarding / wan·lan input / SNAT /
 #                             docker zone + 3 条 rule（仅装了 dockerd 时）
 #     · /proc/sys/net/ipv4/ip_forward  置 1（写完必须回读，读不回来判失败）
-#     · /etc/config/dropbear、ttyd   服务绑定接口（局部 commit，走各自 reload）
+#     · /etc/config/dropbear  服务绑定接口（局部 commit + reload）
 #     · /etc/config/system    log_ip/log_port（日志推送到容器）
 #     · /etc/config/crowdsec  api_url/api_key（bouncer 注册）
 #   改网络前有「不自杀」保护（_net_write_guard + SSH 来源判定），但仍需自担风险：
@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-21.108.37-bp"
+SCRIPT_VER="2026-10-21.108.40-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -202,19 +202,6 @@ _lan_ip() {
     [ -n "$_si" ] || { [ -f /etc/config/custom_router_ip.txt ] && _si=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n'); }
     [ -n "$_si" ] || _si='10.0.0.201'
     echo "$_si"
-}
-
-# 定位 time.android.com 那条 dhcp domain 段（v.95）：verify 与 build 共用同一套定位，
-# 避免「verify 判不符、build 改了另一段、下次开机又不符」的抖动。
-# 无匹配则输出空串（build 据此决定是否新建）。
-_dns_domain_sec() {
-    for _dd in $(uci show dhcp 2>/dev/null | grep -E '=domain$' | cut -d. -f2 | cut -d= -f1); do
-        if [ "$(uci -q get "dhcp.$_dd.name" 2>/dev/null)" = "time.android.com" ]; then
-            printf '%s\n' "$_dd"
-            return 0
-        fi
-    done
-    return 0
 }
 
 # 读取 custom_*.txt 首行（编译期 Actions 写入 /etc/config，运行时可改文件免重编译）
@@ -600,34 +587,16 @@ purge_wan_refs() {
 # 就只剩一句注释可以相信了 —— 抽出来测试才能真的数到这次调用。
 _net_reload() { /etc/init.d/network reload >/dev/null 2>&1; }
 
-# DNS 劫持验证：存在 time.android.com → 203.107.6.88 的 dhcp domain（安卓 NTP 走国内源）
-verify_dns_domain() {
-    for _dd in $(uci show dhcp 2>/dev/null | grep -E '=domain$' | cut -d. -f2 | cut -d= -f1); do
-        [ "$(uci -q get dhcp.$_dd.name 2>/dev/null)" = "time.android.com" ] || continue
-        [ "$(uci -q get dhcp.$_dd.ip 2>/dev/null)" = "203.107.6.88" ] || return 1
-        return 0
-    done
-    return 1
-}
-
-# 管理服务监听面验证（v.77 同源）：dropbear(SSH)/ttyd(网页终端) 绑 LAN zone 对应接口
+# 管理服务监听面验证（v.77 同源）：dropbear(SSH) 绑 LAN zone 对应接口
 # ——取代原 99-custom 的「Interface 清空=无差别监听所有口」：那种写法会把 SSH 暴露到 WAN
 # 无 name=lan 的 zone → 不涉及，跳过
+# 【v.108.40】ttyd 不再参与：本机用不到网页终端，那两条判据（interface=all +
+# netstat 查端口监听）连同 build 侧的 ttyd 写入一起删掉。原判据里 `netstat -lnt`
+# 在 ImmortalWrt 默认固件里通常没有这个 applet，命令不存在 → 管道空 → grep 必失败，
+# 于是配置写得完全正确也被判成「写了没生效」，收口复核直接 exit 1（见 v.108.40 说明）。
 verify_svc_bind() {
     _wn=$(_zone_lan_network) || { log "[服务] 无 name=lan 的 zone，本轮不校验管理服务绑定"; return 0; }
     [ "$(uci -q get dropbear.@dropbear[0].Interface 2>/dev/null)" = "$_wn" ] || return 1
-    # ttyd 的 interface 不能填 netifd 逻辑网络名（v.108.2 现场实证）：
-    # 那个值最终原样进 `ttyd -i`，libwebsockets 按**内核接口名**解析。填 lan 时
-    # 启动日志是 E: _lws_vhost_init_server_af: VH default: iface lan port 7681
-    # DOESN'T EXIST，进程照样 running、端口一个都不听 —— 症状正是
-    # 「网页终端连不上、SSH 一切正常」。用 all（等价 0.0.0.0）：OpenWrt 默认值，
-    # 可达面由防火墙 zone 把控（wan zone REJECT / wan 网络已删）。
-    command -v ttyd >/dev/null 2>&1 || return 0
-    [ "$(uci -q get ttyd.@ttyd[0].interface 2>/dev/null)" = "all" ] || return 1
-    # 光看 running 不算过：bind 失败时 pid 一样在，必须查端口真的在听
-    _tp=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null)
-    [ -n "$_tp" ] || _tp=7681
-    netstat -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$_tp$" || return 1
     return 0
 }
 
@@ -653,26 +622,15 @@ verify_docker_fw() {
     return 0
 }
 
-# 管理服务绑定 builder（v.95）：把 dropbear / ttyd 的监听面钉到 LAN 网络，
+# 管理服务绑定 builder（v.95）：把 dropbear 的监听面钉到 LAN 网络，
 # 避免 SSH 无差别监听所有口（尤其不能暴露到 WAN）。无 lan zone 则无从推导，跳过。
+# 【v.108.40】ttyd 不再处理（本机不用网页终端）。
 build_svc_bind() {
     _wn=$(_zone_lan_network) || { log "[服务] 无 name=lan 的 zone，跳过管理服务绑定"; return 0; }
     uci -q set dropbear.@dropbear[0].Interface="$_wn"
     uci -q commit dropbear 2>/dev/null
     /etc/init.d/dropbear reload >/dev/null 2>&1 || true
-    if command -v ttyd >/dev/null 2>&1; then
-        if ! uci -q get ttyd.@ttyd[0] >/dev/null 2>&1; then
-            uci -q add ttyd ttyd
-            uci -q set ttyd.@ttyd[0].command='/bin/login'
-        fi
-        # 不用逻辑网络名：`ttyd -i lan` 找不到名为 lan 的内核设备，端口直接不听
-        uci -q set ttyd.@ttyd[0].interface='all'
-        uci -q commit ttyd 2>/dev/null
-        /etc/init.d/ttyd reload >/dev/null 2>&1 || true
-        log "[服务] dropbear 绑定 $_wn；ttyd 监听 all"
-    else
-        log "[服务] 未安装 ttyd，跳过网页终端绑定"
-    fi
+    log "[服务] dropbear 绑定 $_wn"
     return 0
 }
 
@@ -813,25 +771,6 @@ build_dhcp_ignore() {
     return 0
 }
 
-# DNS 劫持 builder：幂等补/改 time.android.com → 203.107.6.88（安卓 NTP 走国内源）
-build_dns_domain() {
-    _dd=$(_dns_domain_sec)
-    if [ -z "$_dd" ]; then
-        # uci add 会把新段名打印到 stdout（真实 uci 与精简实现都如此），直接用它；
-        # 不要 add 完再靠 name 去找 —— 新段此刻还没有 name，按 name 找必然落空。
-        _dd=$(uci -q add dhcp domain 2>/dev/null | tr -d ' \t\r\n')
-        # 兜底：拿不到返回值时，退回按「最后一个 domain 段」定位
-        if [ -z "$_dd" ]; then
-            _dd=$(uci show dhcp 2>/dev/null | grep -E '=domain$' | cut -d. -f2 | cut -d= -f1 | tail -n1)
-        fi
-        [ -n "$_dd" ] || { log "[DNS] 无法新建 dhcp domain 段"; return 1; }
-    fi
-    uci -q set "dhcp.$_dd.name=time.android.com"
-    uci -q set "dhcp.$_dd.ip=203.107.6.88"
-    log "[DNS] 已写入 time.android.com → 203.107.6.88（段 $_dd）"
-    return 0
-}
-
 # lxc zone + 四条转发规则（lxc2lan / lxc2docker / lxc2vpn / lan2lxc）
 build_lxc_zone_fwd() {
     if [ -z "$(_zone_sec lxc)" ]; then
@@ -908,7 +847,7 @@ build_lan_input() {
 # 防火墙修复入口：六分项独立预检，哪项不符只重建哪项
 # 全对 -> 不 commit 不 reload 直接跳过；只有 ip_forward 被关 -> 只 echo 1；
 
-DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore dns_domain bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release"
+DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release"
 
 # ---- 网络基线模式（--net-only）----
 # 适用场景：镜像没进固件（v.107.7 起不再有 Include Crowdsec 开关，容器恒内置，
@@ -944,7 +883,6 @@ DEP_rootfs="img_migrate"
 DEP_br_lan_ports=""
 DEP_lan_static="br_lan_ports"
 DEP_dhcp_ignore=""
-DEP_dns_domain=""
 DEP_bridge="lan_static"
 # ct_net / ct_bootlink / ct_resolv 写的是容器 rootfs 里的文件（10-eth0.network、
 # 自启软链、resolv.conf），显式依赖 rootfs。rootfs 属 INSTALL 组，而 INSTALL 排在
@@ -1019,7 +957,6 @@ NODE_GROUP_ct_config=INSTALL
 NODE_GROUP_br_lan_ports=PREP
 NODE_GROUP_lan_static=PREP
 NODE_GROUP_dhcp_ignore=PREP
-NODE_GROUP_dns_domain=PREP
 NODE_GROUP_bridge=PREP
 NODE_GROUP_ct_net=PREP
 NODE_GROUP_cgroup_mount=PREP
@@ -1200,7 +1137,7 @@ _post_verify_skip() {
     return 1
 }
 
-# 复核不是「验一次就判死」：uci 改完到生效有延迟（dropbear reload、网桥地址、ttyd 端口），
+# 复核不是「验一次就判死」：uci 改完到生效有延迟（dropbear reload、网桥地址），
 # 验一次不中不代表没写成。3 次、每次间隔 1 秒，仍不中才算没写成。
 _post_verify_confirm() {
     _pv_n=0
@@ -1396,7 +1333,7 @@ flush_uci() {
     for _o in br_lan_ports lan_static bridge; do
         _bs_flag_on "_dirty_$_o" && _n=1
     done
-    for _o in dhcp_ignore dns_domain; do
+    for _o in dhcp_ignore; do
         _bs_flag_on "_dirty_$_o" && _d=1
     done
     for _o in lxc_zone fwd_rules lan_input snat docker_fw; do
@@ -3663,7 +3600,7 @@ _sc_wait_pull() {
 
 
 # 各组节点清单（由 NODE_GROUP_* 派生，供组级 verify/build 遍历；顺序即组内声明序）
-PREP_NODES="br_lan_ports lan_static dhcp_ignore dns_domain bridge ct_net cgroup_mount ct_bootlink lxc_auto ct_resolv lxc_zone fwd_rules lan_input snat ip_forward svc_bind docker_fw"
+PREP_NODES="br_lan_ports lan_static dhcp_ignore bridge ct_net cgroup_mount ct_bootlink lxc_auto ct_resolv lxc_zone fwd_rules lan_input snat ip_forward svc_bind docker_fw"
 INSTALL_NODES="img_migrate rootfs ct_config"
 CAPIBLOCK_NODES="capi_block"
 BOOT_NODES="ct_boot"
@@ -3683,8 +3620,8 @@ verify_PREP() {
     return 0
 }
 build_PREP() {
-    # 网络侧 12 项全部「验证 + 修改」（v.95/v.97 起，含 bridge）：
-    # br_lan_ports / lan_static / dhcp_ignore / dns_domain /
+    # 网络侧 11 项全部「验证 + 修改」（v.95/v.97 起，含 bridge；v.108.40 去掉 dns_domain）：
+    # br_lan_ports / lan_static / dhcp_ignore / bridge / …
     for _n in $PREP_NODES; do
         ensure "$_n" || return 1
     done

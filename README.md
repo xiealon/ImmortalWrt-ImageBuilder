@@ -1679,6 +1679,123 @@ config device
 
 回归：**547 条断言 0 失败**（新增 `probe_v10837.sh` R28.1~R28.4）。
 
+## v.108.38：ISO 不再自己重编固件，改成复用主流水线产物
+
+仓库里有两个 ISO 工作流（`build-iso.yml` / `build-iso-25.12.x.yml`），
+做法是**自己再跑一遍 imagebuilder**，编完顺手把固件封成 ISO。三个问题：
+
+| 问题 | 后果 |
+|---|---|
+| 24.10 版既不挂 `custom/`，也不跑 `shell/prepare-crowdsec-rootfs.sh` | ISO 里的固件没有 CrowdSec 容器镜像；构建页填的 Router IP / 掩码 / 网关 / DNS 一行都不生效 |
+| `profile` 默认 1G，而内置容器需要 2G 以上 | 每次必撞空间不足，那次失败与「参数填错」长得一模一样 |
+| 与 Release 发布的固件是**两次独立编译** | ISO 里那份和 bin 包里那份不同源，装完行为不一致，无法判断哪个才是真的 |
+
+而两个构建工作流末尾本来就有一个 `Upload Firmware As Artifact For ISO`
+（artifact 名 `firmware-img`），**从来没人消费**——等于每次构建白存 400MB+。
+
+改法：ISO 工作流只做打包，直接取对应构建流的 `firmware-img`。
+固件只有一份，ISO 与 Release 必然同源。
+
+- 新增可选输入 `source_run_id`：留空自动取该构建流最近一次成功的 run；取不到就
+  `::error::` + `exit 1`，不产出「装不进东西的 ISO」
+- 打包前 `ls` + 空文件检查 + `gzip -t` 全量 CRC：半截包不許进 ISO
+- Release tag 拆开（`-24.10-ISO` / `-25.12-ISO`）：原来两版共用
+  `Custom-Installer-x86_64-ISO` 且资产同名，后跑的整份覆盖先跑的
+- `permissions` 补 `actions: read`（跨 run 拉 artifact 必需）
+
+## v.108.39：ISO 流水线整体移除
+
+v.108.38 刚把 ISO 修好，随后判断这东西对本项目**没有实际用途**，留着只是维护面
+和存储开销。于是整条链路拆掉，包括刚修好的那两个工作流。
+
+| 删了什么 | 为什么 |
+|---|---|
+| `.github/workflows/build-iso.yml`、`build-iso-25.12.x.yml` | ISO 不再产出 |
+| 两个构建流末尾的 `Copy Firmware To Root` + `Upload Firmware As Artifact For ISO` | 这两步**只**为 ISO 服务；没有消费者后，每次构建白传白存 ~430MB |
+| `SUPPORT.md` 里「x86-64 OpenWrt安装器（ISO）」一行 | 机型表不该列一个已经不存在的产出 |
+| 远端 Release `Custom-Installer-x86_64-ISO` + tag | 挂着 700.2MB + 684.2MB 两个 ISO |
+| 远端 artifact `firmware-img` ×2（run 39051594092 / 39051614728） | 403.6MB + 419.5MB |
+
+合计释放约 **2.2 GB**。保留：Release `Autobuild-x86-64`（rootfs.tar.gz + 两版
+img.gz，共三件）与三个工作流（24.10 构建、25.12 构建、清理旧 run）。
+
+顺手记两条边界：`wukongdaily.md` 里的 ISO 教程属上游原文，不动；
+`x86-64/imm.config` 的 `CONFIG_ISO_IMAGES=n` 是 OpenWrt 自己的编译开关，与流水线无关。
+
+核对：远端 workflow 列表实测 3 个，`master=3c9d83d`，artifact total=0。
+
+## v.108.40：删掉用不到的两样 —— ttyd 网页终端 + 安卓 NTP 的 dhcp domain
+
+起因不是「不想要」，是 `svc_bind` 的**假失败**：现场配置全对、SSH 正常、容器在跑，
+收口复核却每轮报 `svc_bind 构建后始终不符（写了没生效）`，退出码 1。查下来判据本身错了。
+
+### A. 假失败从哪来
+
+`verify_svc_bind` 原来有 5 条判据，前 4 条读 uci，第 5 条读内核：
+
+```sh
+netstat -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]7681$" || return 1
+```
+
+ImmortalWrt 默认固件通常**没有 `netstat` 这个 applet**。命令不存在 → stderr 被
+`2>/dev/null` 吞掉 → 管道输出为空 → `grep -q` 必然失败。于是：
+
+| 环节 | 后果 |
+|---|---|
+| `verify_svc_bind` | 配置写得完全正确也返回 1 |
+| `_post_verify_after_boot` | 首轮不符 → 重跑 `build_svc_bind` → 仍不符 → `return 1` |
+| `_stamp_write` | 在复核之后，被跳过 → `installed` 永远写不下 |
+| 下次开机 | 无 `installed` 标记 → 完整重跑 LOGCONF→LAPI→BOUNCERVERIFY→ENROLL |
+| `bouncer_verify` | 每次开机都重新赌那 60 秒轮询窗口，不过就跳过 `capi_release` / `ENROLL` |
+
+这就是「功能明明是好的，却时好时坏」的根源：**一个查不了的判据，把整条收尾链拖成了每次重跑**。
+
+### B. 删了什么
+
+| 删除项 | 范围 |
+|---|---|
+| `dns_domain` 节点 | `DAG_NODES`（27→26）、`PREP_NODES`（17→16）、`NODE_GROUP_dns_domain`、`DEP_dns_domain`、`flush_uci` 的 dhcp 脏检查 |
+| `verify_dns_domain` / `build_dns_domain` / `_dns_domain_sec` | 三个函数整体删除，全脚本不再出现 `time.android.com` / `203.107.6.88` |
+| `verify_svc_bind` 的 ttyd 两判据 | `interface=all` + `netstat` 查端口，连带 `_tp` 端口推导 |
+| `build_svc_bind` 的 ttyd 写入 | `uci add ttyd` / `command=/bin/login` / `interface=all` / `commit` / `reload` |
+| 文件头「脚本会写什么」 | `/etc/config/dhcp` 只剩 `lan.ignore`；`dropbear、ttyd` 改成 `dropbear` |
+
+### C. 删完之后 svc_bind 还剩什么
+
+一条判据、一个 builder，都只管 dropbear：
+
+```sh
+verify_svc_bind() {   # 无 name=lan 的 zone 就放行（LuCI 允许改 zone 名）
+    [ "$(uci -q get dropbear.@dropbear[0].Interface)" = "$_wn" ] || return 1
+}
+build_svc_bind() {
+    uci -q set dropbear.@dropbear[0].Interface="$_wn"
+    uci -q commit dropbear; /etc/init.d/dropbear reload
+}
+```
+
+SSH 仍然只绑 LAN 侧，不再有「无差别监听所有口」的风险；网页终端本来就没在用。
+
+### D. 删节点后的不变量（回归守着）
+
+- 26 个 DAG 节点**每个**都还有 `verify_` 与 `build_` 函数，无孤儿、无缺失
+- `NODE_GROUP_*` 行数 26 = DAG 节点数，无重复、无悬挂
+- `PREP_NODES` 16 项全部在 `DAG_NODES` 内
+- `flush_uci` 的 dhcp 组脏检查只剩 `dhcp_ignore`（少一个就不再 commit dhcp）
+
+回归：`tests/probe_v10840.sh` R29.1~R29.22 共 22 条断言；
+`tests/probe_netsafe.sh` 的 R15.19~R15.21 由「要求 ttyd 写 all / 查 netstat」
+改判为「不再引用 ttyd / 不再依赖 netstat」，另加 R15.21b 守 dropbear 那条判据。
+
+### E. 边界
+
+- 固件仍会带 `luci-i18n-ttyd-zh-cn`（`build24.sh` / `build25.sh` / `apk-custom-packages.sh`）：
+  那是**语言包**，ttyd 本体由 LuCI 依赖拉入；本次只改引导脚本的判断与写入，不动编译期包列表。
+- `docs/` 里的 `dag-flow.svg` 等是 v.82 时代的分层图（19 节点、含 `wan_port`），
+  早已与生产 DAG 不符；本次不动它，避免出现「svg 改了、png 还是旧的」这种更糟的不一致。
+- `tests/test_bp_*.sh` 是 v.99 前的历史套件，内部仍引用 `wan_removed` / `wan_input` 等
+  已删节点，早已不参与回归；活跃回归是 `tests/probe_*.sh`。
+
 # crowdsec 引导流程图
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)

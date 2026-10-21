@@ -124,6 +124,12 @@ for _rel in \
     etc/passwd \
     etc/group \
     etc/nsswitch.conf \
+    etc/hosts \
+    etc/resolv.conf \
+    etc/crowdsec-net.conf \
+    etc/crowdsec/acquis.d/router.yaml \
+    etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml \
+    etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml \
     etc/inittab \
     etc/init.d/rcS \
     etc/init.d/crowdsec \
@@ -138,8 +144,13 @@ chmod 0755 "$ROOTFS_GUARD_DIR"/etc/init.d/rcS "$ROOTFS_GUARD_DIR"/etc/init.d/cro
            "$ROOTFS_GUARD_DIR"/etc/init.d/netconf "$ROOTFS_GUARD_DIR"/etc/init.d/syslogd \
            "$ROOTFS_GUARD_DIR"/usr/sbin/crowdsec-supervise
 chmod 0644 "$ROOTFS_GUARD_DIR/etc/passwd" "$ROOTFS_GUARD_DIR/etc/group" \
-           "$ROOTFS_GUARD_DIR/etc/nsswitch.conf" "$ROOTFS_GUARD_DIR/etc/inittab"
-echo "==> 容器内受保护文件已进固件（9 个，/rom 只读基准）"
+           "$ROOTFS_GUARD_DIR/etc/nsswitch.conf" "$ROOTFS_GUARD_DIR/etc/hosts" \
+           "$ROOTFS_GUARD_DIR/etc/resolv.conf" "$ROOTFS_GUARD_DIR/etc/crowdsec-net.conf" \
+           "$ROOTFS_GUARD_DIR/etc/inittab"
+chmod 0644 "$ROOTFS_GUARD_DIR/etc/crowdsec/acquis.d/router.yaml" \
+           "$ROOTFS_GUARD_DIR/etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml" \
+           "$ROOTFS_GUARD_DIR/etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml"
+echo "==> 容器内受保护文件已进固件（14 个，/rom 只读基准）"
 
 # 出镜像前补齐执行位并逐项断言：路径改名或文件漏拷时让构建直接失败。
 # 不再用 2>/dev/null 把 chmod 的错误吞掉——那样后面那句"已确保可执行"就是在撒谎。

@@ -35,6 +35,11 @@
 # =============================================================================
 set -euo pipefail
 
+# 输出/退出：定义必须在使用之前 —— shellcheck SC2218 会把它当 error，
+# 而 v.108.46 新增的 die/say 调用在变量区（L58/L65），所以这两个函数上移到这里。
+say() { echo "==> $*"; }
+die() { echo "!! $*" >&2; exit 1; }
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 【v.108.45】容器内脚本的单一来源：rootfs-skel/ 既进 tarball（下面 install 进来），
 # 也被 build24/25.sh 拷进固件 files/srv/lxc/ubuntu/rootfs/，供 crowdsec-guard 做只读基准。
@@ -48,13 +53,23 @@ R="$WORK/rootfs"
 
 BUSYBOX_URL="${BUSYBOX_URL:-https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox}"
 CA_URL="${CA_URL:-https://curl.se/ca/cacert.pem}"
-CONTAINER_IP="${CONTAINER_IP:-10.1.0.10}"
-BRIDGE_IP="${BRIDGE_IP:-10.1.0.1}"
+# 【v.108.46】容器 IP / 网关固定，唯一来源是 rootfs-skel/etc/crowdsec-net.conf。
+# 不再从 workflow 输入取（那两个输入已删除）：输入还在的时候，"编译期常量"和
+# "固件里的 custom_*_ip.txt"是两份可能不一致的真相，bootstrap 还得每轮按其中一份
+# 重写容器的网络文件，于是那个文件既进不了 guard、也说不清谁是准的。
+# 现在 net.conf 就是唯一真源：prepare 装进 tarball、build 拷进固件、guard 比对。
+# 这里反解出来只为两处老用途：/etc/hosts 的 `$CONTAINER_IP crowdsec` 行、日志。
+_skel_net="$SKEL/etc/crowdsec-net.conf"
+[ -s "$_skel_net" ] || die "缺 rootfs-skel/etc/crowdsec-net.conf（容器 IP 的唯一来源）"
+_skel_ct_ip=$(sed -n 's/^ADDRESS=\([0-9][0-9.]*\)\/[0-9][0-9]*$/\1/p' "$_skel_net" | head -n1)
+_skel_bridge_ip=$(sed -n 's/^GATEWAY=//p' "$_skel_net" | head -n1)
+[ -n "$_skel_ct_ip" ] && [ -n "$_skel_bridge_ip" ] \
+    || die "rootfs-skel/etc/crowdsec-net.conf 解析不出 ADDRESS/GATEWAY（格式必须是 ADDRESS=x.y.z.w/24 和 GATEWAY=x.y.z.w）"
+CONTAINER_IP="${CONTAINER_IP:-$_skel_ct_ip}"
+BRIDGE_IP="${BRIDGE_IP:-$_skel_bridge_ip}"
+say "容器网络（固定值，来自 rootfs-skel）：IP=$CONTAINER_IP 网关=$BRIDGE_IP"
 COLLECTIONS="${COLLECTIONS:-crowdsecurity/linux crowdsecurity/sshd}"
 MIN_MB="${MIN_MB:-40}"
-
-say() { echo "==> $*"; }
-die() { echo "!! $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 0. 前置检查：这套流程只在 Linux + root 下成立（chroot 要 root）
@@ -190,27 +205,23 @@ grep -q 'BEGIN CERTIFICATE' "$R/etc/ssl/certs/ca-certificates.crt" || die "CA bu
 say "写 passwd/group/hosts/nsswitch/os-release"
 install -m 0644 "$SKEL/etc/passwd" "$R/etc/passwd"
 install -m 0644 "$SKEL/etc/group" "$R/etc/group"
-cat > "$R/etc/hosts" <<EOF
-127.0.0.1	localhost
-$CONTAINER_IP	crowdsec
-EOF
+install -m 0644 "$SKEL/etc/hosts" "$R/etc/hosts"
+# hosts 是固定值文件（guard 会保护它），但里面的 IP 必须和 net.conf 一致 ——
+# 两处各自写死就容易悄悄分叉，这里当场判一次。
+_hosts_ip=$(awk '$2=="crowdsec"{print $1; exit}' "$R/etc/hosts")
+[ "$_hosts_ip" = "$CONTAINER_IP" ] \
+    || die "rootfs-skel/etc/hosts 里的 crowdsec 行是 $_hosts_ip，与 net.conf 的 $CONTAINER_IP 不一致"
 install -m 0644 "$SKEL/etc/nsswitch.conf" "$R/etc/nsswitch.conf"
 # /etc/os-release：宿主引导脚本的 verify_rootfs 要求它有 ^ID= 行，别删
 install -m 0644 "$SKEL/etc/os-release" "$R/etc/os-release"
 echo crowdsec > "$R/etc/hostname"
-cat > "$R/etc/resolv.conf" <<EOF
-nameserver $BRIDGE_IP
-EOF
+install -m 0644 "$SKEL/etc/resolv.conf" "$R/etc/resolv.conf"
 
 # ---------------------------------------------------------------------------
 # 8. 网络：默认配置 + 套用脚本
 # ---------------------------------------------------------------------------
 say "写容器网络配置与 netconf"
-cat > "$R/etc/crowdsec-net.conf" <<EOF
-ADDRESS=$CONTAINER_IP/24
-GATEWAY=$BRIDGE_IP
-DNS=$BRIDGE_IP
-EOF
+install -m 0644 "$SKEL/etc/crowdsec-net.conf" "$R/etc/crowdsec-net.conf"
 install -m 0755 "$SKEL/etc/init.d/netconf" "$R/etc/init.d/netconf"
 
 # ---------------------------------------------------------------------------
@@ -311,14 +322,32 @@ fi
 
 chroot "$R" /bin/sh -c 'ls -1 /etc/crowdsec/hub >/dev/null 2>&1 && echo hub_entries=$(ls -1 /etc/crowdsec/hub | wc -l)'
 
+# 【v.108.46】采集源 / 解析器 / 白名单：构建期固定，不再是 bootstrap 每轮重写的运行期文件。
+# 为什么放 chroot 之后：hub 安装会写 /etc/crowdsec/ 下的目录，先放可能被它盖掉。
+say "写容器端采集与解析配置（静态）"
+mkdir -p "$R/etc/crowdsec/acquis.d" \
+         "$R/etc/crowdsec/parsers/s01-parse" \
+         "$R/etc/crowdsec/parsers/s02-enrich"
+install -m 0644 "$SKEL/etc/crowdsec/acquis.d/router.yaml" "$R/etc/crowdsec/acquis.d/router.yaml"
+install -m 0644 "$SKEL/etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml" \
+    "$R/etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml"
+install -m 0644 "$SKEL/etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml" \
+    "$R/etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml"
+
+# LAPI 监听地址也在构建期一次写定（原来靠 bootstrap 的 ensure_listen_uri 每轮 sed）。
+# 少了这条，路由器上的 bouncer 永远连不上，而日志里看不出少了什么。
+if [ -f "$R/etc/crowdsec/config.yaml" ]; then
+    sed -i -E "s|^([[:space:]]*listen_uri:)[[:space:]]*.*|\1 0.0.0.0:8080|" "$R/etc/crowdsec/config.yaml"
+    grep -qE "^[[:space:]]*listen_uri:[[:space:]]*0\.0\.0\.0:8080" "$R/etc/crowdsec/config.yaml" \
+        || die "无法把 config.yaml 的 listen_uri 固定为 0.0.0.0:8080"
+    say "listen_uri 已固定为 0.0.0.0:8080"
+fi
+
 # chroot 期间用的是 CI 宿主机的 DNS（要连 github 拉 hub），构建完必须换回容器该有的那份：
 # 容器里 10.1.0.1 是路由器网桥，DNS 由路由器 dnsmasq 提供；带着 GitHub Runner 的
 # resolv.conf 出厂，容器启动初期就会解析失败（ct_resolv 节点会改，但首启窗口内的
 # enroll 会白跑一轮）。
-cat > "$R/etc/resolv.conf" <<EOF
-nameserver $BRIDGE_IP
-EOF
-chmod 644 "$R/etc/resolv.conf"
+install -m 0644 "$SKEL/etc/resolv.conf" "$R/etc/resolv.conf"
 
 # ---------------------------------------------------------------------------
 # 14. 产物自检：内容必须齐、daemonize 必须 false、体积不能是半截
@@ -326,7 +355,11 @@ chmod 644 "$R/etc/resolv.conf"
 say "产物自检"
 for f in etc/inittab etc/init.d/rcS etc/init.d/crowdsec etc/init.d/netconf \
          etc/init.d/syslogd usr/sbin/crowdsec-supervise etc/crowdsec-net.conf \
-         etc/crowdsec/config.yaml etc/crowdsec/acquis.d usr/bin/crowdsec usr/bin/cscli \
+         etc/resolv.conf etc/hosts \
+         etc/crowdsec/config.yaml etc/crowdsec/acquis.d/router.yaml \
+         etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml \
+         etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml \
+         etc/crowdsec/acquis.d usr/bin/crowdsec usr/bin/cscli \
          etc/os-release etc/ssl/certs/ca-certificates.crt bin/busybox sbin/init; do
     [ -e "$R/$f" ] || die "自检失败：rootfs 缺 /$f"
 done

@@ -4212,7 +4212,14 @@ build_BOUNCERVERIFY() {
 # 下一轮 verify 直接过，不会反复注册。
 verify_enroll() {
     [ -s "$ENROLL_KEY_FILE" ] || return 0
-    console_enroll_ok
+    if console_enroll_ok; then
+        # 已经注册了，注册码却还在：可能是人工 enroll 过、或上一版脚本没删。
+        # 明文 key 留在设备上没有意义（固件是公开下载的），顺手清掉。
+        # --verify-only（探针体检）承诺「一个字节都不写」，那条路径只报不删。
+        [ "${_VERIFY_ONLY:-0}" = "1" ] || _drop_enroll_key
+        return 0
+    fi
+    return 1
 }
 build_enroll() {
     if [ ! -s "$ENROLL_KEY_FILE" ]; then
@@ -4628,6 +4635,9 @@ _audit_all() {
 }
 
 if [ "${1:-}" = "--verify-only" ]; then
+    # 体检模式：调用方（探针 / 人）信的是「一个字节都不写」，verify_enroll 里
+    # 「已注册就清明文注册码」这一步必须在这里关掉。
+    _VERIFY_ONLY=1
     _audit_all
     exit $?
 fi

@@ -2726,55 +2726,49 @@ apply_cfg() {
     ct_exists
 }
 
-# 【v.108.55】容器包的工作副本：重建 rootfs 前一律用 /rom 只读原件覆盖重建。
-# 为什么不进 guard 的每分钟循环：107 MB，每轮 cmp 要一两秒、每分钟读 107 MB，eMMC 扛不住。
-# 为什么不做「先比较、不一致才覆盖」：/etc 那份是可写 overlay，它既可能被人换掉，
-# 也可能被 sysupgrade 从旧固件带过来的版本顶掉；只要还把它当半个信任源，
-# 就得维护一条「怎么判断它坏没坏」的判据，而这条判据本身就是新的出错点。
-# 唯一真相是 /rom 那份（编译期进 squashfs，运行期改不了），直接以它为准最省心：
-# 重建本来就要解压 288 MB，为省一次 107 MB 写去多养一条判据并不划算。
+# 【v.108.55】容器包直接从 /rom 只读原件解压 —— 不拷贝、不比对。
+# 为什么：/rom 是 squashfs，编译期写入、运行期不可写，它自己就是可信来源。
+# 在可信来源外面再套一层「拷贝到 /etc 再 cmp」，只换来两个新的失败方式
+# （overlay 写满、拷贝被截断），以及把 107 MB 复制进 overlay 白吃可写空间；
+# 而 cmp 只能证明「刚拷的这份等于原件」，证明不了任何它本来就没法证明的事。
+# 只有老固件里 /rom 压根没有这份包（当年只有 lxc-ubuntu.tar.gz）时，
+# 才退回 /etc 的工作副本，并对它做 gzip 结构自检 —— 且日志如实写明来源不可证。
 ROM_TARBALL="${CS_ROM_TARBALL:-/rom$CS_HOME/lxc-crowdsec.tar.gz}"
+SRC_TARBALL=""
 
 _tarball_usable() {
-    [ -f "$TARBALL" ] || return 1
-    [ -s "$TARBALL" ] || return 1
-    tar -tzf "$TARBALL" >/dev/null 2>&1 || return 1
+    [ -f "$1" ] || return 1
+    [ -s "$1" ] || return 1
+    tar -tzf "$1" >/dev/null 2>&1 || return 1
     return 0
 }
 
-_ensure_tarball_intact() {
-    # 以 /rom 为唯一真相：先删掉可写副本，再从只读原件拷一份出来。
-    # 这里不做「是否被改」的判断 —— 重建前一律重置，「用过即重置」比「检测再修」简单，
-    # 也避开「判据本身出错」这一类问题。cmp 只用来确认「拷完是完整的」，不参与决策。
+_pick_tarball() {
+    # 首选固件里的只读原件：可信、零拷贝、不占 overlay。
     if [ -f "$ROM_TARBALL" ] && [ -s "$ROM_TARBALL" ]; then
-        rm -f "$TARBALL"
-        if cp -f "$ROM_TARBALL" "$TARBALL" 2>/dev/null && cmp -s "$TARBALL" "$ROM_TARBALL"; then
-            log "[包] 已从 /rom 只读原件重建工作副本（$(ls -l "$TARBALL" 2>/dev/null | awk '{print $5}') 字节）"
-            return 0
-        fi
-        log "[包] 从 /rom 重建工作副本失败（写 $TARBALL 出错，或拷贝不完整）"
-        return 1
-    fi
-    # 固件里压根没有副本（老固件只有 lxc-ubuntu.tar.gz 时才可能走到这里）：
-    # 只能退化成结构自检 —— 能列出目录才继续，但来源无法证明，日志里如实写。
-    if _tarball_usable; then
-        log "[包] 固件里没有 /rom 副本，仅通过 gzip 结构自检（来源无法证明）"
+        SRC_TARBALL="$ROM_TARBALL"
         return 0
     fi
-    log "[包] 无可用容器包：$TARBALL 损坏，且 $ROM_TARBALL 不存在"
+    # 老固件的退路：/etc 那份可能被人换过，只能证明「是个能解的 gzip」，证明不了来源。
+    if _tarball_usable "$TARBALL"; then
+        SRC_TARBALL="$TARBALL"
+        log "[包] 固件里没有 /rom 副本，改用工作副本 $TARBALL（仅 gzip 结构自检，来源无法证明）"
+        return 0
+    fi
+    log "[包] 无可用容器包：$ROM_TARBALL 与 $TARBALL 都不可用"
     return 1
 }
 
 rebuild_from_image() {
     log "尝试从镜像解压 rootfs：$TARBALL"
-    [ -f "$TARBALL" ] || { log "镜像文件不存在，无法解压"; return 1; }
-    # 【v.108.55】校验必须在 rm -rf "$ROOTFS" 之前：包不可用就别先把现场删掉。
-    _ensure_tarball_intact || return 1
+    # 【v.108.55】选源失败就不再往下走：rm -rf "$ROOTFS" 是不可逆的。
+    _pick_tarball || return 1
+    log "[包] 解压源：$SRC_TARBALL"
     ct_force_stop || return 1
     rm -rf "$ROOTFS" 2>/dev/null
     mkdir -p "$ROOTFS" || return 1
     if ( set -C; : > "$ROOTFS/.extracting" ) 2>/dev/null; then
-        if tar -xzf "$TARBALL" -C "$ROOTFS"; then
+        if tar -xzf "$SRC_TARBALL" -C "$ROOTFS"; then
             rm -f "$ROOTFS/.extracting"
             log "解压完成（$(du -sh "$ROOTFS" 2>/dev/null | cut -f1)）"
             return 0

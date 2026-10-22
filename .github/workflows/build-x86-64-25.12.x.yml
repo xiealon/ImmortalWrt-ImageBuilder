@@ -66,12 +66,23 @@ permissions:
 # 两个 workflow 都往固定 tag（Autobuild-x86-64）发资产，同时跑就是互相覆盖成半成品。
 # 串行化同一条流水线（不取消进行中的），避免 A 的产物被 B 覆盖。
 concurrency:
-  group: imagebuilder-${{ github.workflow }}-${{ github.ref }}
+  # 两个 workflow 都往固定 tag（Autobuild-x86-64）发资产。原来 group 里带了
+  # ${{ github.workflow }}，导致 24.10 与 25.12 属于两个不同的组 —— 注释说「串行化」，
+  # 实际却是并行，双方互相覆盖同一个 Release 的资产。这里去掉 workflow 名与 ref，
+  # 让整条 x86-64 流水线共用一个组，真正排队执行。
+  group: imagebuilder-autobuild-x86-64
   cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    # 【CrowdSec 版本】留空 = 跟随 packagecloud 最新：Crowdsec-LXC 每周按最新重建一次，
+    # 本构建直接取它的产物，不再做版本比对（镜像「内容是否同一份代码」仍由指纹严格保证）。
+    # 想临时钉死某版：这里改成 "1.8.1" 这类版本号，并把 Crowdsec-LXC 的同一行改成一致。
+    # 注意「跟最新」的代价：主仓代码不动，上游 crowdsec 升级也会悄悄进入固件，
+    # 所以下面会把实际用到的版本写进 Release 说明（router-info.md），保证可回溯。
+    env:
+      CROWDSEC_VERSION: ""
     # docker run / git clone 卡住会吃满 6 小时默认上限，显式收口
     timeout-minutes: 120
 
@@ -180,15 +191,140 @@ jobs:
             echo "shellcheck 不在，跳过（bash -n 已过）"
           fi
 
-      - name: Prepare Crowdsec LXC Rootfs (minimal, no distro layer)
+      - name: Download prebuilt Crowdsec LXC tarball (Crowdsec-LXC Release)
+        id: lxc_prebuilt
+        # 先用 Crowdsec-LXC 仓库构建好的 rootfs tarball（每周一自动滚一次），
+        # 命中就省掉本地 apt 拉包 + 打包（约 50s，且不受 packagecloud 抖动影响）。
+        # 判据是 MANIFEST 里的 prepare_script_sha256 / rootfs_skel_sha256 与当前仓库
+        # 逐字节一致 —— 只认「同一份代码产出的镜像」，不是同一份就回退本地构建。
+        # 任何一步失败都不 fail 本步骤（set 不用 -e），最终由 ok 输出决定走哪条路。
         run: |
-          chmod +x shell/prepare-crowdsec-minimal.sh
+          set -uo pipefail
+          OUT_DIR="files/etc/crowdsec"
+          OUT="$OUT_DIR/lxc-crowdsec.tar.gz"
+          mkdir -p "$OUT_DIR"
+          SHORT="${GITHUB_SHA:0:7}"
+          BASE="https://github.com/xiealon/Crowdsec-LXC/releases/download"
+          L_SCRIPT="$(sha256sum shell/prepare-crowdsec-minimal.sh | awk '{print $1}')"
+          L_SKEL="$(find rootfs-skel -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+          echo "[预构建] 本地指纹 script=$L_SCRIPT skel=$L_SKEL"
+          echo "[预构建] 候选顺序：lxc-${SHORT}（本次 commit 专属）→ lxc-latest（滚动）"
+          OK=0
+          REASON=""
+          WANT="${CROWDSEC_VERSION:-}"
+          if [ -n "$WANT" ]; then
+            echo "[预构建] 期望 crowdsec 版本：$WANT（YAML 里写死；manifest 对不上就不用）"
+          else
+            echo "[预构建] 未锁版本，接受任意 crowdsec 版本"
+          fi
+          for TAG in "lxc-${SHORT}" "lxc-latest"; do
+            MAN="$(mktemp)"
+            if ! curl -fsSL --max-time 60 --connect-timeout 15 --retry 3 --retry-delay 2 \
+                 "$BASE/$TAG/MANIFEST.json" -o "$MAN"; then
+              echo "[预构建] $TAG：取不到 MANIFEST.json（该 sha 尚未构建过），跳过"
+              REASON="$REASON $TAG=无MANIFEST"
+              continue
+            fi
+            M_SCRIPT="$(jq -r '.prepare_script_sha256 // empty' "$MAN")"
+            M_SKEL="$(jq -r '.rootfs_skel_sha256 // empty' "$MAN")"
+            M_SHA="$(jq -r '.source_short // empty' "$MAN")"
+            M_CS="$(jq -r '.crowdsec_version // "?"' "$MAN")"
+            M_ENT="$(jq -r '.tarball_entries // "?"' "$MAN")"
+            if [ "$M_SCRIPT" != "$L_SCRIPT" ] || [ "$M_SKEL" != "$L_SKEL" ]; then
+              echo "[预构建] $TAG：指纹不符（manifest script=${M_SCRIPT:0:12} skel=${M_SKEL:0:12}），跳过"
+              REASON="$REASON $TAG=指纹不符"
+              continue
+            fi
+            # 版本闸门：只比指纹是不够的 —— lxc-latest 每周会滚，指纹相同但 crowdsec 版本可能变了，
+            # 那样「写死的版本」会被预构建悄悄换掉。这里必须显式比对。
+            if [ -n "$WANT" ]; then
+              case "$M_CS" in
+                "$WANT"|"$WANT"-*|"$WANT"~*|"$WANT"+*) : ;;
+                *)
+                  echo "[预构建] $TAG：crowdsec 版本 $M_CS ≠ 期望 $WANT，跳过"
+                  REASON="$REASON $TAG=版本不符(${M_CS})"
+                  continue
+                  ;;
+              esac
+            fi
+            echo "[预构建] $TAG：指纹匹配 → 来源 ${M_SHA}，crowdsec ${M_CS}，${M_ENT} 个条目"
+            if ! curl -fL --max-time 900 --connect-timeout 15 --retry 3 --retry-delay 2 \
+                 --retry-all-errors "$BASE/$TAG/lxc-crowdsec.tar.gz" -o "$OUT"; then
+              echo "[预构建] $TAG：tarball 下载失败，尝试下一个"
+              REASON="$REASON $TAG=下载失败"
+              continue
+            fi
+            # 完整性兜底：截断的 gz 在这里就会报错，避免把坏包打进固件
+            if ! tar -tzf "$OUT" >/dev/null 2>&1; then
+              echo "[预构建] $TAG：下载到的 tar.gz 解列失败（疑似截断），丢弃"
+              REASON="$REASON $TAG=包损坏"
+              rm -f "$OUT"
+              continue
+            fi
+            echo "[预构建] 命中 $TAG：$(ls -lh "$OUT" | awk '{print $5}')，条目 $(tar -tzf "$OUT" | wc -l)"
+            {
+              echo "ok=true"
+              echo "tag=$TAG"
+              echo "crowdsec=$M_CS"
+            } >> "$GITHUB_OUTPUT"
+            printf 'version=%s\nsource=prebuilt(%s)\n' "$M_CS" "$TAG" \
+              > "$GITHUB_WORKSPACE/crowdsec-build.txt"
+            OK=1
+            break
+          done
+          if [ "$OK" != "1" ]; then
+            rm -f "$OUT"
+            echo "[预构建] 未取得可用 tarball（原因：${REASON# }）→ 回退本地构建"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "### Crowdsec LXC rootfs 来源"
+            echo ""
+            if [ "$OK" = "1" ]; then
+              echo "- 预构建命中：Crowdsec-LXC Release \`$TAG\`，crowdsec \`$M_CS\`"
+              echo "- 指纹校验：prepare_script / rootfs_skel 与本次 commit 一致"
+            else
+              echo "- 预构建不可用，**回退本地构建**（原因：${REASON# }）"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prepare Crowdsec LXC Rootfs (minimal, no distro layer)
+        id: lxc_prepare_local
+        if: steps.lxc_prebuilt.outputs.ok != 'true'
+        run: |
           RUNAS=""
           [ "$(id -u)" = "0" ] || RUNAS="sudo -n"
+          # 回退路径同样守版本：pin 住期望版本，避免「预构建不可用」时静默装成最新。
+          if [ -n "${CROWDSEC_VERSION:-}" ]; then
+            $RUNAS mkdir -p /etc/apt/preferences.d
+            printf 'Package: crowdsec\nPin: version %s*\nPin-Priority: 1001\n' "$CROWDSEC_VERSION" \
+              | $RUNAS tee /etc/apt/preferences.d/crowdsec-pin >/dev/null
+            echo "本地构建已 pin crowdsec ${CROWDSEC_VERSION}："
+            cat /etc/apt/preferences.d/crowdsec-pin
+          else
+            echo "未锁版本，本地构建将安装 packagecloud 最新 crowdsec"
+          fi
+          chmod +x shell/prepare-crowdsec-minimal.sh
           $RUNAS env CONTAINER_IP="${CS_CT_IP:-10.1.0.10}" BRIDGE_IP="${CS_BRIDGE_IP:-10.1.0.1}" \
                bash shell/prepare-crowdsec-minimal.sh
           echo "容器 rootfs 体积（极简：busybox + 静态 crowdsec，不含发行版层）："
           ls -lh files/etc/crowdsec/lxc-crowdsec.tar.gz
+          # 记录实际用到的版本（无论是否锁版本），写进 Release 说明，便于回溯。
+          DEB="$(ls /tmp/lxc-crowdsec-minimal/crowdsec_*.deb 2>/dev/null | head -1 || true)"
+          GOT="$(basename "${DEB:-crowdsec_none.deb}" | sed -E 's/^crowdsec_(.+)_[a-z0-9]+\.deb$/\1/')"
+          printf 'version=%s\nsource=local-build\n' "$GOT" > "$GITHUB_WORKSPACE/crowdsec-build.txt"
+          echo "本地构建 crowdsec 版本：$GOT"
+          # 只有显式锁了版本时才强校验（pin 没命中时 apt 会安静回落到最新，必须挡住）。
+          if [ -n "${CROWDSEC_VERSION:-}" ]; then
+            case "$GOT" in
+              "$CROWDSEC_VERSION"|"$CROWDSEC_VERSION"-*|"$CROWDSEC_VERSION"~*|"$CROWDSEC_VERSION"+*) : ;;
+              *)
+                echo "::error::本地构建的 crowdsec 是 $GOT，期望 $CROWDSEC_VERSION —— pin 未命中，拒绝继续"
+                exit 1
+                ;;
+            esac
+            echo "本地构建 crowdsec 版本校验通过：$GOT"
+          fi
           echo "⚠️ 若下一步 make image 报空间不足，请把 profile 调到 2G 或更大"
 
       - name: Build ImmortalWrt x86-64 EFI 25.12.x
@@ -243,6 +379,12 @@ jobs:
               echo '> ⚠️ **本固件内含 CrowdSec enrollment key**（明文：`/etc/config/crowdsec_enroll_key.txt`）'
               echo '> 该 key 固定有效、可反复使用。公开分享本固件等于公开注册权限，用完请删除此 Release 资产。'
             fi
+            echo
+            echo '#### CrowdSec 容器镜像'
+            CSV="$(sed -n 's/^version=//p' "${{ github.workspace }}/crowdsec-build.txt" 2>/dev/null | head -1)"
+            CSS="$(sed -n 's/^source=//p' "${{ github.workspace }}/crowdsec-build.txt" 2>/dev/null | head -1)"
+            echo "- crowdsec 版本: ${CSV:-未知}"
+            echo "- 镜像来源: ${CSS:-未知}"
           } > "${{ github.workspace }}/router-info.md"
 
       - name: Upload ImmortalWrt Release Assets

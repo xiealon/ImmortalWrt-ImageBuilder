@@ -103,6 +103,12 @@ GUARD_FILES="${CS_GUARD_FILES:-
 #   · rootfs 还没解压时不能写 —— 会污染 verify_rootfs 的就绪判断（门①）；
 #   · systemd 版 rootfs（legacy lxc-ubuntu.tar.gz）语义完全不同 —— 不能碰（门②）。
 GUARD_CT_PREFIX="/srv/lxc/ubuntu/rootfs"
+# 【v.108.56】基准落在 /rom 的哪一份。
+# 从前基准与运行期同路径（/rom/srv/lxc/ubuntu/rootfs），容器基底改成「整份摊进 squashfs」
+# 之后，基底在 /rom/srv/lxc/ubuntu/base，基准必须跟着搬。
+# 不搬的后果很隐蔽：_src 指向不存在的路径 → 下面 `[ -f "$_src" ] || continue` 静默跳过
+# 全部 15 个文件，guard_rc 仍是 0、日志一个字不写，看起来「一切正常」。
+GUARD_CT_BASE="${CS_GUARD_CT_BASE:-/srv/lxc/ubuntu/base}"
 GUARD_CT_FILES="${CS_GUARD_CT_FILES:-
 /etc/passwd
 /etc/group
@@ -152,10 +158,11 @@ command -v cmp >/dev/null 2>&1 || {
 
 # 容器侧两道门（v.108.45）。任一不满足 → 这一组整体跳过，一个字节都不碰。
 _ct_gate() {
-    # ① rootfs 必须已经解压完。判据用 os-release：它是 verify_rootfs 的就绪标志，
-    #    而且**故意没有**放进固件（见 build24/25.sh 的注释），所以它只可能来自
-    #    tarball 解压。它不在就说明 rootfs 还没就绪 —— 此时写文件会提前造出
-    #    etc/、etc/inittab 这些路径，把「rootfs 是否已解压」的判断搅浑。
+    # ① rootfs 必须已经就位。判据仍是 os-release，但它的来源变了：
+    #    v.108.56 起容器基底整份在 squashfs，os-release 由 lower 提供 —— 也就是说，
+    #    overlay 没挂上时这个文件不存在（挂载点是空目录），挂了才有。判据依旧成立，
+    #    只是含义从「解压完了」变成「overlay 就位了」。未就位时写文件同样会提前
+    #    造出 etc/ 这些路径，把就绪判断搅浑，所以这道门必须留着。
     [ -s "$ROOTFS/etc/os-release" ] || return 1
     # ② 必须是极简 init 的 rootfs。systemd 版（legacy /opt/lxc-ubuntu.tar.gz）里
     #    这些路径语义完全不同，把 busybox 的 inittab / rcS 盖进去等于直接把容器毁掉。
@@ -188,7 +195,15 @@ if [ "$_CT_OK" = "1" ]; then
 fi
 
 for _rel in $GUARD_FILES $_CT_LIST; do
-    _src="$ROM_DIR$_rel"
+    case "$_rel" in
+    "$GUARD_CT_PREFIX"/*)
+        # 容器组：目标读挂载点（overlay 合并视图），基准读 /rom 只读基底
+        _src="$ROM_DIR$GUARD_CT_BASE${_rel#"$GUARD_CT_PREFIX"}"
+        ;;
+    *)
+        _src="$ROM_DIR$_rel"
+        ;;
+    esac
     _f="$ROOT$_rel"
     # 基准里没有这个文件 = 该平台没这个组件，不臆造。
     # 容器组走到这里时 _rel 已带 GUARD_CT_PREFIX，_src 就是 /rom/srv/lxc/... 的副本。

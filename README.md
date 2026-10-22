@@ -2121,6 +2121,77 @@ v.99-bp.1 起注册成功即 `rm` 掉 key，理由是固件公开下载、明文
 * `--verify-only`（探针体检）承诺「一个字节都不写」：体检路径只报「已注册但主注册码仍在」，
   不移动、不删除。
 
+## v.108.53：重注册只尝试一次（修 v.108.52 引入的反复提交）
+
+v.108.52 刷机后的真机日志（24.10，2026-10-22 20:52）：
+
+```
+20:52:46 [enroll] 注册码已移入保险柜（…keep，600）
+20:52:48 [ENROLL] 检测到未注册（网页端可能被关闭/删除），发现可用注册码，交给 build 重注册
+20:52:49 [enroll] 主注册码缺失，改用保险柜里的注册码
+20:52:50 [ENROLL] 检测到未注册…
+…每秒一对，一直刷到 20:52:59
+```
+
+### 根因：把「等 Accept」当成了「失败」
+
+`cscli console enroll <key>` 成功 ≠ 本地已注册。中间必须有人去 app.crowdsec.net 点
+**Accept enroll**，在那之前 `console status` 必然是 `not enrolled`。
+
+v.108.52 的判据是「不是 enrolled 就算未注册 → 返回 1 → build 再提交一次」，
+于是这段本该安静等待的窗口被当成失败，反复提交，**网页端会堆出多条 pending 实例**。
+旧版之所以只提交一次，是因为它提交成功就 `rm` 了 key，第二轮读不到码只能放弃 ——
+不是设计对，是自断得快。保险柜把 key 留住后，这个循环才暴露出来。
+
+### 修法：两层闸门
+
+| 闸门 | 作用域 | 行为 |
+| --- | --- | --- |
+| `_ENROLL_TRIED`（进程内变量） | 本次开机 | 阶段 1 / 阶段 3 / 重启态复验共用，加起来**最多提交一次** |
+| `/etc/config/crowdsec_enroll_submitted`（落盘时间戳） | 跨开机 | 提交过就记下；`ENROLL_RETRY_TTL=0`（默认）表示**永不自动重试** |
+
+`verify_enroll` 改成三态，不再把所有「未注册」都当失败：
+
+| 状态 | 判据 | 动作 |
+| --- | --- | --- |
+| 已注册 | `console status` 显示 enrolled | 清提交标记、搬 key 进保险柜、**通过** |
+| 已提交等 Accept | 有提交标记 | 打一行「等待网页端 Accept」、**通过**，不提交 |
+| 从未提交 | 无标记（且未注册） | 返回 1 → `build_enroll` 提交**一次**，然后写标记 |
+
+`re_enroll` 在 `console enroll` 命令返回成功的**当下**就写标记，
+而不是等后面的状态轮询 —— 否则轮询判「还是没注册」时会漏掉这次提交。
+
+### 行为验证（busybox 真跑生产函数）
+
+把 `_enroll_key_load` / `_park_enroll_key` / `_enroll_submit_*` / `verify_enroll` /
+`build_enroll` 从脚本原样抽出，只 stub `console_enroll_ok` 与 `re_enroll`，
+用 busybox sh 跑 7 个场景：
+
+| 场景 | 期望 | 实测 |
+| --- | --- | --- |
+| 首次开机，有 key、未注册、无标记 | verify=1 → 提交 1 次 | ✅ SUBMITS=1 |
+| 同开机内复验 3 轮 + build 2 次 | 仍只 1 次 | ✅ SUBMITS=1 |
+| 重启（新进程）仍未 Accept | verify=0，不提交 | ✅ SUBMITS=1 |
+| 网页 Accept 后变 enrolled | verify=0，清标记 | ✅ 标记已删 |
+| 网页又把实例删掉 | 新触发，允许再提交 1 次 | ✅ SUBMITS=2 |
+| 无 key、无保险柜 | 只告警，不提交 | ✅ SUBMITS 不变 |
+| `ENROLL_RETRY_TTL=86400` | 未过期不提交 | ✅ SUBMITS 不变 |
+
+### 想让它再试一次怎么办
+
+删掉标记再重启即可（这是唯一的人工重置入口）：
+
+```
+rm -f /etc/config/crowdsec_enroll_submitted
+```
+
+网页端 Accept 之后标记会自动清除，无需手动干预。
+
+### 注意
+
+* 默认**永不自动重试**是刻意的：一次触发只提交一次，避免网页端堆积 pending。
+* 要恢复「过期后再试」的老习惯，把 `ENROLL_RETRY_TTL` 设成正数秒数（例如 `86400`）。
+
 # crowdsec 引导流程图
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)

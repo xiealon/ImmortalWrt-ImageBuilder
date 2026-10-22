@@ -150,7 +150,12 @@ if [ -f "$TARBALL_IN" ]; then
     rm -f "$TARBALL_IN"
     echo "==> 已从固件移除 prebuilt 包（内容已在 $BASE_DIR）"
 else
-    echo "::warning::没有 prebuilt 包，固件不带容器基底；首启将走镜像解压回退"
+    # workflow 里两个步骤互斥、且都产出同一路径：prebuilt 命中走下载，未命中走本地 Prepare
+    # （if: steps.lxc_prebuilt.outputs.ok != 'true'）。走到这里说明两条路都没产出，
+    # 继续构建只会得到「网络正常、容器永不启动」的固件 —— 现场表现是 rc.local 静默走
+    # --net-only，路由器好好的，容器永远不来，属于最难查的一类。宁可让构建失败。
+    echo "::error::没有容器基底：files/etc/crowdsec/lxc-crowdsec.tar.gz 不存在，prebuilt 下载与本地 Prepare 都没产出，拒绝构建无容器的固件"
+    exit 1
 fi
 
 [ -d rootfs-skel ] || {

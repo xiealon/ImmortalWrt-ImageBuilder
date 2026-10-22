@@ -246,7 +246,15 @@ for _rel in $GUARD_FILES $_CT_LIST; do
                 cp -f "$_tmp" "$_f" 2>/dev/null
                 rm -f "$_tmp" 2>/dev/null
             fi
-            if [ "$_had" = "1" ]; then
+            # 【v.108.56】复原动作「返回成功」不等于「真的修好了」。真机抓到过：
+            # 绕过挂载点 rm 掉 upperdir 里的文件之后，overlay 的 dentry 仍指向已 unlink
+            # 的孤立 inode，mv 失败走 fallback cp，cp 也写进那个孤立 inode ——
+            # 日志写着「已原子复原」，回读却还是脏内容，而 upperdir 里连文件都没有。
+            # guard 是最后一道防线，它要是也会撒谎，整套保护就只剩心理安慰。
+            # 所以回读一次：657 字节的 cmp，成本可以忽略。
+            if ! cmp -s "$_src" "$_f"; then
+                _glog "【完整性】$_f 已执行复原，但回读仍与基准不一致（疑似 overlay 孤立 inode / 缓存未刷新，多因绕过挂载点直接改 upperdir）—— 需重启或 umount 重挂"
+            elif [ "$_had" = "1" ]; then
                 _glog "【完整性】$_f 与只读基准不一致，已原子复原${_bak:+（原内容另存 $_bak）}"
             else
                 _glog "【完整性】$_f 被删除，已从只读基准复原（容器脚本）"
@@ -261,7 +269,9 @@ for _rel in $GUARD_FILES $_CT_LIST; do
         rm -f "$_f" 2>/dev/null
         if cp -f "$_src" "$_f" 2>/dev/null; then
             chmod "$_src_mode" "$_f" 2>/dev/null
-            if [ "$_had" = "1" ]; then
+            if ! cmp -s "$_src" "$_f"; then
+                _glog "【完整性】$_f 已执行复原，但回读仍与基准不一致 —— 需人工介入"
+            elif [ "$_had" = "1" ]; then
                 _glog "【完整性】$_f 与只读基准不一致，已复原${_bak:+（原内容另存 $_bak）}"
             else
                 _glog "【完整性】$_f 被删除，已从只读基准复原"

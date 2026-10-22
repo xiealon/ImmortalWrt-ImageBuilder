@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-22.108.62-bp"
+SCRIPT_VER="2026-10-22.108.63-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -2180,13 +2180,13 @@ verify_lapi_fetch() {
 }
 build_lapi_fetch() {
     # 【v.108.21】先把 8080 真正打开（含老容器「文件改了但进程没重读」的兜底重启）
-    # 【v.108.61】打不开就进自愈阶梯：第 0 档已经在 _ensure_lapi_exposed 里试过
+    # 打不开就进丢层流程：第 0 档已经在 _ensure_lapi_exposed 里试过
     # （校正 listen_uri + 重启进程 + 等待），仍不通说明不是「文件对不对」的问题，
-    # 而是配置/规则/进程/资源层面的问题。阶梯按证据一级级加代价，见 _lapi_ladder。
+    # 而是进程/资源/库层面的问题。丢层回基底，见 _lapi_ladder。
     if ! _ensure_lapi_exposed; then
-        log "[LAPI] 8080 无法对路由器开放，LAPI 环节失败；进入自愈阶梯（v.108.61）"
+        log "[LAPI] 8080 无法对路由器开放，LAPI 环节失败；进入丢层自愈（v.108.63）"
         if _lapi_ladder; then
-            log "[LAPI] 自愈阶梯已使 8080 可达，继续读取凭证"
+            log "[LAPI] 自愈已使 8080 可达，继续读取凭证"
         else
             return 1
         fi
@@ -3782,208 +3782,53 @@ _reinstall_diag() {
 }
 
 # =====================================================================
-# 【v.108.61】LAPI 起不来时的自愈阶梯（三档，逐级加代价）
+# LAPI 起不来时怎么办（v.108.63：砍到一步）
 #
 # 触发位置：build_lapi_fetch 开头。第 0 档（校正 listen_uri + 重启容器内 crowdsec）
 # 建在 _ensure_lapi_exposed 里，已经试过仍不通才进到这里。
 #
-# 为什么要有这个阶梯：原来「LAPI 起不来但文件和配置都正常」是死路 —— 各 verify 都通过
+# 为什么不再分档：原来「LAPI 起不来但文件和配置都正常」是死路 —— 各 verify 都通过
 # （它们验的是「文件内容对不对」），build 也改不动什么，于是 hard 退出、探针 5 次后
-# 停手，机器一直坏到有人重启。而重启一次之所以有用，是因为首跑额度给了「丢可写层」。
-# 这个阶梯做的事就是：把「重启才有的那次机会」提前到运行期，但必须带证据与额度。
+# 停手，机器一直坏到有人重启。重启一次之所以有用，是因为给了「丢可写层」的机会。
+# 这里做的事就是：把「重启才有的那次机会」提前到运行期，但必须带额度。
 #
-# 三档的分工（不是「越修越猛」，是「按证据选手段」）：
-#   第 1 档  只读诊断：容器内跑 crowdsec -t。它通过 = 配置与 hub 规则都没坏，那么
-#            「起不来」只可能是进程状态 / 资源 / 网络；它不通过 = 直接指出坏在哪一类。
-#   第 2 档  对症处置：bad-yaml → cscli hub update/upgrade（规则库，非破坏性）；
-#            bad-db → 移走 decisions.db 让它重建（决策库只是缓存）。
-#            这两条都不碰可写层，也不需要重启设备。
-#   第 3 档  丢可写层 → 回到只读基底。**只在「-t 通过 + 资源正常 + 三闸全过」时放行**。
-#            -t 不通过说明是配置/规则坏，那是第 2 档的活，此时丢层等于抹掉证据。
+# 只留两步：
+#   ① 再探一次（第 0 档刚重启过进程，可能刚好生效）—— 不破坏，零成本；
+#   ② 丢可写层 → 回到只读基底。
+# 「先诊断再决定」这条路走不通：诊断输出的可信度不足以支撑「不许丢层」这个结论，
+# 判错一次就是「明明能修却放过」，而且判据本身要跟着 crowdsec 版本改。详见下面
+# 「分档诊断已删除」那段。
 #
 # 一条贯穿的原则：enroll 完全不参与。它要联网、要人在网页点 Accept，不确定性太大；
 # 它掉线不影响 LAPI 链路，也不该让自愈逻辑做任何破坏性动作。
 
-# ---- 第 1 档：只读诊断 ----
-# 结果放全局变量（不用 echo：log 也写 stdout，命令替换会把日志当结果收走）
-_LCT_RC=2
-_LCT_SIG="no-out"
-_LCT_PATH=""
-_lapi_cfg_test() {
-    _lct_out="$STATE_DIR/lapi_cfgtest.log"
-    mkdir -p "$STATE_DIR" 2>/dev/null
-    _LCT_RC=2
-    _LCT_SIG="no-out"
-    _LCT_PATH=""
-    rm -f "$_lct_out" 2>/dev/null
-    if ! ct_running; then
-        log "[自愈] 容器未运行，跑不了 crowdsec -t（诊断不可用）"
-        return 0
-    fi
-    _ct_env 'test -x /usr/bin/crowdsec' >/dev/null 2>&1 || {
-        log "[自愈] 容器内 /usr/bin/crowdsec 不可执行，跑不了 crowdsec -t（诊断不可用）"
-        return 0
-    }
-    _ct_env '/usr/bin/crowdsec -t -c /etc/crowdsec/config.yaml' >"$_lct_out" 2>&1
-    _LCT_RC=$?
-    # 【v.108.62】-t 报错时通常带着出错文件路径，这是「该不该丢层」的关键证据：
-    # 坏在 hub 规则里 → 只读基底就有构建时的干净副本，丢层正好；
-    # 坏在 config/acquis/凭据里 → 丢层后 build 会写回同样的，或把机器注册记录抹掉。
-    _LCT_PATH="$(_l3_path_of "$_lct_out")"
-    _LCT_SIG="$(_l3_sig_of "$_lct_out" "$_LCT_PATH")"
-    log "[自愈] 第 1 档：crowdsec -t 退出码 $_LCT_RC，签名 $_LCT_SIG，嫌疑文件 ${_LCT_PATH:-（未提取到）}（详见 $_lct_out）"
-    return 0
-}
+# ---- 分档诊断已删除（v.108.63） ----
+# v.108.61~62 在这里放过两档只读诊断：`crowdsec -t` 校验 + 按签名对症处置
+# （离线时 hub update 无效、移 decisions.db），再加一道「坏的是谁的文件」的第四道门，
+# 用来判断这次该不该丢层。整套东西的前提是「丢层代价高，所以先试着不丢」。
+# 真机数据把这个前提推翻了（2026-10-22 实测只读基底）：
+#   · hub 五个目录（collections/contexts/parsers/postoverflows/scenarios）齐全；
+#   · var/lib/crowdsec/data/crowdsec.db 180224 B 在，凭据 yaml 158 B 在，
+#     且与 rootfs 那份 md5 完全相同 → 丢层连机器身份都不改，也不会在 console 多记录；
+#   · GeoLite2 两个 mmdb、detect.yaml 都在 → 情报库同样干净回退。
+# 也就是说：丢层 = 回到构建时验证过的完整状态，不需要联网、不需要 hub update。
+# 那诊断就只剩下坏处 —— 判错了会「明明丢层能修却放过」，而判据本身要维护两版代码。
+# 现在配置与规则由 guard 逐字节守着（坏了 60 秒内复原）；守不住的（库、hub 更新、
+# 进程状态、缓存）直接丢层回基底。一步到位，不用第二套判据。
+# 唯一保留的「先试一次不破坏的」是调用方已经做过的：重启容器内 crowdsec。
 
-# 从 -t 的输出里尽力抽出「出错的那个文件」。
-# 抽不到就返回空 —— 调用方据此判「未知 → 不丢层」，绝不拿"没抽到"当"没有坏文件"。
-# 【v.108.62】三种输出形式都认，因为不同 crowdsec 版本报错措辞不一样：
-#   ① 绝对路径：failed to load parsers: /etc/crowdsec/parsers/s01-parse/x.yaml: yaml: ...
-#   ② 相对路径：while loading scenarios/x.yaml: ...
-#   ③ 库文件：   unable to open /var/lib/crowdsec/data/decisions.db
-# 只认 ① 的话，若线上版本打相对路径，第四道门永远抽不到而恒拒 —— 虽然安全（不丢层），
-# 但这整段改动就等于白做。所以两种都认。
-_l3_path_of() {
-    _lpf="$1"
-    [ -s "$_lpf" ] || return 0
-    _lpp="$(grep -oE '/etc/crowdsec/[A-Za-z0-9._/-]+\.ya?ml' "$_lpf" 2>/dev/null | head -n1)"
-    if [ -z "$_lpp" ]; then
-        _lpr="$(grep -oE '(hub/)?(collections|contexts|scenarios|parsers|postoverflows|appsec-configs|appsec-rules|acquis\.d)/[A-Za-z0-9._/-]+\.ya?ml' "$_lpf" 2>/dev/null | head -n1)"
-        [ -n "$_lpr" ] && _lpp="/etc/crowdsec/$_lpr"
-    fi
-    [ -n "$_lpp" ] || _lpp="$(grep -oE '/var/lib/crowdsec/[A-Za-z0-9._/-]+' "$_lpf" 2>/dev/null | head -n1)"
-    printf '%s\n' "$_lpp"
-}
-
-# 路径压成 8 位摘要，供签名使用（状态文件是空格分隔的单行，不能塞原始路径）
-_l3_short() {
-    [ -n "$1" ] || { printf 'nopath\n'; return 0; }
-    printf '%s\n' "$(printf '%s' "$1" | md5sum 2>/dev/null | cut -c1-8)"
-}
-
-# 把「crowdsec -t 说了什么」压成一个短标签。
-# 为什么要签名而不只看退出码：同一个根因重复丢层不会有不同结果，所以
-# 「上次丢完还坏、签名又一模一样」必须直接停手（见 _l3_gate 第四道门）。
-# 签名里带上出错文件摘要：两次都是 bad-yaml 但文件不同，是换了根因，该给机会。
-_l3_sig_of() {
-    _lsf="$1"
-    _lss="$(_l3_short "${2:-}")"
-    [ -s "$_lsf" ] || { printf 'no-out\n'; return 0; }
-    if grep -qiE 'yaml:|unable to parse|cannot unmarshal|invalid configuration' "$_lsf" 2>/dev/null; then
-        printf 'bad-yaml:%s\n' "$_lss"
-    elif grep -qiE 'database|sqlite|unable to open|disk i/o error|database is locked' "$_lsf" 2>/dev/null; then
-        printf 'bad-db:%s\n' "$_lss"
-    elif grep -qiE 'no such file|permission denied' "$_lsf" 2>/dev/null; then
-        printf 'bad-fs:%s\n' "$_lss"
-    else
-        # 兜底：拿前 3 行非空内容做摘要。不同的坏法不能被归成同一个签名，
-        # 否则第四道门会把「换了根因」误判成「老问题没解决」而拒绝自愈。
-        printf 'other-%s\n' "$(grep -v '^[[:space:]]*$' "$_lsf" 2>/dev/null | head -n 3 | md5sum 2>/dev/null | cut -c1-8)"
-    fi
-}
-
-# ---- 第四道门（v.108.62）：坏的这个文件，丢层到底能不能修 ----
-# 原来这里是一条粗线：「-t 不通过 = 配置/规则坏 = 不做第三档」。
-# 但配置坏分两种，一刀切把「丢层有效」的那一半也关在门外：
-#   · 坏在 hub 规则（scenarios / parsers / postoverflows / collections / contexts）：
-#     这些由 crowdsec 启动时解析，坏了 LAPI 直接不起；而只读基底里有构建时的
-#     干净副本（真机核对 base/etc/crowdsec/hub 下五个目录齐全）→ 丢层正是对的手段。
-#   · 坏在 config / acquis / profiles / simulation：guard 60s 逐字节复原 + build 会重写，
-#     丢层后 build 写回同样的内容，白抹一次现场。
-#   · 坏在凭据：与 LAPI 的 machine 记录成对，丢了要重新 register + 网页 Accept，
-#     代价大于收益，且 bouncer_fill 要 LAPI 先起来才能补 —— 而此刻正是起不来。
-# 所以判据换成「坏的是谁的文件」，而不是「-t 通不通」。
-_l3_blame_gate() {
-    _lb_p="$1"
-    if [ -z "$_lb_p" ]; then
-        log "[自愈] 第四道门拒：-t 报错但抽不出出错文件，不拿「没抽到」当「没有坏文件」，不丢层"
-        return 1
-    fi
-    case "$_lb_p" in
-    /etc/crowdsec/*) ;;
-    *)
-        log "[自愈] 第四道门拒：出错文件 $_lb_p 不在 /etc/crowdsec 下，不丢层"
-        return 1
-        ;;
-    esac
-    case "$_lb_p" in
-    */local_api_credentials.yaml|*/online_api_credentials.yaml|*/console.yaml)
-        log "[自愈] 第四道门拒：$_lb_p 与 LAPI 身份成对，丢层会丢机器注册记录（要重新 Accept）"
-        return 1
-        ;;
-    */config.yaml|*/acquis.yaml|*/acquis.d/*|*/profiles.yaml|*/simulation.yaml|*/console/*|*/notifications/*)
-        log "[自愈] 第四道门拒：$_lb_p 由 guard 逐字节复原 / build 重写，丢层后仍会写回同样的内容"
-        return 1
-        ;;
-    esac
-    case "$_lb_p" in
-    */hub/*|*/collections/*|*/contexts/*|*/scenarios/*|*/parsers/*|*/postoverflows/*|*/appsec-configs/*|*/appsec-rules/*)
-        ;;
-    *)
-        log "[自愈] 第四道门拒：$_lb_p 不属于 hub 规则类目录（未知类别），不丢层"
-        return 1
-        ;;
-    esac
-    # 到这一步：坏的确实是 hub 规则文件。再看丢层后能不能补回来。
-    _lb_rel="${_lb_p#/etc/crowdsec/}"
-    if [ -e "$ROM_BASE/etc/crowdsec/$_lb_rel" ]; then
-        log "[自愈] 第四道门放行：$_lb_p 在只读基底中有同名副本，丢层即回退到构建时版本"
-        return 0
-    fi
-    if [ -d "$ROM_BASE/etc/crowdsec/hub" ] && [ -n "$(ls -A "$ROM_BASE/etc/crowdsec/hub" 2>/dev/null)" ]; then
-        log "[自愈] 第四道门放行：$_lb_p 是后装的（基底无同名文件），丢层后被移除，规则库回退到基底版本"
-        return 0
-    fi
-    # 基底 hub 为空：丢层后 LAPI 能起来，但没有任何规则 —— 比卡死好，但必须说出来
-    log "[自愈] 第四道门放行但需注意：基底 hub 为空/不存在，丢层后 LAPI 能起但规则库为空，需联网补 hub"
-    return 0
-}
-
-# ---- 第 2 档：按签名对症 ----
-# 【v.108.62】签名带上了出错文件摘要（bad-yaml:<8位>），这里一律用前缀匹配：
-# 只看「哪一类坏」，不依赖具体是哪个文件。
-_lapi_fix_by_sig() {
-    case "$1" in
-    bad-yaml*)
-        # hub 规则坏 / 版本对不上：整仓重下。这是「更新规则库」的正常操作，不是破坏动作。
-        # 离线时这条无效（update 拿不到源），但它是零代价的，先试。
-        log "[自愈] 第 2 档：诊断 bad-yaml → 重跑 cscli hub update / upgrade"
-        _ct_env '/usr/bin/cscli hub update'  >/dev/null 2>&1
-        _ct_env '/usr/bin/cscli hub upgrade' >/dev/null 2>&1
-        ;;
-    bad-db*)
-        # 决策库是缓存（cscli 才是事实来源），移走让它自己重建，原文件留 .l3bak 备查。
-        # 不碰 machines.db —— 里面是 bouncer 注册记录，丢了要让 LAPI 先起来才能重注册，
-        # 而这正是此刻做不到的事。
-        log "[自愈] 第 2 档：诊断 bad-db → 移走 decisions.db 让 crowdsec 重建（原文件留 .l3bak-<ts>）"
-        _ct_env 'f=/var/lib/crowdsec/data/decisions.db; [ -f "$f" ] && mv -f "$f" "$f.l3bak-$(date +%s)"' >/dev/null 2>&1
-        ;;
-    bad-fs*)
-        log "[自愈] 第 2 档：诊断 bad-fs（缺文件/权限）—— 不自动处置，交 guard 与人工"
-        return 1
-        ;;
-    *)
-        log "[自愈] 第 2 档：诊断 $1 无对症处置（配置/规则/库都未见坏）"
-        return 1
-        ;;
-    esac
-    # 换了文件必须让进程重读：同 _cs_cfg_audit 的道理，改文件不等于进程认了
-    _ct_restart_crowdsec || log "[自愈] 容器内 crowdsec 重启失败（第 2 档处置后）"
-    return 0
-}
-
-# ---- 第三档的资源门 ----
+# ---- 丢层的资源门 ----
 # 磁盘满 / inode 耗尽时丢可写层不只无解，还更糟：重建要写更多数据。
 # 读不到容量不拦（无据可依时不该替人做否定判断），但必须记一句。
 _l3_res_gate() {
     _lr_avail="$(df -k "$OVL_UPPER" 2>/dev/null | awk 'NR==2{print $4}')"
     case "$_lr_avail" in
     ''|*[!0-9]*)
-        log "[自愈] 第三档：读不到可写层可用空间，不拦（但这意味着无法排除磁盘满）"
+        log "[自愈] 丢层：读不到可写层可用空间，不拦（但这意味着无法排除磁盘满）"
         ;;
     *)
         if [ "$_lr_avail" -lt 32768 ]; then
-            log "[自愈] 第三档被拒：可写层所在分区仅剩 ${_lr_avail}KB（<32MB），重建无从谈起"
+            log "[自愈] 丢层被拒：可写层所在分区仅剩 ${_lr_avail}KB（<32MB），重建无从谈起"
             return 1
         fi
         ;;
@@ -3991,62 +3836,89 @@ _l3_res_gate() {
     return 0
 }
 
-# ---- 第三档的三道门 ----
+# ---- 丢层的两道门（v.108.63：从四道砍到两道） ----
+# 签名门删了：没有 `crowdsec -t` 就没有可靠的「同一个根因」判据，
+# 靠现象签名只会恒等（进到这里就一定是 LAPI 不通）—— 那等于把额度永久锁死，
+# 比误丢一次更糟。留下的两道回答同一个问题：「凭什么现在可以再抹一次现场」。
+#   ① 开机门：同一次开机只给一次。探针每 60 秒会重启 bootstrap，
+#      没有这道门就是每 60 秒抹一次（CS_BOOTSTRAP_REINSTALL 只挡同一条进程链）。
+#   ② 时间门：距上次不足 6 小时就拒 —— 防反复重启设备、每次白得一次额度。
+# 恢复正常**不会**刷新额度：额度只跟开机和时钟走，不看 LAPI 通没通。
 _l3_load() {
-    L3_BI=""; L3_N=0; L3_TS=0; L3_SIG=""
+    L3_BI=""; L3_N=0; L3_TS=0
     [ -s "$L3_STATE" ] || return 0
-    read -r L3_BI L3_N L3_TS L3_SIG <"$L3_STATE" 2>/dev/null || true
+    # 末位留给旧版本的四字段（曾带签名），读进来丢掉即可
+    read -r L3_BI L3_N L3_TS _l3_old_sig <"$L3_STATE" 2>/dev/null || true
     case "$L3_N" in ''|*[!0-9]*) L3_N=0 ;; esac
     case "$L3_TS" in ''|*[!0-9]*) L3_TS=0 ;; esac
     return 0
 }
 
 _l3_gate() {
-    _lg_sig="$1"
     _l3_load
     _lg_bi="$(_cur_boot_id)"
-    # ① 开机门：**唯一**的重置口。恢复正常不重置，额度按开机记账。
     if [ -z "$_lg_bi" ]; then
-        log "[自愈] 第三档被拒：读不到 boot_id，无据可依时不做破坏性动作"
+        log "[自愈] 丢层被拒：读不到 boot_id，无据可依时不做破坏性动作"
         return 1
     fi
     if [ "$L3_BI" != "$_lg_bi" ]; then
-        [ -n "$L3_BI" ] && log "[自愈] 新的一次开机（boot_id 变了），第三档次数归零"
+        [ -n "$L3_BI" ] && log "[自愈] 新的一次开机（boot_id 变了），丢层次数归零"
         L3_N=0
     fi
-    # ② 次数门
     if [ "$L3_N" -ge "$L3_MAX" ]; then
-        log "[自愈] 第三档被拒：本次开机已用（$L3_N/$L3_MAX 次）。恢复不会刷新额度，只有重启设备才会"
+        log "[自愈] 丢层被拒：本次开机已用（$L3_N/$L3_MAX 次）。恢复不会刷新额度，只有重启设备才会"
         return 1
     fi
-    # ③ 时间门：防「重启循环里每次开机都白得一次」
     _lg_now="$(date +%s 2>/dev/null)"
     case "$_lg_now" in ''|*[!0-9]*) _lg_now=0 ;; esac
     if [ "$L3_TS" -gt 0 ] && [ "$_lg_now" -gt 0 ]; then
         _lg_gap=$((_lg_now - L3_TS))
         if [ "$_lg_gap" -lt "$L3_GAP" ]; then
-            log "[自愈] 第三档被拒：距上次丢可写层 ${_lg_gap}s，未满 ${L3_GAP}s（防重启循环反复抹盘）"
+            log "[自愈] 丢层被拒：距上次丢可写层 ${_lg_gap}s，未满 ${L3_GAP}s（防重启循环反复抹盘）"
             return 1
         fi
     fi
-    # ④ 签名门
-    if [ -n "$L3_SIG" ] && [ "$L3_SIG" = "$_lg_sig" ]; then
-        log "[自愈] 第三档被拒：上次丢可写层时签名也是 $_lg_sig 且没修好 —— 同一根因再丢一次不会有不同结果"
-        return 1
-    fi
-    printf '%s %s %s %s\n' "$_lg_bi" "$((L3_N + 1))" "$_lg_now" "$_lg_sig" \
+    printf '%s %s %s\n' "$_lg_bi" "$((L3_N + 1))" "$_lg_now" \
         | atomic_write "$L3_STATE" "" 2>/dev/null \
-        || log "[自愈] 第三档记账写入失败（$L3_STATE），本次仍只做这一遍"
-    log "[自愈] 第三档放行：本次开机第 $((L3_N + 1))/$L3_MAX 次，签名 $_lg_sig"
+        || log "[自愈] 丢层记账写入失败（$L3_STATE），本次仍只做这一遍"
+    log "[自愈] 丢层放行：本次开机第 $((L3_N + 1))/$L3_MAX 次"
     return 0
 }
 
-# ---- 第三档执行：丢可写层 ----
-# 与 full_reinstall 的区别只在「谁有资格调它」：那条走的是结构损坏 + 开机首跑，
-# 这条走的是 LAPI 阶梯的三道门。破坏动作本身完全一致 —— 基底只读不动，
+# ---- 丢层前把「机器身份会不会变」说清楚 ----
+# 2026-10-22 真机核对：基底里 local_api_credentials.yaml（158 B）与 crowdsec.db
+# （180224 B）成对存在，而现场那份凭据与基底 md5 完全相同 → 这台机器从未重新注册，
+# 丢层不改身份。但这是「现在如此」，不是一个可以写死的假设：哪天换过 key、重新
+# register 过，丢层就会把凭据回退成基底那份，console 里多一条 offline 记录。
+# 所以要现算现说，而不是在文档里断言「丢层无代价」。
+_l3_cred_delta() {
+    _cd_a="$ROOTFS/etc/crowdsec/local_api_credentials.yaml"
+    _cd_b="$ROM_BASE/etc/crowdsec/local_api_credentials.yaml"
+    if [ ! -s "$_cd_a" ]; then
+        log "[自愈] 机器身份：现场无凭据文件，丢层后由基底带回一份"
+        return 0
+    fi
+    if [ ! -s "$_cd_b" ]; then
+        log "[自愈] 机器身份：基底无凭据，丢层后凭据为空，需 bouncer_fill 重新注册（要重新 Accept）"
+        return 0
+    fi
+    _cd_ha="$(md5sum "$_cd_a" 2>/dev/null | cut -d' ' -f1)"
+    _cd_hb="$(md5sum "$_cd_b" 2>/dev/null | cut -d' ' -f1)"
+    if [ -n "$_cd_ha" ] && [ "$_cd_ha" = "$_cd_hb" ]; then
+        log "[自愈] 机器身份：现场凭据与基底一致（运行期未重新注册），丢层不改变机器身份"
+    else
+        log "[自愈] 机器身份：现场凭据与基底不同（运行期重新注册过），丢层会回退成基底那份，console 里可能多一条 offline 记录"
+    fi
+    return 0
+}
+
+# ---- 丢层执行 ----
+# 与 full_reinstall 的区别只在「谁有资格调它」：那条走结构性损坏 + 开机首跑，
+# 这条走 LAPI 不通。破坏动作本身完全一致 —— 基底只读不动，
 # 丢 upper/work 即回到构建时验证过的状态。
 _l3_reset_overlay() {
-    log "[自愈] 第三档：丢可写层，回到只读基底（回不来的东西：hub 更新、决策库、日志、machines 记录）"
+    log "[自愈] 丢可写层，回到只读基底（回不来的东西：hub 更新、决策库历史、日志、machines 记录）"
+    _l3_cred_delta
     _cred_backup || log "[自愈] 凭证备份失败，继续 —— bouncer_fill 会重新注册"
     ct_force_stop || { log "[自愈] 容器强停失败，放弃丢层（现场一个字节没动）"; return 1; }
     _overlay_umount || log "[自愈] overlay 卸载未成功，继续尝试抹除"
@@ -4058,53 +3930,28 @@ _l3_reset_overlay() {
     return 1
 }
 
-# ---- 阶梯主入口 ----
+# ---- 主入口 ----
 # 返回 0 = 已修好（调用方继续走正常流程）；1 = 没修好（调用方按原逻辑记失败）
 _lapi_ladder() {
-    # 重装后重跑时不再进阶梯：否则「丢层 → 重跑 → 又丢层」就是递归
+    # 丢层后重跑时不再进：否则「丢层 → 重跑 → 又丢层」就是递归
     if [ "${CS_BOOTSTRAP_REINSTALL:-0}" = "1" ]; then
-        log "[自愈] 本次已是重装后流程，阶梯不再介入"
+        log "[自愈] 本次已是丢层后流程，不再介入"
         return 1
     fi
-    # 立即再探一次：第 0 档重启进程可能刚好生效，别急着上诊断
+    # 再探一次：调用方刚重启过容器内 crowdsec，可能刚好生效
     if verify_lapi_reachable; then
-        log "[自愈] 重启进程后 8080 已通，阶梯到此为止"
+        log "[自愈] 重启进程后 8080 已通，不丢层"
         return 0
     fi
-    _lapi_cfg_test
-    case "$_LCT_RC" in
-    0)
-        log "[自愈] 配置与规则经 -t 校验均无问题 → 问题不在文件层"
-        ;;
-    2)
-        log "[自愈] 诊断不可用，跳过第 2 档；第三档仍需资源与三闸放行"
-        ;;
-    *)
-        if _lapi_fix_by_sig "$_LCT_SIG"; then
-            if _wait_lapi_ready "$MAX_WAIT" && verify_lapi_reachable; then
-                log "[自愈] 第 2 档处置生效，8080 已通"
-                return 0
-            fi
-            log "[自愈] 第 2 档处置后仍不通"
-        fi
-        ;;
-    esac
-    # 【v.108.62】-t 不通过**不再一律拒**：坏的是谁的文件才决定手段。
-    # 坏在 hub 规则里 → 基底有干净副本，丢层正好；坏在 config/acquis/凭据里 → 丢层没用或有害。
-    # 判据交给 _l3_blame_gate（第四道门），这里只负责把证据递过去。
-    if [ "$_LCT_RC" != "0" ] && [ "$_LCT_RC" != "2" ]; then
-        log "[自愈] crowdsec -t 仍不通过（rc=$_LCT_RC，签名 $_LCT_SIG，嫌疑 ${_LCT_PATH:-未提取到}）→ 交第四道门判该不该丢层"
-        _l3_blame_gate "$_LCT_PATH" || {
-            log "[自愈] 该故障不属于「丢层能修」的一类，不做第三档"
-            return 1
-        }
-    fi
-    [ -d "$ROM_BASE" ] || {
-        log "[自愈] 无只读基底（$ROM_BASE），第三档不可用（老固件只能走镜像解压）"
+    if [ ! -d "$ROM_BASE" ]; then
+        log "[自愈] 无只读基底（$ROM_BASE），丢层不可用（老固件只能走镜像解压）"
         return 1
-    }
+    fi
     _l3_res_gate || return 1
-    _l3_gate "$_LCT_SIG" || return 1
+    if ! _l3_gate; then
+        log "[自愈] 丢层被拒 → 剩下的可能：基底本身有问题、宿主侧（overlay/磁盘/端口占用）。这三类抹现场都无效，转人工"
+        return 1
+    fi
     _l3_reset_overlay
     return 1
 }

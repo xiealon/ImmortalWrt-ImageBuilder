@@ -118,22 +118,49 @@ case " $PACKAGES " in
         ;;
 esac
 
-# 【v.108.45】容器内脚本进固件，供 crowdsec-guard 拿 /rom 只读副本当基准。
-# 为什么放这里而不是只在 tarball 里：tarball 是个压缩包，guard 没法用 cmp 比它；
-# 只有在 squashfs 里有同路径的散文件，guard 才能「同路径比对」而不必改逻辑。
-# 只放需要逐字节固定的 9 个（init.d 四个 + inittab + supervise，加上
-# passwd / group / nsswitch.conf —— 后三个是 crowdsec 解析用户和名字服务的静态依赖，
-# 改坏了会以「找不到用户」这种很难查的方式挂掉）。
-# acquis.yaml / config.yaml / crowdsec-net.conf / resolv.conf 由 bootstrap 的
-# logconf / capi / ct_net / ct_resolv 每轮重写，放进固件会变成
-# 「bootstrap 写 → guard 改回去 → 死循环」。
-# 特别不放 os-release：它是 verify_rootfs 判「rootfs 已解压」的依据，
-# 放进 squashfs 会让首启（rootfs 还没解压）被误判成就绪。
+# 【v.108.45 → v.108.56】guard 的静态基准。
+# 现在基底已整份在 squashfs（$BASE_DIR），这 15 个文件本来就在里面，再拷一遍是为了
+# 「与 rootfs-skel 单一来源对齐」——prebuilt 包若比仓库旧，以仓库版本为准。
+# 仍然不放进来的：acquis.yaml / config.yaml / crowdsec-net.conf / resolv.conf。
+# 它们由 bootstrap 的 logconf / capi / ct_net / ct_resolv 每轮重写，
+# 固化进只读层就是「bootstrap 写 → guard 改回去」的死循环。
+# 【v.108.56】容器固定文件进 squashfs：把 prebuilt 包展开成只读基底。
+# 为什么不再「tarball 原样进固件、首启解压」：
+#   ① tarball 是个压缩包，guard 没法用 cmp 比它；展开进 squashfs 后才有同路径散文件；
+#   ② 首启省掉 288MB 解压（真机实测这是开机最重的一段）；
+#   ③ 固定文件落在 lower，容器内改不动 —— 保护从「每 60 秒盖回去」变成「物理不可写」。
+# 体积账：tarball 107MB 换成 squashfs 里的 base，压缩后大致相当，固件几乎不变大；
+# 所以包解压完就删，不让同一份内容在固件里存两次。
+BASE_DIR="files/srv/lxc/ubuntu/base"
+TARBALL_IN="files/etc/crowdsec/lxc-crowdsec.tar.gz"
+if [ -f "$TARBALL_IN" ]; then
+    echo "==> 展开容器只读基底 → $BASE_DIR"
+    rm -rf "$BASE_DIR"
+    mkdir -p "$BASE_DIR"
+    tar -xzpf "$TARBALL_IN" -C "$BASE_DIR" \
+        || { echo "::error::展开容器基底失败（$TARBALL_IN）"; exit 1; }
+    for _need in etc/os-release etc/inittab usr/bin/crowdsec etc/crowdsec/acquis.yaml; do
+        [ -e "$BASE_DIR/$_need" ] \
+            || { echo "::error::基底缺 $_need —— 包结构不对，不能进固件"; exit 1; }
+    done
+    # 指纹给运行期用：upper 记着自己照着哪版基底建的，不符就整层丢弃，
+    # 否则换固件后旧 upper 会永久遮住新基底的同名文件 —— 看着升级了，其实没升。
+    sha256sum "$TARBALL_IN" | awk '{print $1}' > "$BASE_DIR.fingerprint"
+    echo "==> 基底就绪：$(du -sh "$BASE_DIR" | cut -f1)，指纹 $(cat "$BASE_DIR.fingerprint")"
+    rm -f "$TARBALL_IN"
+    echo "==> 已从固件移除 prebuilt 包（内容已在 $BASE_DIR）"
+else
+    echo "::warning::没有 prebuilt 包，固件不带容器基底；首启将走镜像解压回退"
+fi
+
 [ -d rootfs-skel ] || {
     echo "::error::找不到 rootfs-skel/（当前目录 $(pwd)）—— workflow 的 docker run 必须把仓库根下的 rootfs-skel 挂进来：-v \"\$GITHUB_WORKSPACE/rootfs-skel:/home/build/immortalwrt/rootfs-skel\"。没有它，容器内那批受保护文件既进不了 tarball 也进不了固件。"
     exit 1
 }
-ROOTFS_GUARD_DIR="files/srv/lxc/ubuntu/rootfs"
+ROOTFS_GUARD_DIR="$BASE_DIR"
+# 【v.108.56】目标从 rootfs/ 改为 base/：guard 运行期读的是挂载点合并视图，
+# 但静态基准必须和基底在同一处，否则 squashfs 里会多一份 288MB 之外的副本。
+if [ -d "$BASE_DIR" ]; then
 for _rel in \
     etc/passwd \
     etc/group \
@@ -164,6 +191,7 @@ chmod 0644 "$ROOTFS_GUARD_DIR/etc/passwd" "$ROOTFS_GUARD_DIR/etc/group" \
 chmod 0644 "$ROOTFS_GUARD_DIR/etc/crowdsec/acquis.d/router.yaml" \
            "$ROOTFS_GUARD_DIR/etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml" \
            "$ROOTFS_GUARD_DIR/etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml"
+fi
 echo "==> 容器内受保护文件已进固件（15 个，/rom 只读基准）"
 
 # 出镜像前补齐执行位并逐项断言：路径改名或文件漏拷时让构建直接失败。

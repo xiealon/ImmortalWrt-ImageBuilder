@@ -28,7 +28,8 @@ fi
 # 网络是唯一远程入口，保住它才谈得上进后台处理镜像问题。
 if [ -f /etc/crowdsec/lxc-crowdsec.tar.gz ] || [ -f /etc/crowdsec/lxc-ubuntu.tar.gz ] \
    || [ -f /opt/lxc-ubuntu.tar.gz ] \
-   || [ -d /srv/lxc/ubuntu/rootfs ]; then
+   || [ -d /srv/lxc/ubuntu/rootfs ] \
+   || [ -d /rom/srv/lxc/ubuntu/base ]; then
     BOOT_MODE=""
 else
     BOOT_MODE="--net-only"

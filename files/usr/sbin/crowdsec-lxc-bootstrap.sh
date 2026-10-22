@@ -46,6 +46,12 @@ ROOTFS="$LXC_PATH/$LXC_NAME/rootfs"
 CFG="$LXC_PATH/$LXC_NAME/config"
 TARBALL="${TARBALL:-$CS_HOME/lxc-crowdsec.tar.gz}"
 LEGACY_TARBALL="/opt/lxc-ubuntu.tar.gz"
+# 【v.108.56】容器固定文件常驻 /rom 只读基底，可变部分走 overlay 可写层。
+# upper/work 必须在 /overlay（f2fs）：overlay 的 upperdir 不能是另一个 overlayfs，
+# 而 /srv 就叠在 rootfs overlay 上（真机实测 rc=32 "not supported as upperdir"）。
+ROM_BASE="${CS_ROM_BASE:-/rom/srv/lxc/ubuntu/base}"
+OVL_UPPER="${CS_OVL_UPPER:-/overlay/lxc-upper}"
+OVL_WORK="${CS_OVL_WORK:-/overlay/lxc-work}"
 LAPI_PORT="${LAPI_PORT:-8080}"
 BOUNCER_NAME="${BOUNCER_NAME:-openwrt-fw}"
 ENROLL_KEY_FILE="${ENROLL_KEY_FILE:-/etc/config/crowdsec_enroll_key.txt}"
@@ -1615,6 +1621,10 @@ flush_uci() {
 # ---- install 类节点 verify/build ----
 # 镜像完整性（v.79：不只验文件名——半截 tarball 会漏判为「已就绪」，解压才炸）
 verify_img_migrate() {
+    # 【v.108.56】overlay 模式：容器来自 /rom 只读基底，不存在「要迁移镜像包」这回事。
+    # 少了这一条，img_migrate 节点每轮都因「无 tarball」判失败，而它不在 SOFT_NODES，
+    # 一轮就 hard exit —— 表现为「固件正常、容器永不启动」，且日志只说无镜像可迁移。
+    [ -d "$ROM_BASE" ] && return 0
     [ -f "$TARBALL" ] || return 1
     # gzip -t 做全量 CRC 校验：包被截断或写坏这里直接不过，比只数目录名可靠
     gzip -t "$TARBALL" >/dev/null 2>&1 || return 1
@@ -1669,6 +1679,11 @@ build_ct_config() {
 }
 # rootfs 完整性（v.79：CROWDSEC_CFG 需含 crowdsec config 必备段，半截文件判不符）
 verify_rootfs() {
+    # overlay 模式：挂着 + stamp 对得上就算就绪。内容由只读 lower 保证，
+    # 不必再逐文件验 —— os-release 恒在，拿它当判据在这里已经失去意义。
+    if _overlay_mounted; then
+        _upper_stamp_ok && return 0
+    fi
     [ -d "$ROOTFS/etc" ] || return 1
     [ -d "$ROOTFS/usr" ] || return 1
     [ -s "$ROOTFS/etc/os-release" ] || return 1
@@ -1678,11 +1693,16 @@ verify_rootfs() {
     grep -q "common:" "$CROWDSEC_CFG" 2>/dev/null || return 1
 }
 build_rootfs() {
-    log "rootfs 未就绪，从镜像解压"
+    log "rootfs 未就绪，开始重建"
+    # 首选：/rom 只读基底 + overlay 可写层（零解压、固定文件不可改）
+    if build_overlay_root; then
+        _cred_restore || log "[凭据] 恢复未成功，enroll 步将走重注册"
+        _recovering=true
+        return 0
+    fi
+    # 回退：从 tarball 解压（老固件 / 内核不支持 overlay / /overlay 不可写）
+    log "[overlay] 不可用，回退到镜像解压"
     rebuild_from_image || { log "镜像解压失败"; return 1; }
-    # 【v.108.51】刚解压出来的 rootfs 里凭据是「镜像构建时」的状态（不存在或 0 字节），
-    # 而刷机又把 /srv 整个带走了 —— 这里是把 /etc/config 持久副本放回去的唯一时机。
-    # 以前只有 tier-3 重装才会 _cred_restore（那时 /srv 还在），刷机这条路从没恢复过。
     _cred_restore || log "[凭据] 恢复未成功，enroll 步将走重注册"
     _recovering=true
 }
@@ -2759,12 +2779,75 @@ _pick_tarball() {
     return 1
 }
 
+# 【v.108.56】overlay 根：lower = /rom 只读基底，upper/work = /overlay（f2fs）
+# 真正的收益不是「省一次解压」，而是「固定文件在物理上改不了」：
+# /etc/init.d/rcS、/etc/inittab、crowdsec-supervise 这些留在 lower 里，
+# 容器内想改也改不动，guard 从「每 60 秒盖回去」退化成冗余保险。
+# 三个前提，缺一不可（2026-10-22 真机验过）：
+#   ① 内核支持 overlay：/proc/filesystems 含 "nodev overlay"
+#   ② upperdir 所在 fs 支持 xattr：/overlay 是 f2fs（user_xattr,inline_xattr）
+#   ③ upperdir 不能是 overlayfs 本身：/srv 在 rootfs overlay 上，直接用它 rc=32
+_overlay_mounted() {
+    [ -d "$ROOTFS" ] || return 1
+    mount 2>/dev/null | grep -qF " on $ROOTFS type overlay"
+}
+
+_base_fingerprint() {
+    [ -s "$ROM_BASE.fingerprint" ] || return 1
+    head -n1 "$ROM_BASE.fingerprint" 2>/dev/null | tr -d ' \t\r\n'
+}
+
+# upper 里记着「我这层是照着哪版基底建的」。换固件后基底变了、upper 还是旧的，
+# 旧副本会永久遮住新基底的同名文件 —— 看着升级了，其实没升。所以指纹不符就整层丢弃。
+_upper_stamp_ok() {
+    _usf="$(_base_fingerprint)" || return 0
+    [ -f "$OVL_UPPER/.base-fingerprint" ] || return 1
+    [ "$(head -n1 "$OVL_UPPER/.base-fingerprint" 2>/dev/null | tr -d ' \t\r\n')" = "$_usf" ]
+}
+
+_overlay_umount() {
+    _overlay_mounted || return 0
+    umount "$ROOTFS" 2>/dev/null && return 0
+    umount -l "$ROOTFS" 2>/dev/null && return 0
+    return 1
+}
+
+build_overlay_root() {
+    [ -d "$ROM_BASE" ] || {
+        log "[overlay] 固件里没有只读基底（$ROM_BASE），改用镜像解压"
+        return 1
+    }
+    mkdir -p "$OVL_UPPER" "$OVL_WORK" "$ROOTFS" 2>/dev/null || {
+        log "[overlay] 建目录失败（$OVL_UPPER / $OVL_WORK / $ROOTFS）"
+        return 1
+    }
+    if _overlay_mounted; then
+        log "[overlay] 已挂载：$ROOTFS"
+        return 0
+    fi
+    if ! _upper_stamp_ok; then
+        log "[overlay] upper 与基底指纹不符（换过固件或首次），丢弃可写层重建"
+        rm -rf "$OVL_UPPER" "$OVL_WORK" 2>/dev/null
+        mkdir -p "$OVL_UPPER" "$OVL_WORK" 2>/dev/null || return 1
+    fi
+    if ! mount -t overlay overlay \
+            -o "lowerdir=$ROM_BASE,upperdir=$OVL_UPPER,workdir=$OVL_WORK" "$ROOTFS"; then
+        log "[overlay] 挂载失败：lower=$ROM_BASE upper=$OVL_UPPER work=$OVL_WORK"
+        return 1
+    fi
+    _base_fingerprint > "$OVL_UPPER/.base-fingerprint" 2>/dev/null
+    log "[overlay] 只读基底已挂载：lower=$ROM_BASE upper=$OVL_UPPER"
+    return 0
+}
+
 rebuild_from_image() {
     log "尝试从镜像解压 rootfs：$TARBALL"
     # 【v.108.55】选源失败就不再往下走：rm -rf "$ROOTFS" 是不可逆的。
     _pick_tarball || return 1
     log "[包] 解压源：$SRC_TARBALL"
     ct_force_stop || return 1
+    # overlay 挂着时 rm -rf 会 busy 且删不干净：先卸载再抹
+    _overlay_umount || { log "[overlay] $ROOTFS 卸载失败，放弃解压"; return 1; }
     rm -rf "$ROOTFS" 2>/dev/null
     mkdir -p "$ROOTFS" || return 1
     if ( set -C; : > "$ROOTFS/.extracting" ) 2>/dev/null; then
@@ -3713,7 +3796,8 @@ _escalate_reinstall() {
         log "[重装] 本次已是重装后流程，禁止递归重装"
         return 1
     fi
-    verify_img_migrate || {
+    # overlay 模式下基底在 squashfs 里只读，不存在「镜像被打断」这回事
+    [ -d "$ROM_BASE" ] || verify_img_migrate || {
         log "[重装] 镜像不可用（$TARBALL gzip -t 不过），没有好镜像宁可失败也不抹 rootfs"
         return 1
     }
@@ -3729,7 +3813,14 @@ full_reinstall() {
     # 【v.108.19】到这一步才开始破坏性动作，此时才把额度记掉。
     # 放在强停之后是有意的：强停失败时 rootfs 一个字节都没动，不该白丢一次机会。
     _reset_consume "结构性损坏，已强停容器并即将抹除 rootfs"
-    rm -rf "$ROOTFS" 2>/dev/null || { log "[重装] rootfs 抹除失败，放弃重装"; return 1; }
+    _overlay_umount || log "[重装] overlay 卸载未成功，继续尝试抹除"
+    if [ -d "$ROM_BASE" ]; then
+        # 基底只读不动，丢可写层即可；ROOTFS 是挂载点，清它没有意义
+        rm -rf "$OVL_UPPER" "$OVL_WORK" 2>/dev/null \
+            || { log "[重装] 可写层抹除失败，放弃重装"; return 1; }
+    else
+        rm -rf "$ROOTFS" 2>/dev/null || { log "[重装] rootfs 抹除失败，放弃重装"; return 1; }
+    fi
     : > "$REINSTALL_PENDING_FILE" 2>/dev/null || log "[重装] 未完成标记写入失败（断电将漏计一次）"
     export CS_BOOTSTRAP_REINSTALL=1
     _bs_reexec
@@ -4657,7 +4748,8 @@ main() {
 
     # 本机判定：无镜像且无 rootfs → 跳过（不进 DAG）。
     # net-only 不受此限：它的全部目的就是「没有镜像也把网络配了」。
-    if [ "$NET_ONLY" != "1" ] && [ ! -f "$TARBALL" ] && [ ! -f "$LEGACY_TARBALL" ] && [ ! -f "$CROWDSEC_CFG" ]; then
+if [ "$NET_ONLY" != "1" ] && [ ! -f "$TARBALL" ] && [ ! -f "$LEGACY_TARBALL" ] \
+   && [ ! -d "$ROM_BASE" ] && [ ! -f "$CROWDSEC_CFG" ]; then
         log "无镜像且无 rootfs，本机不带 CrowdSec，跳过"
         exit 0
     fi

@@ -56,8 +56,8 @@ ck "R34.9 阶梯不依赖 enroll（自愈逻辑里出现 enroll 即为越界）"
 echo "===== R34c. 三档各自的证据门 ====="
 ck "R34.10 第 1 档用 crowdsec -t（只校验不启动）" \
    "$(body _lapi_cfg_test "$BS_C" | grep -c 'crowdsec -t -c /etc/crowdsec/config.yaml')" "1"
-ck "R34.11 -t 不通过时不进第三档（配置坏≠该丢层）" \
-   "$(body _lapi_ladder "$BS_C" | grep -c '不做第三档')" "1"
+ck "R34.11 -t 不通过时不直接拒，而是把嫌疑文件交给第四道门" \
+   "$(body _lapi_ladder "$BS_C" | grep -c '_l3_blame_gate "\$_LCT_PATH"')" "1"
 ck "R34.12 bad-yaml 走 cscli hub update" \
    "$(body _lapi_fix_by_sig "$BS_C" | grep -c "cscli hub update'")" "1"
 ck "R34.13 bad-db 移走 decisions.db（留 .l3bak）" \
@@ -119,7 +119,7 @@ verify_lapi_reachable() {
     [ "$T_FIX_UP" = 1 ]
 }
 _wait_lapi_ready() { return 0; }
-_lapi_cfg_test() { _LCT_RC="$T_LCT_RC"; _LCT_SIG="$T_SIG"; return 0; }
+_lapi_cfg_test() { _LCT_RC="$T_LCT_RC"; _LCT_SIG="$T_SIG"; _LCT_PATH="$T_SUSPECT"; return 0; }
 _ct_env() { printf 'CTENV %s\n' "$1" >> "$TMPD/actions"; return 0; }
 _ct_restart_crowdsec() { printf 'RESTART\n' >> "$TMPD/actions"; return 0; }
 _lapi_ladder
@@ -133,12 +133,25 @@ run_gate() {   # $1=sig $2=BOOT $3=已有状态 $4=DF可用KB
         sh "$TMPD/gate.sh" 2>/dev/null | sed -n 's/^RC=//p'
 }
 
-run_ladder() {   # $1=REINSTALL $2=LAPI_UP $3=LCT_RC $4=sig $5=FIX_UP $6=ROM_OK
+run_ladder() {   # $1=REINSTALL $2=LAPI_UP $3=LCT_RC $4=sig $5=FIX_UP $6=ROM_OK $7=嫌疑路径 $8=基底形态
     rm -rf "$TMPD/st" "$TMPD/log" "$TMPD/actions" "$TMPD/rc_ask" "$TMPD/rom"
+    # set -u 下必须给缺省值：老用例只传 6 个参数，直接 $7/$8 会 unbound 退出
+    _sus="${7:-}"; _kind="${8:-}"
     _rom=""
-    if [ "$6" = 1 ]; then mkdir -p "$TMPD/rom"; _rom="$TMPD/rom"; fi
+    if [ "$6" = 1 ]; then
+        mkdir -p "$TMPD/rom/etc/crowdsec/hub"
+        _rom="$TMPD/rom"
+        # 基底 hub 有没有内容，决定「丢层后规则库还剩不剩」
+        [ "$_kind" = "emptyhub" ] || : > "$TMPD/rom/etc/crowdsec/hub/collections.yaml"
+        # 基底有同名副本：模拟「这个坏文件在构建时的基底里就有干净的一份」
+        if [ "$_kind" = "same" ] && [ -n "$_sus" ]; then
+            case "$_sus" in
+            /etc/crowdsec/*) mkdir -p "$TMPD/rom$(dirname "$_sus")"; : > "$TMPD/rom$_sus" ;;
+            esac
+        fi
+    fi
     F="$TMPD/f.sh" T_TMPD="$TMPD" T_REINSTALL="$1" T_LAPI_UP="$2" T_LCT_RC="$3" \
-        T_SIG="$4" T_FIX_UP="$5" T_ROM="$_rom" T_BOOT=bootL \
+        T_SIG="$4" T_FIX_UP="$5" T_ROM="$_rom" T_BOOT=bootL T_SUSPECT="$_sus" \
         sh "$TMPD/lad.sh" 2>/dev/null | sed -n 's/^RC=//p'
     # 「什么都没做」的用例不会生成 actions；补一个空文件，免得 grep 报错被当成「没匹配」
     [ -f "$TMPD/actions" ] || : > "$TMPD/actions"
@@ -215,9 +228,44 @@ ck "R34.43 第 2 档生效 → 不丢层" \
 ck "R34.44 第 2 档生效后返回 0" \
    "$(run_ladder 0 0 1 'bad-yaml' 1 1)" "0"
 
+echo "===== R34g. 第四道门：坏的是谁的文件，决定丢不丢层 ====="
+ck "R34.45 _l3_blame_gate 存在" \
+   "$(grep -c '^_l3_blame_gate()' "$BS_C")" "1"
+ck "R34.46 凭据类明确拒绝（与 machine 记录成对，丢了要重新 Accept）" \
+   "$(body _l3_blame_gate "$BS_C" | grep -c 'local_api_credentials.yaml')" "1"
+ck "R34.47 config/acquis/profiles/simulation 拒绝（guard 与 build 会写回同样的）" \
+   "$(body _l3_blame_gate "$BS_C" | grep -c '\*/config.yaml|\*/acquis.yaml')" "1"
+ck "R34.48 hub 规则类才在白名单里" \
+   "$(body _l3_blame_gate "$BS_C" | grep -c '\*/hub/\*|\*/collections/\*')" "1"
+ck "R34.49 抽不出出错文件时拒（不拿「没抽到」当「没有坏文件」）" \
+   "$(body _l3_blame_gate "$BS_C" | grep -c '不拿「没抽到」当「没有坏文件」')" "1"
+ck "R34.50 基底 hub 为空时必须明示「规则库为空」（不许报成已恢复）" \
+   "$(body _l3_blame_gate "$BS_C" | grep -c '规则库为空，需联网补 hub')" "1"
+ck "R34.51 路径能压成 8 位摘要（状态文件是空格分隔的单行）" \
+   "$(body _l3_short "$BS_C" | grep -c 'md5sum')" "1"
+ck "R34.52 -t 输出里能抽出出错文件路径（绝对/相对两种形式都认）" \
+   "$(body _l3_path_of "$BS_C" | grep -c '/etc/crowdsec/' | awk '{print ($1>=1)?"1":"0"}')" "1"
+ck "R34.53 签名带上出错文件摘要（同 bad-yaml 不同文件 = 换了根因）" \
+   "$(body _l3_sig_of "$BS_C" | grep -c "bad-yaml:%s")" "1"
+
+ck "R34.54 hub 规则坏 + 基底有同名副本 → 放行丢层" \
+   "$(run_ladder 0 0 1 'bad-yaml:aaaa' 0 1 '/etc/crowdsec/scenarios/x.yaml' same >/dev/null; grep -c 'RMOVL' "$TMPD/actions")" "1"
+ck "R34.55 config.yaml 坏 → 拒（丢层后 build 写回同样的）" \
+   "$(run_ladder 0 0 1 'bad-yaml:aaaa' 0 1 '/etc/crowdsec/config.yaml' same >/dev/null; grep -c 'RMOVL' "$TMPD/actions")" "0"
+ck "R34.56 凭据坏 → 拒（丢层会丢机器注册记录）" \
+   "$(run_ladder 0 0 1 'bad-yaml:aaaa' 0 1 '/etc/crowdsec/local_api_credentials.yaml' same >/dev/null; grep -c 'RMOVL' "$TMPD/actions")" "0"
+ck "R34.57 抽不出出错文件 → 拒" \
+   "$(run_ladder 0 0 1 'bad-yaml:aaaa' 0 1 '' same >/dev/null; grep -c 'RMOVL' "$TMPD/actions")" "0"
+ck "R34.58 出错文件不在 /etc/crowdsec 下 → 拒" \
+   "$(run_ladder 0 0 1 'bad-yaml:aaaa' 0 1 '/opt/foo.yaml' same >/dev/null; grep -c 'RMOVL' "$TMPD/actions")" "0"
+ck "R34.59 hub 坏 + 基底无同名但 hub 非空 → 放行（回退到基底版本）" \
+   "$(run_ladder 0 0 1 'bad-yaml:aaaa' 0 1 '/etc/crowdsec/hub/scenarios/y.yaml' hubonly >/dev/null; grep -c 'RMOVL' "$TMPD/actions")" "1"
+ck "R34.60 基底 hub 为空 → 仍放行，但日志点明规则库为空" \
+   "$(run_ladder 0 0 1 'bad-yaml:aaaa' 0 1 '/etc/crowdsec/scenarios/z.yaml' emptyhub >/dev/null; grep -c '规则库为空' "$TMPD/log")" "1"
+
 echo "===== R34f. 版本号 ====="
-ck "R34.45 版本推进到 108.61" \
-   "$(grep -c 'SCRIPT_VER="2026-10-22.108.61-bp"' "$BS")" "1"
+ck "R34.61 版本推进到 108.62" \
+   "$(grep -c 'SCRIPT_VER="2026-10-22.108.62-bp"' "$BS")" "1"
 
 echo "------------------------------------------------------------------"
 echo "R34 RESULT: $R 项失败"

@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-22.108.53-bp"
+SCRIPT_VER="2026-10-22.108.54-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -55,18 +55,14 @@ ENROLL_KEY_FILE="${ENROLL_KEY_FILE:-/etc/config/crowdsec_enroll_key.txt}"
 # 折中：留在 /etc/config（sysupgrade 默认保留 → 升级后自愈能力不丢），但不参与固件分发，
 # 且日志里只出现路径不出现内容。
 ENROLL_KEY_KEEP="${ENROLL_KEY_KEEP:-${ENROLL_KEY_FILE}.keep}"
-# 【v.108.53】「已提交、等网页 Accept」标记 + 重试闸门。
-# 背景：console enroll 与网页点 Accept 之间有一段必须人工的间隔，这段时间本地
-# console status 必然是 not enrolled。v.108.52 把它当「失败」，于是每一轮复验都想
-# 再提交一次 —— 真机日志 20:52:46 起每秒一对「检测到未注册 / 改用保险柜」，
-# 网页端会堆出多条 pending 实例。旧版靠「注册成功即删码」碰巧只提交一次，不是设计好。
-# 现在两层闸门：
-#   · 进程内 _ENROLL_TRIED：本次开机所有阶段加起来最多提交一次；
-#   · 落盘 ENROLL_SUBMIT_FILE：只要提交过就记下来，**之后不再自动重试**
-#     （用户要求「触发后只尝试注册一次，不多做尝试」）。
-#     ENROLL_RETRY_TTL 默认 0 = 不自动重试；设成正数秒数才启用「过期后再试一次」。
+# 【v.108.54】「已提交、等网页 Accept」的判定改成「按开机计」。
+# 演进过程：
+#   v.108.52：未注册就判失败 → 每次复验都重新提交，网页堆 pending；
+#   v.108.53：落盘标记 + 永不自动重试 → 网页误点「拒绝」后永久失联，只能 SSH 删文件；
+#   v.108.54：**每次开机允许尝试一次**。同一开机内靠进程变量 _ENROLL_TRIED 只提交一次，
+#             重启即刷新状态 —— 误点拒绝/误删后重启一次就自动回来，不需要任何手工命令。
+# 落盘文件仍保留，但只用于「记录上次提交时间、便于排查」，不再当闸门。
 ENROLL_SUBMIT_FILE="${ENROLL_SUBMIT_FILE:-/etc/config/crowdsec_enroll_submitted}"
-ENROLL_RETRY_TTL="${ENROLL_RETRY_TTL:-0}"
 _ENROLL_TRIED=0
 _ENROLL_WAIT_LOGGED=0
 MAX_WAIT="${MAX_WAIT:-60}"
@@ -3972,9 +3968,10 @@ _enroll_key_load() {
     return 0
 }
 
-# ---- 「已提交、等网页 Accept」闸门（v.108.53）----
+# ---- 提交记录（v.108.54：只记录，不再当闸门）----
 # console enroll 成功 ≠ 本地已注册：必须有人去 app.crowdsec.net 点 Accept。
-# 这段间隔里 console status 必然是 not enrolled，不能拿它判失败，否则会反复提交。
+# 这段间隔里 console status 必然是 not enrolled，不能拿它判失败。
+# 判定改由「本次开机是否已提交过」（进程变量 _ENROLL_TRIED）承担，这里只留个时间戳备查。
 _enroll_submit_mark() {
     [ "${_VERIFY_ONLY:-0}" = "1" ] && return 0     # 体检承诺「一个字节都不写」
     printf '%s\n' "$(date +%s)" > "$ENROLL_SUBMIT_FILE" 2>/dev/null \
@@ -3985,30 +3982,6 @@ _enroll_submit_clear() {
     [ "${_VERIFY_ONLY:-0}" = "1" ] && return 0
     [ -f "$ENROLL_SUBMIT_FILE" ] && rm -f "$ENROLL_SUBMIT_FILE" 2>/dev/null
     return 0
-}
-# 是否「已提交过」。ENROLL_RETRY_TTL=0（默认）表示永不自动重试：
-# 只要标记存在就算「已提交」，一次都不多做。
-_enroll_submitted_recently() {
-    [ -s "$ENROLL_SUBMIT_FILE" ] || return 1
-    [ "$ENROLL_RETRY_TTL" -gt 0 ] 2>/dev/null || return 0     # 0 = 永久有效，不再重试
-    _esr_t="$(head -n1 "$ENROLL_SUBMIT_FILE" 2>/dev/null | tr -cd '0-9')"
-    [ -n "$_esr_t" ] || return 0                              # 标记在但读不出时间：按已提交处理
-    _esr_now="$(date +%s)"
-    # 时钟回拨（NTP 未同步时常见）：时间戳比现在大 → 当作已过期，允许再试一次
-    [ "$_esr_now" -ge "$_esr_t" ] || return 1
-    [ $((_esr_now - _esr_t)) -lt "$ENROLL_RETRY_TTL" ]
-}
-# 给日志用的人话说明（两种配置下都要读得通顺）
-_enroll_wait_desc() {
-    if [ "$ENROLL_RETRY_TTL" -gt 0 ] 2>/dev/null; then
-        _ewd_t="$(head -n1 "$ENROLL_SUBMIT_FILE" 2>/dev/null | tr -cd '0-9')"
-        _ewd_now="$(date +%s)"
-        if [ -n "$_ewd_t" ] && [ "$_ewd_now" -ge "$_ewd_t" ]; then
-            printf '约 %d 分钟内不再重复提交' $(( (ENROLL_RETRY_TTL - (_ewd_now - _ewd_t)) / 60 ))
-            return 0
-        fi
-    fi
-    printf '不会自动重试，网页端 Accept 后自动生效'
 }
 
 re_enroll() {
@@ -4055,10 +4028,9 @@ re_enroll() {
     fi
     log "[enroll] enroll 命令返回成功：$(printf '%s' "$_enroll_out" | tr '\n' ' ' | cut -c1-200)"
 
-    # 【v.108.53】提交成功立刻落盘时间戳。从这里到网页点 Accept 之前，本地一定是
-    # not enrolled —— 这个标记就是「已经提交过、别再来一次」的唯一依据。
+    # 【v.108.53】提交成功立刻落盘时间戳（备查用；判定靠 _ENROLL_TRIED）。
     _enroll_submit_mark
-    log "[enroll] 已记录提交时间（$ENROLL_SUBMIT_FILE）；网页端 Accept 前不再重复提交"
+    log "[enroll] 已记录提交时间（$ENROLL_SUBMIT_FILE）；本次开机不再重复提交（重启可再试一次）"
 
     _ct_env '/usr/bin/cscli console enable --all' >/dev/null 2>&1 \
         || log "[enroll] console enable --all 失败（不影响注册；新版本 enrolled 后自动全开）"
@@ -4444,17 +4416,17 @@ verify_enroll() {
         log "[ENROLL] ** 补救：app.crowdsec.net 取注册码后执行 cscli console enroll <key>"
         return 0
     fi
-    # ③ 已提交、等网页 Accept：这段间隔本地必然是 not enrolled，不能当失败！
-    #    （v.108.52 就是把这里当失败，导致每秒重新提交一次，网页堆出一堆 pending。）
-    if _enroll_submitted_recently; then
+    # ③ 本次开机已提交、等网页 Accept：这段间隔本地必然是 not enrolled，不能当失败。
+    #    （v.108.52 就是把它当失败，每个复验轮次都重新提交一次，网页堆出一串 pending。）
+    if [ "$_ENROLL_TRIED" = "1" ]; then
         if [ "$_ENROLL_WAIT_LOGGED" = "0" ]; then
-            log "[ENROLL] 已提交注册，等待网页端 Accept（$(_enroll_wait_desc)）"
+            log "[ENROLL] 本次开机已提交注册，等待网页端 Accept（重启设备可再尝试一次）"
             log "[ENROLL]   → app.crowdsec.net → Instances 点 Accept enroll，之后本地自动变 enrolled"
             _ENROLL_WAIT_LOGGED=1
         fi
         return 0
     fi
-    # ④ 从未提交、或已超过 TTL：交给 build 提交一次
+    # ④ 本次开机还没试过：交给 build 提交一次
     log "[ENROLL] 检测到未注册（网页端可能被关闭/删除），发现可用注册码，交给 build 重注册"
     return 1
 }
@@ -4464,15 +4436,10 @@ build_enroll() {
         log "[ENROLL] 未配置注册码（$ENROLL_KEY_FILE / $ENROLL_KEY_KEEP 都没有），跳过 console enroll"
         return 0
     fi
-    # 闸门一：本次开机只提交一次。阶段 1 / 阶段 3 / 重启态复验都走这个函数，
-    # 共用同一个进程变量，所以即使它们各判一次「不符」，也只会提交一次。
+    # 本次开机只提交一次：阶段 1 / 阶段 3 / 重启态复验都走这个函数，共用同一个进程变量。
+    # 想再试一次就重启设备（v.108.54：这是唯一的重置方式，不需要删文件）。
     if [ "$_ENROLL_TRIED" = "1" ]; then
-        log "[ENROLL] 本次开机已提交过注册，跳过重复提交（网页端 Accept 后自动生效）"
-        return 0
-    fi
-    # 闸门二：提交过就跳过（跨开机生效，不再往网页塞新的 pending）
-    if _enroll_submitted_recently; then
-        log "[ENROLL] 已提交过注册，跳过重复提交（$(_enroll_wait_desc)）"
+        log "[ENROLL] 本次开机已提交过注册，跳过重复提交（想再试一次请重启设备）"
         return 0
     fi
     _ENROLL_TRIED=1

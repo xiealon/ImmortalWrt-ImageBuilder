@@ -2726,10 +2726,13 @@ apply_cfg() {
     ct_exists
 }
 
-# 【v.108.55】容器包的完整性校验：只在「真要解压」时做一次。
-# 为什么不进 guard 的每分钟循环：它是 107 MB，每轮 cmp 至少一两秒、每分钟读 107 MB，
-# eMMC 扛不住；而它只在重建 rootfs 时才被用到。权威副本是 /rom 那份 ——
-# 编译期进 squashfs，运行期根本改不了，所以「与它逐字节一致」就是没被换过的证明。
+# 【v.108.55】容器包的工作副本：重建 rootfs 前一律用 /rom 只读原件覆盖重建。
+# 为什么不进 guard 的每分钟循环：107 MB，每轮 cmp 要一两秒、每分钟读 107 MB，eMMC 扛不住。
+# 为什么不做「先比较、不一致才覆盖」：/etc 那份是可写 overlay，它既可能被人换掉，
+# 也可能被 sysupgrade 从旧固件带过来的版本顶掉；只要还把它当半个信任源，
+# 就得维护一条「怎么判断它坏没坏」的判据，而这条判据本身就是新的出错点。
+# 唯一真相是 /rom 那份（编译期进 squashfs，运行期改不了），直接以它为准最省心：
+# 重建本来就要解压 288 MB，为省一次 107 MB 写去多养一条判据并不划算。
 ROM_TARBALL="${CS_ROM_TARBALL:-/rom$CS_HOME/lxc-crowdsec.tar.gz}"
 
 _tarball_usable() {
@@ -2740,24 +2743,20 @@ _tarball_usable() {
 }
 
 _ensure_tarball_intact() {
-    # ① 与 /rom 逐字节一致 = 没被换过。用 cmp 不用 sha256：
-    #    107 MB 在弱 CPU 上算哈希要好几秒，cmp 不同就立刻返回。
-    if [ -f "$ROM_TARBALL" ] && cmp -s "$TARBALL" "$ROM_TARBALL"; then
-        log "[包] 与固件只读副本一致（$(ls -l "$TARBALL" 2>/dev/null | awk '{print $5}') 字节）"
-        return 0
-    fi
-    # ② 不符或缺失：用 /rom 那份覆盖。只读层不可能被改，它是权威来源。
+    # 以 /rom 为唯一真相：先删掉可写副本，再从只读原件拷一份出来。
+    # 这里不做「是否被改」的判断 —— 重建前一律重置，「用过即重置」比「检测再修」简单，
+    # 也避开「判据本身出错」这一类问题。cmp 只用来确认「拷完是完整的」，不参与决策。
     if [ -f "$ROM_TARBALL" ] && [ -s "$ROM_TARBALL" ]; then
-        log "[包] 与固件副本不符或缺失 → 用 /rom 只读副本还原"
+        rm -f "$TARBALL"
         if cp -f "$ROM_TARBALL" "$TARBALL" 2>/dev/null && cmp -s "$TARBALL" "$ROM_TARBALL"; then
-            log "[包] 还原完成，校验通过"
+            log "[包] 已从 /rom 只读原件重建工作副本（$(ls -l "$TARBALL" 2>/dev/null | awk '{print $5}') 字节）"
             return 0
         fi
-        log "[包] 还原失败：写 $TARBALL 出错，或还原后仍不符"
+        log "[包] 从 /rom 重建工作副本失败（写 $TARBALL 出错，或拷贝不完整）"
         return 1
     fi
-    # ③ 固件里压根没有副本（老固件只有 lxc-ubuntu.tar.gz 时才可能走到这里）：
-    #    退化成结构自检 —— 能列出目录才继续，但来源无法证明，日志里如实说明。
+    # 固件里压根没有副本（老固件只有 lxc-ubuntu.tar.gz 时才可能走到这里）：
+    # 只能退化成结构自检 —— 能列出目录才继续，但来源无法证明，日志里如实写。
     if _tarball_usable; then
         log "[包] 固件里没有 /rom 副本，仅通过 gzip 结构自检（来源无法证明）"
         return 0

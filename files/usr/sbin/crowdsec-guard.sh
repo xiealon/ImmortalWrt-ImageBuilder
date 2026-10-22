@@ -111,6 +111,33 @@ GUARD_CT_PREFIX="/srv/lxc/ubuntu/rootfs"
 GUARD_CT_BASE="${CS_GUARD_CT_BASE:-/srv/lxc/ubuntu/base}"
 # 可写层（overlay upperdir）。审计段用它枚举「哪些文件被碰过」。
 GUARD_CT_UPPER="${CS_GUARD_CT_UPPER:-/overlay/lxc-upper}"
+
+# 【v.108.57】LAPI 持续监测。引导时 bootstrap 只在建容器那一轮探一次 8080，
+# 运行期没人管 —— 而 crowdsec 挂了、被禁、决策库被清，都不会让容器状态异常。
+# 白名单里的 /etc/crowdsec/* 不设防，但它们的「效果」可以观测：
+#   /health 通不通 + bouncer 还在不在拉 + 决策数有没有被清零。
+GUARD_LAPI_URL="${CS_GUARD_LAPI_URL:-http://10.1.0.10:8080}"
+GUARD_LXC_PATH="${CS_GUARD_LXC_PATH:-/srv/lxc}"
+GUARD_LXC_NAME="${CS_GUARD_LXC_NAME:-ubuntu}"
+# bouncer 名与 bootstrap 的 BOUNCER_NAME 默认值必须一致：
+# 不一致的表现是「列表里没有这个 bouncer」，而真实原因是查错了名字。
+GUARD_BOUNCER="${CS_GUARD_BOUNCER:-openwrt-fw}"
+GUARD_TS_RE='[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
+GUARD_LAPI_AUDIT="${CS_GUARD_LAPI_AUDIT:-1}"
+# 300s：guard 本身被探针每 60s 调一次，而 LAPI 检查每次要 attach 两回。
+# 心跳是 10s 一次，60s 阈值下 300s 的采样间隔足够抓到真停滞，又不至于把
+# 「一次网络抖动」放大成日志洪水。
+GUARD_LAPI_INTERVAL="${CS_GUARD_LAPI_INTERVAL:-300}"
+GUARD_LAPI_STATE="${CS_GUARD_LAPI_STATE:-/root/.crowdsec-guard-lapi}"
+
+# last_pull 新鲜度：常量必须与 bootstrap 的 _BP_PULL_* 同版（当前 10s × 6 = 60s）。
+# 为什么不是 600s：bouncer 心跳 10s，连续丢 6 个周期已经是强信号；防抖由探针的
+# CS_PROBE_STALL_ROUNDS（连续 3 轮才动手）负责，guard 这边只做「看见」。
+# 两处常量写错一处的后果很隐蔽：日志写着 60s、实际按别的数判 —— 正是本脚本一直在防的
+# 那类「不报错、只给错误答案」。改这里之前先看 bootstrap 的 _BP_PULL_INTERVAL/_MISS。
+GUARD_PULL_INTERVAL=10
+GUARD_PULL_MISS=6
+GUARD_PULL_MAX_AGE="${CS_GUARD_PULL_MAX_AGE:-$((GUARD_PULL_INTERVAL * GUARD_PULL_MISS))}"
 GUARD_CT_FILES="${CS_GUARD_CT_FILES:-
 /etc/passwd
 /etc/group
@@ -168,6 +195,149 @@ _glog() {
 # 三道刹车：① base 里没有的新文件一律不动；② 单轮复原上限 OVL_FIX_MAX，超出只记录；
 # ③ 每次复原都回读 cmp，失败单独记账，绝不在没修好时报「已复原」。
 OVL_FIX_MAX="${CS_GUARD_OVL_FIX_MAX:-20}"
+
+# 容器内执行：单条命令形式（cscli 之类），路径由调用方给全。
+_ct_run() {
+    lxc-attach -P "$GUARD_LXC_PATH" -n "$GUARD_LXC_NAME" -- "$@" 2>/dev/null
+}
+
+# 容器内执行：带一个参数的小脚本。
+# 用 sh -c '...' -- "$1" 而不是把参数拼进脚本文本 —— 时间串里有空格和冒号，
+# 拼进去就要处理引号，而引号在这里出错的后果是「判不了」，且只在某些时间值上出现。
+_ct_shell() {
+    lxc-attach -P "$GUARD_LXC_PATH" -n "$GUARD_LXC_NAME" -- /bin/sh -c "$1" -- "$2" 2>/dev/null
+}
+
+# 【v.108.57】last_pull 新鲜度：封禁到底有没有下发到防火墙，只有这一条能证明。
+# 与 bootstrap 的 bouncer_pulling 判定同一口径，但**自己算一遍**，不复用那套输出：
+# 探针拿 rc 当「在拉」直接清零停滞计数，它判不了时会放过（R12 有意为之）；
+# guard 的处境不同 —— 它不修任何东西，所以「判不了」必须写进日志，否则就真的没人知道了。
+# 时间比较全部在容器内完成（date +%s 与 date -d 都走容器）：设备时钟偏过 8 小时，
+# 一边用宿主时钟、一边用容器时间戳，算出来的「年龄」会是任意值。
+_lapi_pull_check() {
+    _def=$((GUARD_PULL_INTERVAL * GUARD_PULL_MISS))
+    _max="$GUARD_PULL_MAX_AGE"
+    case "$_max" in
+    ''|*[!0-9]*)
+        _glog "【LAPI】CS_GUARD_PULL_MAX_AGE='$_max' 不是数字，回落默认 ${_def}s"
+        _max="$_def"
+        ;;
+    esac
+    if [ "$_max" -le 0 ]; then
+        _glog "【LAPI】last_pull 新鲜度检查已按配置关闭（阈值 $_max，这是放行，不是判定为新鲜）"
+        return 0
+    fi
+
+    _list="$(_ct_run /usr/bin/cscli bouncers list)"
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        _glog "【LAPI】lxc-attach 执行 cscli bouncers list 失败（rc=$_rc：容器未运行 / cscli 缺失）—— last_pull 判不了，这不是「新鲜」"
+        return 0
+    fi
+    if [ -z "$_list" ]; then
+        _glog "【LAPI】cscli bouncers list 回显为空 —— last_pull 判不了，这不是「新鲜」"
+        return 0
+    fi
+    if ! printf '%s\n' "$_list" | grep -qE "^[[:space:]]*${GUARD_BOUNCER}[[:space:]]"; then
+        _glog "【LAPI】bouncer 列表里没有 ${GUARD_BOUNCER}（未注册 / 被删 / 名字写错）—— 封禁不会下发，请核查"
+        return 0
+    fi
+
+    _lp="$(printf '%s\n' "$_list" | grep -E "^[[:space:]]*${GUARD_BOUNCER}[[:space:]]" | grep -oE "${GUARD_TS_RE}Z?" | head -n 1)"
+    if [ -z "$_lp" ]; then
+        _glog "【LAPI】bouncer ${GUARD_BOUNCER} 的行里取不到 last_pull 时间列（cscli 输出格式变了？）—— 判不了，这不是「新鲜」"
+        return 0
+    fi
+
+    # busybox 的 date -d 不吃带 T/Z 的 ISO8601（bootstrap v.108.44 的真机事故：
+    # 格式没规整 → _at 恒空 → 检查从上线起就没真正执行过，日志还写着「判不了」）。
+    # 这里同样先规整：T 换空格、去掉尾部 Z。容器无 tzdata、本地即 UTC，两种写法等价。
+    _norm="$(printf '%s' "$_lp" | sed -e 's/T/ /' -e 's/Z$//')"
+    _times="$(_ct_shell 'date +%s; date -u -d "$1" +%s 2>/dev/null || date -d "$1" +%s' "$_norm")"
+    _now="$(printf '%s\n' "$_times" | sed -n '1p')"
+    _at="$(printf '%s\n' "$_times" | sed -n '2p')"
+    # 两种失败分开报：「容器内 date 回显为空」和「格式不认」是两件事，
+    # 混成一句会把排查方向带偏（真机日志就这么误导过：now=[…] at=[] 被写成「date 不可用」）。
+    case "$_now" in
+    ''|*[!0-9]*)
+        _glog "【LAPI】last_pull 判不了（容器内 date +%s 回显异常：[$_now]），这不是「新鲜」"
+        return 0
+        ;;
+    esac
+    case "$_at" in
+    ''|*[!0-9]*)
+        _glog "【LAPI】last_pull 判不了（容器内 date 解析不了 [$_lp]，规整后 [$_norm]），这不是「新鲜」"
+        return 0
+        ;;
+    esac
+
+    _age=$((_now - _at))
+    # 年龄为负 = last_pull 在「未来」。这既不是新鲜也不是停滞，是时钟不可信，
+    # 按任何一种判都会得出错误结论，所以单独报一句。
+    if [ "$_age" -lt 0 ]; then
+        _glog "【LAPI】last_pull 在 ${_age#-}s 之后（容器时钟被回拨？）—— 判不了，这不是「新鲜」"
+        return 0
+    fi
+    if [ "$_age" -gt "$_max" ]; then
+        _glog "【LAPI】bouncer ${GUARD_BOUNCER} last_pull 停滞 ${_age}s（最后一次 $_lp，阈值 ${_max}s）—— 封禁未下发，请核查 bouncer 进程与 ${GUARD_LAPI_URL} 的连通性"
+    fi
+    return 0
+}
+
+# 【v.108.57】LAPI 旁证：白名单里的文件不设防，但它们的「效果」可以观测。
+# 三个判据，按可信度排序：
+#   ① /health 必须从宿主探 —— 容器内 curl 127.0.0.1 永远通，即使 LAPI 只听回环；
+#   ② last_pull 必须新鲜 —— 「封禁有没有真的下发」只有这一条能证明；
+#   ③ 决策数从 >0 归零要报 —— 清库最典型的特征。
+# ③ 有误报可能：封禁都有 duration，全部自然到期也会归零。所以措辞是「请核查」，
+# 不是「已被篡改」。宁可让人去查一次，也不要假装没看见。
+# 降频：每 GUARD_LAPI_INTERVAL 秒（默认 300）才探一次，避免每 60 秒 attach 一次。
+# 这里只记录、不修：修是探针的活（重跑引导 + 冷却 + 连续失败记账），
+# guard 抢着修会和它各跑一次引导，反而制造并发问题。
+_lapi_audit() {
+    [ "$GUARD_LAPI_AUDIT" = "1" ] || return 0
+    # 容器没就位（overlay 未挂）时，LAPI 探测只会产出一堆「不可达」噪声。
+    [ "$_CT_OK" = "1" ] || return 0
+    command -v wget >/dev/null 2>&1 || return 0
+    command -v lxc-attach >/dev/null 2>&1 || {
+        _glog "【LAPI】缺少 lxc-attach，无法核查 LAPI 与 last_pull（这不是「正常」）"
+        return 0
+    }
+    _lnow="$(date +%s 2>/dev/null)"
+    case "$_lnow" in ''|*[!0-9]*) return 0 ;; esac
+    _llast=0
+    [ -s "$GUARD_LAPI_STATE.ts" ] && _llast="$(cat "$GUARD_LAPI_STATE.ts" 2>/dev/null)"
+    case "$_llast" in ''|*[!0-9]*) _llast=0 ;; esac
+    [ $((_lnow - _llast)) -ge "$GUARD_LAPI_INTERVAL" ] || return 0
+    printf '%s\n' "$_lnow" >"$GUARD_LAPI_STATE.ts" 2>/dev/null
+
+    # ① 健康：从宿主探 10.1.0.10:8080。不通就到此为止 —— 链路本身断了，
+    # 再报 last_pull 停滞只是把同一个原因说两遍。
+    if ! wget -qO- --timeout=3 "$GUARD_LAPI_URL/health" 2>/dev/null | grep -q '"status"'; then
+        _glog "【LAPI】$GUARD_LAPI_URL/health 不可达 —— 容器未跑 / crowdsec 已停 / 8080 未对外开放"
+        return 0
+    fi
+
+    # ② last_pull
+    _lapi_pull_check
+
+    # ③ 决策数：cscli 是事实来源，DB 只是缓存
+    _out="$(_ct_run /usr/bin/cscli decisions list -o json)"
+    if [ $? -ne 0 ]; then
+        _glog "【LAPI】cscli decisions list 执行失败（容器内 cscli 被破坏 / LAPI 拒绝该凭据）—— 请人工核查"
+        return 0
+    fi
+    _cur="$(printf '%s\n' "$_out" | grep -c '"id"')"
+    case "$_cur" in ''|*[!0-9]*) _cur=0 ;; esac
+    _prev=""
+    [ -s "$GUARD_LAPI_STATE" ] && _prev="$(cat "$GUARD_LAPI_STATE" 2>/dev/null)"
+    case "$_prev" in ''|*[!0-9]*) _prev="" ;; esac
+    if [ -n "$_prev" ] && [ "$_prev" -gt 0 ] && [ "$_cur" -eq 0 ]; then
+        _glog "【LAPI】决策数从 $_prev 归零（可能是封禁全部到期，也可能是 decisions.db 被清空）—— 请核查"
+    fi
+    printf '%s\n' "$_cur" >"$GUARD_LAPI_STATE" 2>/dev/null
+    return 0
+}
 
 _ovl_audit() {
     _ab="$ROM_DIR$GUARD_CT_BASE"
@@ -354,5 +524,8 @@ done
 
 # 只在容器组通过前置门（rootfs 已就位）时审计，否则 upper 内容没有参照意义。
 [ "$_CT_OK" = "1" ] && _ovl_audit
+
+# LAPI 段自带降频（默认 300s），所以这里无条件调用；容器未就位时函数内部直接返回。
+_lapi_audit
 
 exit 0

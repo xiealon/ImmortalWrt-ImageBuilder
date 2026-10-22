@@ -1945,6 +1945,14 @@ fw4 默认按 tcpudp 编译，ICMP 落在规则外）。现在每次 firewall re
 `cscli console status`（输出里 `Central API (CAPI) ❌ not registered` 就是未注册），
 拿不到再退回 `capi status`；两次调用都带 `timeout 10`，网络不好时不会挂住引导。
 
+### ⑦ enroll 的两个补丁（同上，v.108.50）
+
+* `verify_enroll` 发现「console 已注册、注册码却还在」时顺手删掉明文 key：
+  人工 enroll 过、或上一版脚本漏删都会留下这个文件，而固件是公开下载的，
+  明文 key 留在设备上没有意义。
+* `--verify-only`（探针每 30 轮的体检）开头置 `_VERIFY_ONLY=1`：体检承诺
+  「一个字节都不写」，上面那步删除在体检里必须关掉，否则「只读」就成了空话。
+
 # crowdsec 引导流程图
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)

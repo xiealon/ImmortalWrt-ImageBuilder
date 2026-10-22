@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-22.108.59-bp"
+SCRIPT_VER="2026-10-22.108.61-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -116,6 +116,15 @@ RESET_BOOT_FILE="$STATE_DIR/reset_boot"
 # 不能把它当成「又一次失败」拒掉；但真遇到每解压必断电的环境，也要有个上限收口。
 INTR_FILE="$STATE_DIR/reinstall_intr"
 INTR_MAX="${CS_BOOTSTRAP_INTR_MAX:-3}"
+# 【v.108.61】LAPI 自愈第三档（丢可写层）的记账：一行 = <boot_id> <次数> <上次时刻> <诊断签名>
+# 三个门缺一不可，理由见 _l3_gate：
+#   次数 —— 锚在 boot_id 上，只有「重启设备」才归零；**「恢复」不归零**。
+#           若拿「恢复正常」当重置条件，就会变成「坏→丢层→好→再坏→再丢」的周期性抹盘。
+#   时间 —— 两次丢层至少隔 6 小时，挡的是「重启循环里每次开机都白得一次机会」。
+#   签名 —— 同一个根因上次丢完没好，再丢一次不会有不同结果（v.106 那条原则的延伸）。
+L3_STATE="$STATE_DIR/reinstall_l3"
+L3_MAX="${CS_BOOTSTRAP_L3_MAX:-1}"
+L3_GAP="${CS_BOOTSTRAP_L3_GAP:-21600}"
 # 【v.108.21】柔性节点：build 修不回来时只记账、不中止引导。
 # 只给「差一点点时机」的节点用，不能拿来掩盖真故障：
 #   bouncer_verify 要的是「bouncer 已经成功拉过一次 LAPI」，而首次心跳有 10s 周期延迟，
@@ -2171,7 +2180,17 @@ verify_lapi_fetch() {
 }
 build_lapi_fetch() {
     # 【v.108.21】先把 8080 真正打开（含老容器「文件改了但进程没重读」的兜底重启）
-    _ensure_lapi_exposed || { log "[LAPI] 8080 无法对路由器开放，LAPI 环节失败"; return 1; }
+    # 【v.108.61】打不开就进自愈阶梯：第 0 档已经在 _ensure_lapi_exposed 里试过
+    # （校正 listen_uri + 重启进程 + 等待），仍不通说明不是「文件对不对」的问题，
+    # 而是配置/规则/进程/资源层面的问题。阶梯按证据一级级加代价，见 _lapi_ladder。
+    if ! _ensure_lapi_exposed; then
+        log "[LAPI] 8080 无法对路由器开放，LAPI 环节失败；进入自愈阶梯（v.108.61）"
+        if _lapi_ladder; then
+            log "[LAPI] 自愈阶梯已使 8080 可达，继续读取凭证"
+        else
+            return 1
+        fi
+    fi
     # 等 LAPI 起（最多 MAX_WAIT 秒，SLEEP 步长），拿到 cscli 回显即认为就绪
     _w=0
     while [ "$_w" -lt "$MAX_WAIT" ]; do
@@ -3762,6 +3781,235 @@ _reinstall_diag() {
     return 0
 }
 
+# =====================================================================
+# 【v.108.61】LAPI 起不来时的自愈阶梯（三档，逐级加代价）
+#
+# 触发位置：build_lapi_fetch 开头。第 0 档（校正 listen_uri + 重启容器内 crowdsec）
+# 建在 _ensure_lapi_exposed 里，已经试过仍不通才进到这里。
+#
+# 为什么要有这个阶梯：原来「LAPI 起不来但文件和配置都正常」是死路 —— 各 verify 都通过
+# （它们验的是「文件内容对不对」），build 也改不动什么，于是 hard 退出、探针 5 次后
+# 停手，机器一直坏到有人重启。而重启一次之所以有用，是因为首跑额度给了「丢可写层」。
+# 这个阶梯做的事就是：把「重启才有的那次机会」提前到运行期，但必须带证据与额度。
+#
+# 三档的分工（不是「越修越猛」，是「按证据选手段」）：
+#   第 1 档  只读诊断：容器内跑 crowdsec -t。它通过 = 配置与 hub 规则都没坏，那么
+#            「起不来」只可能是进程状态 / 资源 / 网络；它不通过 = 直接指出坏在哪一类。
+#   第 2 档  对症处置：bad-yaml → cscli hub update/upgrade（规则库，非破坏性）；
+#            bad-db → 移走 decisions.db 让它重建（决策库只是缓存）。
+#            这两条都不碰可写层，也不需要重启设备。
+#   第 3 档  丢可写层 → 回到只读基底。**只在「-t 通过 + 资源正常 + 三闸全过」时放行**。
+#            -t 不通过说明是配置/规则坏，那是第 2 档的活，此时丢层等于抹掉证据。
+#
+# 一条贯穿的原则：enroll 完全不参与。它要联网、要人在网页点 Accept，不确定性太大；
+# 它掉线不影响 LAPI 链路，也不该让自愈逻辑做任何破坏性动作。
+
+# ---- 第 1 档：只读诊断 ----
+# 结果放全局变量（不用 echo：log 也写 stdout，命令替换会把日志当结果收走）
+_LCT_RC=2
+_LCT_SIG="no-out"
+_lapi_cfg_test() {
+    _lct_out="$STATE_DIR/lapi_cfgtest.log"
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    _LCT_RC=2
+    _LCT_SIG="no-out"
+    rm -f "$_lct_out" 2>/dev/null
+    if ! ct_running; then
+        log "[自愈] 容器未运行，跑不了 crowdsec -t（诊断不可用）"
+        return 0
+    fi
+    _ct_env 'test -x /usr/bin/crowdsec' >/dev/null 2>&1 || {
+        log "[自愈] 容器内 /usr/bin/crowdsec 不可执行，跑不了 crowdsec -t（诊断不可用）"
+        return 0
+    }
+    _ct_env '/usr/bin/crowdsec -t -c /etc/crowdsec/config.yaml' >"$_lct_out" 2>&1
+    _LCT_RC=$?
+    _LCT_SIG="$(_l3_sig_of "$_lct_out")"
+    log "[自愈] 第 1 档：crowdsec -t 退出码 $_LCT_RC，诊断签名 $_LCT_SIG（详见 $_lct_out）"
+    return 0
+}
+
+# 把「crowdsec -t 说了什么」压成一个短标签。
+# 为什么要签名而不只看退出码：同一个根因重复丢层不会有不同结果，所以
+# 「上次丢完还坏、签名又一模一样」必须直接停手（见 _l3_gate 第四道门）。
+_l3_sig_of() {
+    _lsf="$1"
+    [ -s "$_lsf" ] || { printf 'no-out\n'; return 0; }
+    if grep -qiE 'yaml:|unable to parse|cannot unmarshal|invalid configuration' "$_lsf" 2>/dev/null; then
+        printf 'bad-yaml\n'
+    elif grep -qiE 'database|sqlite|unable to open|disk i/o error|database is locked' "$_lsf" 2>/dev/null; then
+        printf 'bad-db\n'
+    elif grep -qiE 'no such file|permission denied' "$_lsf" 2>/dev/null; then
+        printf 'bad-fs\n'
+    else
+        # 兜底：拿前 3 行非空内容做摘要。不同的坏法不能被归成同一个签名，
+        # 否则第四道门会把「换了根因」误判成「老问题没解决」而拒绝自愈。
+        printf 'other-%s\n' "$(grep -v '^[[:space:]]*$' "$_lsf" 2>/dev/null | head -n 3 | md5sum 2>/dev/null | cut -c1-8)"
+    fi
+}
+
+# ---- 第 2 档：按签名对症 ----
+_lapi_fix_by_sig() {
+    case "$1" in
+    bad-yaml)
+        # hub 规则坏 / 版本对不上：整仓重下。这是「更新规则库」的正常操作，不是破坏动作。
+        log "[自愈] 第 2 档：诊断 bad-yaml → 重跑 cscli hub update / upgrade"
+        _ct_env '/usr/bin/cscli hub update'  >/dev/null 2>&1
+        _ct_env '/usr/bin/cscli hub upgrade' >/dev/null 2>&1
+        ;;
+    bad-db)
+        # 决策库是缓存（cscli 才是事实来源），移走让它自己重建，原文件留 .l3bak 备查。
+        # 不碰 machines.db —— 里面是 bouncer 注册记录，丢了要让 LAPI 先起来才能重注册，
+        # 而这正是此刻做不到的事。
+        log "[自愈] 第 2 档：诊断 bad-db → 移走 decisions.db 让 crowdsec 重建（原文件留 .l3bak-<ts>）"
+        _ct_env 'f=/var/lib/crowdsec/data/decisions.db; [ -f "$f" ] && mv -f "$f" "$f.l3bak-$(date +%s)"' >/dev/null 2>&1
+        ;;
+    bad-fs)
+        log "[自愈] 第 2 档：诊断 bad-fs（缺文件/权限）—— 不自动处置，交 guard 与人工"
+        return 1
+        ;;
+    *)
+        log "[自愈] 第 2 档：诊断 $1 无对症处置（配置/规则/库都未见坏）"
+        return 1
+        ;;
+    esac
+    # 换了文件必须让进程重读：同 _cs_cfg_audit 的道理，改文件不等于进程认了
+    _ct_restart_crowdsec || log "[自愈] 容器内 crowdsec 重启失败（第 2 档处置后）"
+    return 0
+}
+
+# ---- 第三档的资源门 ----
+# 磁盘满 / inode 耗尽时丢可写层不只无解，还更糟：重建要写更多数据。
+# 读不到容量不拦（无据可依时不该替人做否定判断），但必须记一句。
+_l3_res_gate() {
+    _lr_avail="$(df -k "$OVL_UPPER" 2>/dev/null | awk 'NR==2{print $4}')"
+    case "$_lr_avail" in
+    ''|*[!0-9]*)
+        log "[自愈] 第三档：读不到可写层可用空间，不拦（但这意味着无法排除磁盘满）"
+        ;;
+    *)
+        if [ "$_lr_avail" -lt 32768 ]; then
+            log "[自愈] 第三档被拒：可写层所在分区仅剩 ${_lr_avail}KB（<32MB），重建无从谈起"
+            return 1
+        fi
+        ;;
+    esac
+    return 0
+}
+
+# ---- 第三档的三道门 ----
+_l3_load() {
+    L3_BI=""; L3_N=0; L3_TS=0; L3_SIG=""
+    [ -s "$L3_STATE" ] || return 0
+    read -r L3_BI L3_N L3_TS L3_SIG <"$L3_STATE" 2>/dev/null || true
+    case "$L3_N" in ''|*[!0-9]*) L3_N=0 ;; esac
+    case "$L3_TS" in ''|*[!0-9]*) L3_TS=0 ;; esac
+    return 0
+}
+
+_l3_gate() {
+    _lg_sig="$1"
+    _l3_load
+    _lg_bi="$(_cur_boot_id)"
+    # ① 开机门：**唯一**的重置口。恢复正常不重置，额度按开机记账。
+    if [ -z "$_lg_bi" ]; then
+        log "[自愈] 第三档被拒：读不到 boot_id，无据可依时不做破坏性动作"
+        return 1
+    fi
+    if [ "$L3_BI" != "$_lg_bi" ]; then
+        [ -n "$L3_BI" ] && log "[自愈] 新的一次开机（boot_id 变了），第三档次数归零"
+        L3_N=0
+    fi
+    # ② 次数门
+    if [ "$L3_N" -ge "$L3_MAX" ]; then
+        log "[自愈] 第三档被拒：本次开机已用（$L3_N/$L3_MAX 次）。恢复不会刷新额度，只有重启设备才会"
+        return 1
+    fi
+    # ③ 时间门：防「重启循环里每次开机都白得一次」
+    _lg_now="$(date +%s 2>/dev/null)"
+    case "$_lg_now" in ''|*[!0-9]*) _lg_now=0 ;; esac
+    if [ "$L3_TS" -gt 0 ] && [ "$_lg_now" -gt 0 ]; then
+        _lg_gap=$((_lg_now - L3_TS))
+        if [ "$_lg_gap" -lt "$L3_GAP" ]; then
+            log "[自愈] 第三档被拒：距上次丢可写层 ${_lg_gap}s，未满 ${L3_GAP}s（防重启循环反复抹盘）"
+            return 1
+        fi
+    fi
+    # ④ 签名门
+    if [ -n "$L3_SIG" ] && [ "$L3_SIG" = "$_lg_sig" ]; then
+        log "[自愈] 第三档被拒：上次丢可写层时签名也是 $_lg_sig 且没修好 —— 同一根因再丢一次不会有不同结果"
+        return 1
+    fi
+    printf '%s %s %s %s\n' "$_lg_bi" "$((L3_N + 1))" "$_lg_now" "$_lg_sig" \
+        | atomic_write "$L3_STATE" "" 2>/dev/null \
+        || log "[自愈] 第三档记账写入失败（$L3_STATE），本次仍只做这一遍"
+    log "[自愈] 第三档放行：本次开机第 $((L3_N + 1))/$L3_MAX 次，签名 $_lg_sig"
+    return 0
+}
+
+# ---- 第三档执行：丢可写层 ----
+# 与 full_reinstall 的区别只在「谁有资格调它」：那条走的是结构损坏 + 开机首跑，
+# 这条走的是 LAPI 阶梯的三道门。破坏动作本身完全一致 —— 基底只读不动，
+# 丢 upper/work 即回到构建时验证过的状态。
+_l3_reset_overlay() {
+    log "[自愈] 第三档：丢可写层，回到只读基底（回不来的东西：hub 更新、决策库、日志、machines 记录）"
+    _cred_backup || log "[自愈] 凭证备份失败，继续 —— bouncer_fill 会重新注册"
+    ct_force_stop || { log "[自愈] 容器强停失败，放弃丢层（现场一个字节没动）"; return 1; }
+    _overlay_umount || log "[自愈] overlay 卸载未成功，继续尝试抹除"
+    rm -rf "$OVL_UPPER" "$OVL_WORK" 2>/dev/null \
+        || { log "[自愈] 可写层抹除失败，放弃"; return 1; }
+    : > "$REINSTALL_PENDING_FILE" 2>/dev/null || log "[自愈] 未完成标记写入失败（断电将漏计一次）"
+    export CS_BOOTSTRAP_REINSTALL=1
+    _bs_reexec
+    return 1
+}
+
+# ---- 阶梯主入口 ----
+# 返回 0 = 已修好（调用方继续走正常流程）；1 = 没修好（调用方按原逻辑记失败）
+_lapi_ladder() {
+    # 重装后重跑时不再进阶梯：否则「丢层 → 重跑 → 又丢层」就是递归
+    if [ "${CS_BOOTSTRAP_REINSTALL:-0}" = "1" ]; then
+        log "[自愈] 本次已是重装后流程，阶梯不再介入"
+        return 1
+    fi
+    # 立即再探一次：第 0 档重启进程可能刚好生效，别急着上诊断
+    if verify_lapi_reachable; then
+        log "[自愈] 重启进程后 8080 已通，阶梯到此为止"
+        return 0
+    fi
+    _lapi_cfg_test
+    case "$_LCT_RC" in
+    0)
+        log "[自愈] 配置与规则经 -t 校验均无问题 → 问题不在文件层"
+        ;;
+    2)
+        log "[自愈] 诊断不可用，跳过第 2 档；第三档仍需资源与三闸放行"
+        ;;
+    *)
+        if _lapi_fix_by_sig "$_LCT_SIG"; then
+            if _wait_lapi_ready "$MAX_WAIT" && verify_lapi_reachable; then
+                log "[自愈] 第 2 档处置生效，8080 已通"
+                return 0
+            fi
+            log "[自愈] 第 2 档处置后仍不通"
+        fi
+        ;;
+    esac
+    # 证据门：-t 不通过就是配置/规则坏，丢可写层只会把证据抹掉
+    if [ "$_LCT_RC" != "0" ] && [ "$_LCT_RC" != "2" ]; then
+        log "[自愈] crowdsec -t 仍不通过（rc=$_LCT_RC，签名 $_LCT_SIG）→ 属配置/规则问题，不做第三档"
+        return 1
+    fi
+    [ -d "$ROM_BASE" ] || {
+        log "[自愈] 无只读基底（$ROM_BASE），第三档不可用（老固件只能走镜像解压）"
+        return 1
+    }
+    _l3_res_gate || return 1
+    _l3_gate "$_LCT_SIG" || return 1
+    _l3_reset_overlay
+    return 1
+}
+
 # 结构性损坏判定（v.106 起：自动重装的唯一理由）
 # 为什么要有这个函数：修复动作就是脚本的全部能力。「脚本修了还是不行」只说明
 # 修复能力对自己负责的那些配置项失效了，不说明容器需要重建 —— 重装跑的是同一套
@@ -5029,7 +5277,20 @@ audit_wan_purged() {
 _audit_all() {
     _ab=0
     _an=0
+    _askip=0
     for _n in $DAG_NODES; do
+        # 【v.108.61】enroll 不纳入体检：它要联网、要人在 app.crowdsec.net 点 Accept，
+        # 不确定性太大。而且 --verify-only 是独立进程，_ENROLL_TRIED 恒为 0 →
+        # 只要「有注册码且尚未注册」就恒返回 1，体检于是**永远**报不符，
+        # 探针每 30 轮（≈30 分钟）白跑一次完整引导，日志里还看不出原因。
+        # 必须打「跳过」而不是「OK」：把没验的报成达标，就是「不报错、只给错误答案」。
+        case "$_n" in
+        enroll)
+            printf '[审计] %-16s 跳过（需联网，不入体检；注册状态见引导日志）\n' "$_n"
+            _askip=$((_askip + 1))
+            continue
+            ;;
+        esac
         _an=$((_an + 1))
         if "verify_$_n" >/dev/null 2>&1; then
             printf '[审计] %-16s OK\n' "$_n"
@@ -5045,7 +5306,9 @@ _audit_all() {
         printf '[审计] %-16s 不符\n' "wan_purged"
         _ab=$((_ab + 1))
     fi
-    printf '[审计] 共 %s 项，不符 %s 项\n' "$_an" "$_ab"
+    printf '[审计] 共 %s 项，不符 %s 项' "$_an" "$_ab"
+    [ "$_askip" -gt 0 ] && printf '（另有 %s 项跳过：enroll 需联网）' "$_askip"
+    printf '\n'
     [ "$_ab" -eq 0 ]
 }
 

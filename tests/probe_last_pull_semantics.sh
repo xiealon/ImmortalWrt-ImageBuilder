@@ -15,10 +15,13 @@ BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
 # 只含活代码的副本：整行注释（行首可有空白 + #）不算命中。
 # 注释里提到某关键字（例如记录「曾经 disable lxc-auto」）不该被断言当成
 # 「代码里在做这件事」，否则断言会假红或假绿。断言一律 grep 这份副本。
-BS_C="$(mktemp)"
-grep -v '^[[:space:]]*#' "$BS" > "$BS_C"
-trap 'rm -f "$BS_C"' EXIT INT TERM
-TMPD=$(mktemp -d "${TMPDIR:-/tmp}/r12.XXXXXX")
+BS_C="$REPO/tests/.r12.body.$$"
+grep -v '^[[:space:]]*#' "$BS" > "$BS_C" || { echo "FATAL: 无法生成活代码副本"; exit 2; }
+# 不用 mktemp：本机 busybox-w32 下 $TMPDIR 为空时模板解析成空串，
+# mktemp -d 直接失败、TMPD 变空，后续路径退化到 C 盘根（同 probe_guard R13 那次踩坑）。
+TMPD="$REPO/tests/.r12.$$"
+rm -rf "$TMPD"; mkdir -p "$TMPD" || { echo "FATAL: 无法创建 $TMPD"; exit 2; }
+trap 'rm -rf "$TMPD" "$BS_C"' EXIT INT TERM
 R=0
 ck() { if [ "$2" = "$3" ]; then echo "PASS: $1"; else echo "FAIL: $1 got=[$2] want=[$3]"; R=$((R+1)); fi; }
 
@@ -41,17 +44,28 @@ L_NEAR_OK="  crowdsec-firewall-bouncer  10.0.0.201 ${NEAR_OK}Z ok"
 L_NEAR_BAD="  crowdsec-firewall-bouncer  10.0.0.201 ${NEAR_BAD}Z ok"
 L_STALE="  crowdsec-firewall-bouncer  10.0.0.201 ${STALE}Z ok"
 L_FRESH="  crowdsec-firewall-bouncer  10.0.0.201 ${FRESH}Z ok"
+# 实现会把时间串规整成「T 换空格、去尾部 Z」再交给 date -d 算 epoch，
+# 所以桩必须按规整后的样子匹配（原来按带 T/Z 的原串匹配，永远打不中）。
+FRESH_N=$(printf '%s' "$FRESH" | sed 's/T/ /')
+NEAR_OK_N=$(printf '%s' "$NEAR_OK" | sed 's/T/ /')
+NEAR_BAD_N=$(printf '%s' "$NEAR_BAD" | sed 's/T/ /')
 # 桩必须匹配完整命令串（含尾部 +%s），否则 _at 取空、整条判定全走到"判不了"
 _ct_env() {
     case "$1" in
         "date +%s") echo "$NOW" ;;
-        "date -d '"*"' +%s")
+        # 【v.108.61】两处必须与实现同步，否则这套测试测的是它自己：
+        #   ① v.108.44 起实现先试 `date -u -d`，桩原来只认 `date -d`，
+        #      于是主路径永远落到 `*) return 1` 靠第二句兜底 —— 看着绿，其实没测主路径。
+        #   ② 实现传给 date 的是 `_lp_norm`（T 换空格、**去掉尾部 Z**），
+        #      桩原来按 `${FRESH}Z` 匹配，永远匹配不上 → 全落到 `*) 7200` 分支：
+        #      「真新鲜」被判成停滞，R12.1/R12.2/R12.13a 因此长期红着。
+        "date -u -d '"*"' +%s"|"date -d '"*"' +%s")
             [ "$DATE_D_RC" = 1 ] && return 1
             case "$1" in
-                *"${FRESH}Z"*)    echo $((NOW-60))  ;;
-                *"${NEAR_OK}Z"*)  echo $((NOW-50))  ;;
-                *"${NEAR_BAD}Z"*) echo $((NOW-90))  ;;
-                *)                echo $((NOW-7200)) ;;
+                *"${FRESH_N}"*)     echo $((NOW-60))  ;;
+                *"${NEAR_OK_N}"*)   echo $((NOW-50))  ;;
+                *"${NEAR_BAD_N}"*)  echo $((NOW-90))  ;;
+                *)                  echo $((NOW-7200)) ;;
             esac ;;
         *bouncers*) printf '%s\n' "$LIST" ;;
         *) return 1 ;;

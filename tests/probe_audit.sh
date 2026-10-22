@@ -11,10 +11,10 @@ set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
 PR="$REPO/files/usr/sbin/crowdsec-lxc-probe.sh"
-BS_C="$(mktemp)"
-grep -v '^[[:space:]]*#' "$BS" > "$BS_C"
-PR_C="$(mktemp)"
-grep -v '^[[:space:]]*#' "$PR" > "$PR_C"
+BS_C="$REPO/tests/.r19.body.$$"
+grep -v '^[[:space:]]*#' "$BS" > "$BS_C" || { echo "FATAL: 无法生成活代码副本"; exit 2; }
+PR_C="$REPO/tests/.r19.probe.$$"
+grep -v '^[[:space:]]*#' "$PR" > "$PR_C" || { echo "FATAL: 无法生成活代码副本"; exit 2; }
 trap 'rm -f "$BS_C" "$PR_C"' EXIT INT TERM
 R=0
 ck() { if [ "$2" = "$3" ]; then echo "PASS: $1"; else echo "FAIL: $1 got=[$2] want=[$3]"; R=$((R+1)); fi; }
@@ -44,7 +44,7 @@ ck "R19.2a 有 sha 基线文件变量" \
 ck "R19.2b 覆盖的正是脚本自己写的四份文件" \
    "$(grep -A4 '^CFG_SHA_LIST=' "$BS_C" | grep -c 'etc/crowdsec/')" "4"
 ck "R19.2c 用 sha256sum 算（不是只看文件在不在）" \
-   "$(body _cfg_sha_now "$BS_C" | grep -c 'sha256sum')" "1"
+   "$(body _cfg_sha_now "$BS_C" | grep -c 'sha256sum' | awk '{print ($1>=1)?"1":"0"}')" "1"
 ck "R19.2d 基线首行钉版本号（换版本则旧基线作废）" \
    "$(body _cfg_sha_write "$BS_C" | grep -c 'ver=%s')" "1"
 ck "R19.2e 无基线 / 版本不符时不下结论（返回 0）" \

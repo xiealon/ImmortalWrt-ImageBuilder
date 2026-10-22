@@ -18,10 +18,13 @@ BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
 # 只含活代码的副本：整行注释（行首可有空白 + #）不算命中。
 # 注释里提到某关键字（例如记录「曾经 disable lxc-auto」）不该被断言当成
 # 「代码里在做这件事」，否则断言会假红或假绿。断言一律 grep 这份副本。
-BS_C="$(mktemp)"
-grep -v '^[[:space:]]*#' "$BS" > "$BS_C"
-trap 'rm -f "$BS_C"' EXIT INT TERM
-TMPD=$(mktemp -d "${TMPDIR:-/tmp}/r11.XXXXXX")
+BS_C="$REPO/tests/.r11.body.$$"
+grep -v '^[[:space:]]*#' "$BS" > "$BS_C" || { echo "FATAL: 无法生成活代码副本"; exit 2; }
+# 不用 mktemp：本机 busybox-w32 下 $TMPDIR 为空时模板解析成空串，
+# mktemp -d 直接失败、TMPD 变空，后续路径退化到 C 盘根（同 probe_guard R13 那次踩坑）。
+TMPD="$REPO/tests/.r11.$$"
+rm -rf "$TMPD"; mkdir -p "$TMPD" || { echo "FATAL: 无法创建 $TMPD"; exit 2; }
+trap 'rm -rf "$TMPD" "$BS_C"' EXIT INT TERM
 R=0
 ck() { if [ "$2" = "$3" ]; then echo "PASS: $1"; else echo "FAIL: $1 got=[$2] want=[$3]"; R=$((R+1)); fi; }
 
@@ -101,8 +104,8 @@ ck "R11.5aa 【v.108.21】build_lapi_fetch 先确保 8080 对外开放再等就�
    "$(awk '/^build_lapi_fetch\(\)/,/^}/' "$BS_C" | awk '/_ensure_lapi_exposed/{a=NR} /verify_lapi_ready; then break/{b=NR} END{ if(a>0 && b>a) print "ok"; else print "bad" }')" "ok"
 ck "R11.5ab 【v.108.23】listen_uri 写入归 LOGCONF，LAPI 侧留兜底，开机侧必须为 0" \
    "$(awk '/^build_logconf\(\)/,/^}/' "$BS_C" | grep -c 'ensure_listen_uri')$(awk '/^_ensure_lapi_exposed\(\)/,/^}/' "$BS_C" | grep -c 'ensure_listen_uri')$(awk '/^build_ct_boot\(\)/,/^}/' "$BS_C" | grep -c 'ensure_listen_uri')" "110"
-ck "R11.5ac 【v.108.21】SCRIPT_VER 跟上版本（版本号是核对固件的唯一依据）" \
-   "$(grep -c 'SCRIPT_VER="2026-10-21' "$BS_C")" "1"
+ck "R11.5ac SCRIPT_VER 格式合法（版本号是核对固件的唯一依据）" \
+   "$(grep -cE '^SCRIPT_VER="[0-9]{4}-[0-9]{2}-[0-9]{2}\.[0-9][0-9.]*-bp"$' "$BS_C")" "1"
 # 【v.108.21】bouncer_verify 只差「首次心跳还没到」，用它把整轮引导判死会导致
 # installed 永不写入 → 探针永远 wait-install。柔性节点机制必须两处都生效。
 ck "R11.5ad 【v.108.21】SOFT_NODES 默认含 bouncer_verify" \

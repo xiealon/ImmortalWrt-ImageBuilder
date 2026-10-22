@@ -2726,9 +2726,51 @@ apply_cfg() {
     ct_exists
 }
 
+# 【v.108.55】容器包的完整性校验：只在「真要解压」时做一次。
+# 为什么不进 guard 的每分钟循环：它是 107 MB，每轮 cmp 至少一两秒、每分钟读 107 MB，
+# eMMC 扛不住；而它只在重建 rootfs 时才被用到。权威副本是 /rom 那份 ——
+# 编译期进 squashfs，运行期根本改不了，所以「与它逐字节一致」就是没被换过的证明。
+ROM_TARBALL="${CS_ROM_TARBALL:-/rom$CS_HOME/lxc-crowdsec.tar.gz}"
+
+_tarball_usable() {
+    [ -f "$TARBALL" ] || return 1
+    [ -s "$TARBALL" ] || return 1
+    tar -tzf "$TARBALL" >/dev/null 2>&1 || return 1
+    return 0
+}
+
+_ensure_tarball_intact() {
+    # ① 与 /rom 逐字节一致 = 没被换过。用 cmp 不用 sha256：
+    #    107 MB 在弱 CPU 上算哈希要好几秒，cmp 不同就立刻返回。
+    if [ -f "$ROM_TARBALL" ] && cmp -s "$TARBALL" "$ROM_TARBALL"; then
+        log "[包] 与固件只读副本一致（$(ls -l "$TARBALL" 2>/dev/null | awk '{print $5}') 字节）"
+        return 0
+    fi
+    # ② 不符或缺失：用 /rom 那份覆盖。只读层不可能被改，它是权威来源。
+    if [ -f "$ROM_TARBALL" ] && [ -s "$ROM_TARBALL" ]; then
+        log "[包] 与固件副本不符或缺失 → 用 /rom 只读副本还原"
+        if cp -f "$ROM_TARBALL" "$TARBALL" 2>/dev/null && cmp -s "$TARBALL" "$ROM_TARBALL"; then
+            log "[包] 还原完成，校验通过"
+            return 0
+        fi
+        log "[包] 还原失败：写 $TARBALL 出错，或还原后仍不符"
+        return 1
+    fi
+    # ③ 固件里压根没有副本（老固件只有 lxc-ubuntu.tar.gz 时才可能走到这里）：
+    #    退化成结构自检 —— 能列出目录才继续，但来源无法证明，日志里如实说明。
+    if _tarball_usable; then
+        log "[包] 固件里没有 /rom 副本，仅通过 gzip 结构自检（来源无法证明）"
+        return 0
+    fi
+    log "[包] 无可用容器包：$TARBALL 损坏，且 $ROM_TARBALL 不存在"
+    return 1
+}
+
 rebuild_from_image() {
     log "尝试从镜像解压 rootfs：$TARBALL"
     [ -f "$TARBALL" ] || { log "镜像文件不存在，无法解压"; return 1; }
+    # 【v.108.55】校验必须在 rm -rf "$ROOTFS" 之前：包不可用就别先把现场删掉。
+    _ensure_tarball_intact || return 1
     ct_force_stop || return 1
     rm -rf "$ROOTFS" 2>/dev/null
     mkdir -p "$ROOTFS" || return 1

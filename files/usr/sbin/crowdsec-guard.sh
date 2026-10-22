@@ -162,32 +162,61 @@ _glog() {
 # 容器还会自己写 hostname / machine-id。所以判据不是「有没有」，而是「内容是否仍等于 base」。
 # base 里没有这个文件 = 容器新增的（machine-id 就是），不算篡改，跳过。
 #
-# 只报不杀：运行时写入与篡改在字节上不可区分，先观察误报率再决定要不要升级成复原。
-# 单个文件不一致就让整盘回滚，代价远大于收益。
+# v.108.57 起改为自动复原：容器在这里被定义成「半不可变系统」—— base 里存在的文件
+# 只要不在白名单，任何修改都会在下一轮被盖回去。代价是无法再在容器里临时调配置，
+# 这是有意的取舍（固定文件不可变 > 现场可调）。
+# 三道刹车：① base 里没有的新文件一律不动；② 单轮复原上限 OVL_FIX_MAX，超出只记录；
+# ③ 每次复原都回读 cmp，失败单独记账，绝不在没修好时报「已复原」。
+OVL_FIX_MAX="${CS_GUARD_OVL_FIX_MAX:-20}"
+
 _ovl_audit() {
     _ab="$ROM_DIR$GUARD_CT_BASE"
     [ -d "$_ab" ] || return 0
     [ -d "$GUARD_CT_UPPER" ] || return 0
     _n=0
-    _shown=0
+    _fixed=0
+    _bad=0
+    _skip=0
     for _u in $(find "$GUARD_CT_UPPER" -type f 2>/dev/null); do
         _r="${_u#"$GUARD_CT_UPPER"}"
         case "$_r" in
-        # 我们自己的元数据与 guard 备份
+        # 自身元数据与备份
         /.base-fingerprint|*.user-*|*.guard-tmp) continue ;;
         # bootstrap 每轮重写 / 容器运行时正常写入
         /etc/resolv.conf|/etc/crowdsec-net.conf|/etc/hostname|/etc/machine-id) continue ;;
         /etc/crowdsec/*|/etc/config/*|/var/*|/tmp/*|/root/*|/run/*|/dev/*|/proc/*|/sys/*) continue ;;
         esac
+        # base 里没有 = 容器自己新增的（ld.so.cache、machine-id 之类）。
+        # 不删不改：删了容器可能起不来，而「新增」本身不构成篡改证据。
         [ -f "$_ab$_r" ] || continue
         cmp -s "$_ab$_r" "$_u" && continue
         _n=$((_n + 1))
-        if [ "$_shown" -lt 10 ]; then
-            _shown=$((_shown + 1))
-            _glog "【审计】$_r 的可写层副本与只读基底不一致（只报不杀，请人工确认）"
+        # 单轮上限：正常 upper 里只有几十个文件，某一轮突然冒出上百个不一致，
+        # 多半是白名单漏了某个目录（某个包在写 /usr/lib 之类）。这时全量复原
+        # 等于把整个 rootfs 推回出厂状态，必须先停下来只记录。
+        if [ "$_fixed" -ge "$OVL_FIX_MAX" ]; then
+            _skip=$((_skip + 1))
+            continue
+        fi
+        _f="$ROOT$GUARD_CT_PREFIX$_r"
+        # 备份只留最近一份，避免 /etc 下 .user-* 随轮次堆积
+        rm -f "$_u".user-* 2>/dev/null
+        _bak="$_u.user-$(date '+%Y%m%d%H%M%S')"
+        cp -f "$_u" "$_bak" 2>/dev/null || _bak=""
+        # 写入走挂载点（$ROOT$GUARD_CT_PREFIX...），**不直接写 upperdir**：
+        # 绕过 overlay 改上层会留下「孤立 inode」，合并视图读不到新内容，
+        # 真机踩过两次（日志说复原了、回读还是脏的、upper 里连文件都没有）。
+        if cp -f "$_ab$_r" "$_f" 2>/dev/null && cmp -s "$_ab$_r" "$_f"; then
+            _fixed=$((_fixed + 1))
+            _glog "【审计】$_r 与只读基底不一致，已自动复原${_bak:+（原内容另存 $_bak）}"
+        else
+            _bad=$((_bad + 1))
+            _glog "【审计】$_r 与只读基底不一致，自动复原失败（不可写或回读仍不同），需人工介入"
         fi
     done
-    [ "$_n" -gt 10 ] && _glog "【审计】另有 $((_n - 10)) 处不一致未列出（本轮共 $_n 处）"
+    if [ "$_skip" -gt 0 ]; then
+        _glog "【审计】本轮 $_n 处不一致：已复原 $_fixed、失败 $_bad、超出上限 $_skip（上限 $OVL_FIX_MAX，未处理）"
+    fi
     return 0
 }
 

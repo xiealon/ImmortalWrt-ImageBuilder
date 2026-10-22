@@ -303,7 +303,22 @@ for m in proc sys dev dev/pts; do
     MOUNTS="$R/$m $MOUNTS"
 done
 
-if ! chroot "$R" /bin/sh -c "
+# 【v.108.49】hub 数据要连 hub-data.crowdsec.net / github，是外部依赖，会抖。
+# run #186（2026-10-22）就死在一次瞬时断连上，一次就把整个构建判死：
+#   Error: cscli collections install: while downloading data for geoip-enrich.yaml:
+#     while getting data: while writing to
+#     /var/lib/crowdsec/data/GeoLite2-City.mmdb.1439770772.download:
+#     read tcp ...->104.20.41.3:443: read: connection reset by peer
+# 同一份脚本在 #47 / #185 都是通的，纯属网络抖动 —— 用重试吃掉它，别用它判代码有问题。
+# 两处细节必须做到位，否则重试也会一直失败：
+#   ① 重试前清掉 *.download 半成品：cscli 不清理，下次仍写同一个文件，写不完就再报错；
+#   ② collections install 允许「已经装过」：第一次可能已经装成功了一半，
+#      第二次它返回非 0（已安装），此时用 collections list 复核，确实在就继续。
+_HUB_TRY_MAX=3
+_HUB_TRY=0
+while :; do
+    _HUB_TRY=$((_HUB_TRY + 1))
+    if chroot "$R" /bin/sh -c "
 set -e
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export HOME=/root
@@ -313,12 +328,26 @@ mkdir -p /var/lib/crowdsec/data /var/log /run
 /usr/bin/cscli hub upgrade
 /usr/bin/cscli machines add -a --force --error
 for c in $COLLECTIONS; do
-    /usr/bin/cscli collections install \"\$c\"
+    /usr/bin/cscli collections install \"\$c\" || {
+        /usr/bin/cscli collections list 2>/dev/null | grep -q \"\$c\" || {
+            echo \"!! collection \$c 安装失败\"
+            exit 1
+        }
+        echo \"==> collection \$c 已存在（重试轮次），跳过\"
+    }
 done
 /usr/bin/crowdsec -c /etc/crowdsec/config.yaml -t -error
 "; then
-    die "chroot 内的 hub/凭证初始化失败（看上面输出）"
-fi
+        break
+    fi
+    if [ "$_HUB_TRY" -ge "$_HUB_TRY_MAX" ]; then
+        die "chroot 内的 hub/凭证初始化失败（已重试 $_HUB_TRY_MAX 次，看上面输出）"
+    fi
+    say "chroot 内初始化失败（第 $_HUB_TRY/$_HUB_TRY_MAX 次，多为下载被重置），清半成品后重试"
+    rm -f "$R"/var/lib/crowdsec/data/*.download 2>/dev/null || true
+    sleep 10
+done
+[ "$_HUB_TRY" -gt 1 ] && say "chroot 初始化在第 $_HUB_TRY 次尝试成功"
 
 chroot "$R" /bin/sh -c 'ls -1 /etc/crowdsec/hub >/dev/null 2>&1 && echo hub_entries=$(ls -1 /etc/crowdsec/hub | wc -l)'
 

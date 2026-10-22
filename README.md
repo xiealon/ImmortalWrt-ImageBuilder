@@ -1817,88 +1817,71 @@ SSH 仍然只绑 LAN 侧，不再有「无差别监听所有口」的风险；�
 
 核对：两仓库 74 个文件的 blob sha 与 mode 完全一致（`ls-tree -r HEAD` 逐项比对）。
 
-## v.108.42：dockerd 起不来 —— 删掉 cgroupfs-mount
+## v.108.49：ENROLL 组一直是空壳（注册码永不被消费）+ 构建期 hub 下载重试
 
-### A. 症状
+### ① ENROLL 组从来没有节点
 
-LuCI「Docker → 网络」页**完全空白**。往上追四层：
+`GROUP_SEQ` 里一直有 `ENROLL`，`GROUP_DEP_ENROLL=BOUNCERVERIFY`、`GROUP_TITLE_ENROLL`
+也都齐，**只有 `DAG_NODES` 里没有 `enroll` 这个节点，`NODE_GROUP_enroll` 也不存在**。
 
-| 层 | 现场证据 |
-|---|---|
-| LuCI 网络页 | 空的，一条记录都没有 |
-| `docker network ls` | `Cannot connect to the Docker daemon` |
-| `/etc/init.d/dockerd status` | `not running`（rc=5） |
-| `logread` | `failed to start daemon: Devices cgroup isn't mounted` ×3 |
-| `ip -br link` | 只有 `br-lan` / `veth*`，**没有 `docker0`** |
-
-所以「网络不自己建立」不是网络配置的问题：**daemon 根本没起来，docker0 从未创建**，
-`verify_docker_fw` / `build_docker_fw` 写的 zone 和 forwarding 自然无从生效。
-
-### B. 三层因果，缺一条都推不出来
-
-| # | 事实 | 怎么证明 |
-|---|---|---|
-| ① | 内核没编 devices 控制器 | `zcat /proc/config.gz` → `# CONFIG_CGROUP_DEVICE is not set`；`/proc/cgroups` 只有 8 个控制器；`mount -t cgroup -o devices none ...` 回 `Unknown subsys name 'devices'`（rc=32） |
-| ② | `cgroupfs-mount` 把 procd 的 cgroup2 换成 v1 | 官方 init 全文 7 行：`START=01` + `boot() { if mountpoint -q /sys/fs/cgroup; then umount /sys/fs/cgroup/; fi; cgroupfs-mount }`，注释原文写着「Procd mounts non-hierarchical cgroupfs so unmount first」 |
-| ③ | dockerd 用 `statfs("/sys/fs/cgroup")` 判 v1/v2 | 根是 `tmpfs`（`mount` 第一行 `cgroup on /sys/fs/cgroup type tmpfs`）→ 判为 v1 → 找 `/sys/fs/cgroup/devices` → 不存在 → 退出 |
-
-**结论：v1 这条路在本固件上物理不通，与 docker 版本、参数、防火墙配置都无关。**
-
-### C. 为什么是「删包」而不是「补挂载」
-
-`cgroupfs-mount` 是 `shell/custom-packages.sh` 自己加的（v.99 时代）。
-它挂出来的是 `/proc/cgroups` 里**全部 8 个**可用控制器，一个不少——它尽职了，是内核没给 devices。
-
-先做过一轮可逆实验（运行态手工挂 `mount -t cgroup2 none /sys/fs/cgroup`）：
-
-| 现象 | 说明 |
-|---|---|
-| `dockerd status` → `running`，`docker network ls` 出 bridge/host/none | v2 路径通 |
-| `cgroup.controllers` 为空 | v1 层级还占着控制器，v2 是空壳 |
-| `umount /sys/fs/cgroup/{cpuset,...}` 全报 `not mounted` | cgroup2 盖上后 v1 挂载点被遮蔽，卸载路径有歧义 |
-
-所以叠加只是救急。**正解是让 procd 的 cgroup2 留下来**：删包。
-
-### D. 删包后的实测（重启验证）
+v.79 把调度器换成「组 → 遍历 `_order`，按 `NODE_GROUP_<节点>` 筛出组内节点」之后，
+组级函数（`verify_ENROLL` / `build_ENROLL`）就再没有被任何路径调用过；而 `enroll`
+又恰好不在 `DAG_NODES` 里 —— 两条死路叠在一起，这一组连一个节点都没有。日志因此恒定是：
 
 ```
-cgroup2 on /sys/fs/cgroup type cgroup2 (rw,nosuid,nodev,noexec,relatime,nsdelegate)
-cgroup on /sys/fs/cgroup/systemd type cgroup (rw,...,name=systemd)     ← bootstrap 自己挂的
-
-cgroup.controllers = cpuset cpu io memory pids rdma                   ← v2 完整
-
-/etc/init.d/dockerd status → running
-docker network ls → bridge / host / none
-
-lxc-ls -f → ubuntu RUNNING 10.1.0.10                                  ← LXC 无恙
+[DAG] 组 ENROLL 就序（0 个小步骤）
+---- 组 ENROLL（Console Enroll）：0 个小步骤 ----
+[ENROLL] Console Enroll 完成（0/0），置位 GSET_ENROLL=...
 ```
 
-`/sys/fs/cgroup/` 下出现 `services` / `lxc.monitor.ubuntu` / `lxc.payload.ubuntu` / `lxc.pivot`，
-`lxc.pivot` 只有 LXC 在 v2 路径下才会建 —— procd 与 LXC 6.0.5 本来就支持 v2，
-v1 纯属 `cgroupfs-mount` 的残留。
+`ensure_group` 拿 `_gok=0` 与 `_gn=0` 比，相等即「完成」并置位，所以表面上一切都绿。
+真正干活的 `re_enroll` / `console_enroll_ok` / `_drop_enroll_key` 一次都没跑过。
 
-### E. 改动清单
+真机证据（24.10.6，2026-10-22）：
 
-| 文件 | 改动 |
+| 现场 | 说明 |
 |---|---|
-| `shell/custom-packages.sh` | 删 `cgroupfs-mount`，保留 `cgroup-tools`（libcgroup 2.x 在 v2 下仍可用），注释里写清整条因果链 |
-| `files/etc/init.d/cgroup2-guard`（新增，755） | `START=02` 兜底：若 `/sys/fs/cgroup` 根不是 cgroup2（例如该包被别的依赖链拉回来）就补挂；挂不上 `return 1`；若挂上但 `cgroup.controllers` 为空，`logger -p warning` 明说「docker 可用但资源限制不可用」 |
-| `tests/probe_v10842.sh`（新增，755） | 12 条断言：包列表两版一致、guard 的 shebang/START/判据/返回码、仓库内无任何非注释行调用 cgroupfs-mount |
+| `/etc/config/crowdsec_enroll_key.txt` 26 字节，`ls -l` 时间一直是镜像构建时间 | 注册码从来没被消费 |
+| `grep -iE 'enroll|删除注册码' /root/crowdsec-lxc-bootstrap.log` 里没有任何「已删除注册码文件」 | `_drop_enroll_key` 没被调用 |
+| `cscli console status` → `Central API (CAPI) ❌ not registered` | 确实没注册成功 |
 
-### F. 边界与不做的事
+改法（三个声明 + 一组函数）：
 
-| 项 | 说明 |
-|---|---|
-| `--memory` / `--cpus` | 删包后 controllers 完整，**可用**。只有在 guard 走兜底、v1 仍占着控制器时才会失效——那种情况 guard 会记 warning |
-| v1 的 `name=systemd` 层 | 仍然由 `_mount_systemd_cgroup` 挂（容器内 systemd 需要）。它挂在 cgroup2 根的子目录下，不影响根的 statfs 判定，实测 docker 与 LXC 均正常 |
-| `CONFIG_CGROUP_DEVICE` | ImageBuilder 只打预编译内核，`.config` 改不动内建选项。所以「把 devices 控制器补回来」这条路不存在，不必再试 |
-| 25.12 分支 | `apk-custom-packages.sh` 从来没有 `cgroupfs-mount`，本来就没这个坑 |
-| docker 拉镜像 | 现场 `docker run hello-world` 报 `registry-1.docker.io ... context deadline exceeded`，是直连 Docker Hub 超时，与 cgroup 无关，单独处理 |
+```sh
+DAG_NODES="... capi_release enroll"     # 末尾补节点
+DEP_enroll="capi_release"               # 等 CAPI 放开之后再注册
+NODE_GROUP_enroll=ENROLL
+ENROLL_NODES="enroll"
+```
 
-### G. 核对
+```sh
+verify_enroll() { [ -s "$ENROLL_KEY_FILE" ] || return 0; console_enroll_ok; }
+build_enroll()  { [ -s "$ENROLL_KEY_FILE" ] || { log "...跳过"; return 0; }; re_enroll; }
+```
 
-`tests/probe_v10842.sh` 12 条断言语义复算 12/12 通过；两仓库同步推送，
-内容与 mode 逐 blob 一致。
+`enroll` 同时加进 `SOFT_NODES`：它是「网站侧人工 Accept」这一段外部流程，注册码写错
+不该让整轮引导 hard 终止（那会让探针每 5 分钟重跑全量、每轮重建一次 `lxcbr0`）。
+
+`--verify-only`（探针每 30 轮的全量体检）遍历的也是 `DAG_NODES`，所以现在体检会多看
+一项 `enroll`：注册码还在、console 还没 Enrolled，就报「不符」——正是我们想要的信号。
+
+### ② 构建期 hub 下载失败不再是致命错
+
+run #186（head `92e6bd029f32`）死在「准备容器 rootfs」这一步：
+
+```
+Error: cscli collections install: while downloading data for geoip-enrich.yaml:
+  while getting data: while writing to /var/lib/crowdsec/data/GeoLite2-City.mmdb.1439770772.download:
+  read tcp ...->104.20.41.3:443: read: connection reset by peer
+!! chroot 内的 hub/凭证初始化失败（看上面输出）
+```
+
+同一份脚本在 #47 / #185 都是通的，是 `hub-data.crowdsec.net` 的瞬时断连，不是代码问题。
+`prepare-crowdsec-minimal.sh` 改成最多 3 次尝试，两次之间：
+
+* 删掉 `rootfs/var/lib/crowdsec/data/*.download` 半成品（cscli 不清理，留着会一直写不完）；
+* `cscli collections install` 允许「已装过」——第二次尝试时它确实已经装上了，
+  用 `cscli collections list | grep` 复核确实在就继续，不再判失败。
 
 # crowdsec 引导流程图
 

@@ -1883,6 +1883,68 @@ Error: cscli collections install: while downloading data for geoip-enrich.yaml:
 * `cscli collections install` 允许「已装过」——第二次尝试时它确实已经装上了，
   用 `cscli collections list | grep` 复核确实在就继续，不再判失败。
 
+## v.108.50：修掉每轮开机的两处自相矛盾（CAPI 翻转 / ct_net 重建）+ 防火墙编译结果自检
+
+### ③ `capi_block` 与 `capi_release` 每轮互斥翻转
+
+`capi_block` 要求 `online_client` 被注释（off），`capi_release` 要求它被放回（on）——
+同一台机器上这两条不可能同时成立。而 `verify_capi_block` 以前是无条件要求 off，
+于是只要容器跑过一轮「放出」，下一轮（探针重跑 / 阶段 3 的逐节点复验）必然判不符：
+
+```
+_done_capi_block=B:...09:55:12      ← 注释
+_done_capi_release=B:...09:55:19    ← 放回 + 重启 crowdsec + 等 8080（真机 29s）
+```
+
+真机日志里这两条每轮同时出现，就是每次开机白重启一次 crowdsec 的来源。
+
+新增 `_capi_block_needed()`，两种情况下「启动前屏蔽」这个义务本身就不存在：
+
+| 情形 | 为什么不需要屏蔽 |
+|---|---|
+| 容器已经在跑 | 启动窗口已过，此时注释只在下次重启才生效，而 capi_release 目标就是 on |
+| 已装机且 `online_api_credentials.yaml` 非空 | 新装期「拿不到凭证 → 引擎反复重启」的前提不成立（空文件才是硬错误），直接带着 on 启动，连那次「放开后重启」都省了 |
+
+`verify_capi_block` / `build_capi_block` 都先过这个判据；首次安装（无 stamp、凭据为空）
+仍然照旧「先 off 再启动」，那正是它存在的意义。
+
+### ④ `ct_net` 每轮判「内容不符」重建
+
+真机日志固定出现：
+
+```
+[网络] 容器 ping 网桥 10.1.0.1 失败
+[重启态][PREP] ct_net 内容不符，执行构建一次
+```
+
+而人手进容器 `ping 10.1.0.1` 是通的。两个假失败来源都跟网络本身无关：
+
+* 极简 rootfs 的 busybox `ping` 未必认 `-W`（老版本只有 `-w`），选项错直接 rc≠0；
+* veth 刚被 netifd 重建过时，第一次 ping 常因邻居表还没建立而丢包。
+
+改法：`_ct_ping_ok` 先严后宽（`-W 2` → `-w 3` → 隔 1 秒再裸 `-c 1`），任一通即算通；
+`build_ct_net` 改完文件后如果仍不通，会调 `_reattach_ct_veth` 把 veth 接回 `lxcbr0` 再验一次
+（netconf restart 只套地址，不负责接端口），修不好也要在日志里说出来。
+
+### ⑤ 防火墙：编译结果进日志，「写了」和「生效」分开看
+
+uci 里写了 `proto=all` ≠ nft 里真的没有协议限制（v.108.48 之前的坑正是不写 proto 时
+fw4 默认按 tcpudp 编译，ICMP 落在规则外）。现在每次 firewall reload 之后多打一行：
+
+```
+[FW] forward_lxc 无协议限制（proto=all 已生效，ICMP 可通）
+[FW] 警告：forward_lxc 里仍有 N 条带 l4proto 的规则 → ICMP/ESP/GRE 会被漏掉
+```
+
+只报告、不参与判定（刚写完还没 reload 时看到的是旧表，拿来判死会误杀）。
+这一行就是「这台机器的防火墙到底修没修上」的现场答案，24.10 / 25.12 通用。
+
+### ⑥ `console_enroll_ok` 改判据
+
+原来只 grep `cscli capi status` 里的 `enrolled`，词不达意就会误判。现在优先用
+`cscli console status`（输出里 `Central API (CAPI) ❌ not registered` 就是未注册），
+拿不到再退回 `capi status`；两次调用都带 `timeout 10`，网络不好时不会挂住引导。
+
 # crowdsec 引导流程图
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)

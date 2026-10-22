@@ -349,18 +349,22 @@ verify_fwd_rules() {
     [ "$(uci -q get firewall.lxc2lan.src)" = "lxc" ] || return 1
     [ "$(uci -q get firewall.lxc2lan.dest)" = "lan" ] || return 1
     [ "$(uci -q get firewall.lxc2lan.target)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.lxc2lan.proto)" = "all" ] || return 1
     [ "$(uci -q get firewall.lxc2docker)" = "rule" ] || return 1
     [ "$(uci -q get firewall.lxc2docker.src)" = "lxc" ] || return 1
     [ "$(uci -q get firewall.lxc2docker.dest)" = "docker" ] || return 1
     [ "$(uci -q get firewall.lxc2docker.target)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.lxc2docker.proto)" = "all" ] || return 1
     [ "$(uci -q get firewall.lxc2vpn)" = "rule" ] || return 1
     [ "$(uci -q get firewall.lxc2vpn.src)" = "lxc" ] || return 1
     [ "$(uci -q get firewall.lxc2vpn.dest)" = "vpn" ] || return 1
     [ "$(uci -q get firewall.lxc2vpn.target)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.lxc2vpn.proto)" = "all" ] || return 1
     [ "$(uci -q get firewall.lan2lxc)" = "rule" ] || return 1
     [ "$(uci -q get firewall.lan2lxc.src)" = "lan" ] || return 1
     [ "$(uci -q get firewall.lan2lxc.dest)" = "lxc" ] || return 1
     [ "$(uci -q get firewall.lan2lxc.target)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.lan2lxc.proto)" = "all" ] || return 1
 }
 
 # SNAT 段定位：按 name="lxc-snat" 找 nat 段，不赌段名。
@@ -689,10 +693,18 @@ verify_docker_fw() {
     uci -q get firewall.docker.subnet 2>/dev/null | grep -qx '172.16.0.0/12' || return 1
     [ "$(uci -q get firewall.docker2lan.src 2>/dev/null)" = "docker" ] || return 1
     [ "$(uci -q get firewall.docker2lan.dest 2>/dev/null)" = "lan" ] || return 1
+    [ "$(uci -q get firewall.docker2lan.target 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.docker2lan.proto 2>/dev/null)" = "all" ] || return 1
     [ "$(uci -q get firewall.docker2wan.src 2>/dev/null)" = "docker" ] || return 1
     [ "$(uci -q get firewall.docker2wan.dest 2>/dev/null)" = "wan" ] || return 1
+    [ "$(uci -q get firewall.docker2wan.target 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.docker2wan.proto 2>/dev/null)" = "all" ] || return 1
     [ "$(uci -q get firewall.lan2docker.src 2>/dev/null)" = "lan" ] || return 1
     [ "$(uci -q get firewall.lan2docker.dest 2>/dev/null)" = "docker" ] || return 1
+    # 【v.108.48】target / proto 原来没验：build 会写 ACCEPT，但被改成 REJECT
+    # 或者丢掉 proto 时 verify 仍判就绪，规则实际是坏的却不重建。
+    [ "$(uci -q get firewall.lan2docker.target 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(uci -q get firewall.lan2docker.proto 2>/dev/null)" = "all" ] || return 1
     return 0
 }
 
@@ -727,6 +739,8 @@ build_docker_fw() {
         uci -q set "firewall.$_frd.src=$_frs"
         uci -q set "firewall.$_frd.dest=$_frdst"
         uci -q set "firewall.$_frd.target=ACCEPT"
+        # 【v.108.48】同 _fw_rule：不写 proto 就被 fw4 默认成 tcpudp，ICMP 漏掉。
+        uci -q set "firewall.$_frd.proto=all"
     }
     _fw_rule_d docker2lan docker lan
     _fw_rule_d docker2wan docker wan
@@ -869,6 +883,16 @@ build_lxc_zone_fwd() {
         uci -q set "firewall.$_fr_sec.src=$_fr_src"
         uci -q set "firewall.$_fr_sec.dest=$_fr_dst"
         uci -q set "firewall.$_fr_sec.target=ACCEPT"
+        # 【v.108.48】必须显式写 proto=all，否则 ICMP 被漏掉。
+        # fw4 对 config rule 不写 proto 时默认按 tcpudp 处理，编译出来是：
+        #     meta l4proto tcp ... jump accept_to_lan "!fw4: lxc2lan"
+        #     meta l4proto udp ... jump accept_to_lan "!fw4: lxc2lan"
+        # 于是 ping（ICMP）、ESP、GRE 全落在规则之外 —— 真机现象是「规则明明在、
+        # uci show 一条不少、fw4 也 reload 了，但容器就是出不去」，
+        # forward_lxc 链里那两条规则的 counter 恒为 0，极易被误判成「没写入」。
+        # 对比：config forwarding 段没有 proto 概念，天然放行所有协议 ——
+        # 这就是为什么用户在 LuCI 里手加两条 forwarding 之后网络立刻通了。
+        uci -q set "firewall.$_fr_sec.proto=all"
     }
     _fw_rule lxc2lan    lxc lan
     _fw_rule lxc2docker lxc docker

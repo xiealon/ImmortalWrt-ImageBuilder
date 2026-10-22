@@ -1953,6 +1953,75 @@ fw4 默认按 tcpudp 编译，ICMP 落在规则外）。现在每次 firewall re
 * `--verify-only`（探针每 30 轮的体检）开头置 `_VERIFY_ONLY=1`：体检承诺
   「一个字节都不写」，上面那步删除在体检里必须关掉，否则「只读」就成了空话。
 
+## v.108.51：刷机会把 CAPI 身份一起刷掉（凭据持久副本）+ 失效凭据不再当好的用
+
+### 现场（2026-10-22，24.10.6 / r33869，真机输出）
+
+手动注册成功后一切正常：
+
+```
+│ Central API (CAPI)  │ ✅ authenticated                                 │
+│ Enrolled            │ ✅ enrolled                                      │
+-rw------- 1 root root 162 Oct 22 10:34 .../rootfs/etc/crowdsec/online_api_credentials.yaml
+```
+
+但这份凭据所在的路径不在任何保留清单里：
+
+```
+/etc/sysupgrade.conf 非注释行仅两条：
+  /etc/crowdsec/lxc-crowdsec.tar.gz
+  /etc/crowdsec/lxc-ubuntu.tar.gz
+/lib/upgrade/keep.d → 33 项全是包名（acme-common / firewall4 / base-files-essential …）
+                     没有一项覆盖 /srv
+```
+
+脚本自己的备份也救不了 —— `CRED_BACKUP_DIR` 是 `$LXC_PATH/$LXC_NAME/.bootstrap/cred-backup`，
+`LXC_PATH=/srv/lxc`，和容器一起消失。而且 `_cred_restore` 只在 tier-3 重装的
+`CS_BOOTSTRAP_REINSTALL=1` 分支里被调用过（那时 `/srv` 还在），**刷机这条路从来没恢复过凭据**。
+
+后果：每次 sysupgrade 之后 `/srv/lxc/ubuntu/rootfs` 从 tarball 重解压，凭据回到 0 字节，
+CAPI 回到 `❌ not registered`；再手动 register 会生成新身份，console 里多一条 offline 实例。
+
+### 改法
+
+| 位置 | 改动 |
+|---|---|
+| `CRED_KEEP_FILE` | 新增 `/etc/config/crowdsec_credentials_keep.yaml`（600）—— `/etc/config` 由 base-files-essential 保留，是唯一能活过刷机的落点 |
+| `_cred_keep_save()` | 现场凭据存在就照抄一份过去；`--verify-only` 下直接返回（体检不写字节）；只在首次建文件时打日志 |
+| `_cred_restore()` | 改成三段：现场有凭据 → 不动；否则优先用持久副本，退而用重装前备份；都没有才明说「enroll 步将用注册码重注册」 |
+| `build_rootfs()` | 解压成功后立刻 `_cred_restore` —— 这是刷机后唯一能恢复的时机，之前根本没有这一步 |
+| `main`（stamp 之前） | `_cred_keep_save`：把本轮已验证可用的凭据存成持久副本。排在 `_stamp_write` 之前，因为 stamp 失败会 exit 1，那时凭据仍应保住 |
+
+### 另一半：失效凭据不再一路用下去
+
+老逻辑只判断 `online_api_credentials.yaml` 是否非空，被吊销的 token 也算「已注册」，
+于是 `re_enroll` 跳过 `capi register`，拿坏凭据去 `console enroll`，永远失败。
+
+新增 `_capi_cred_rejected()`，只认 CAPI **明确**的认证失败
+（`invalid credential` / `unable to authenticate` / `unauthorized` / `forbidden` / 401 / 403），
+命中才删凭据重建。
+
+**不用 `console status` 的 `not registered` 当判据**：刚 register、还没 enroll 时它同样是
+`not registered`，拿它判死会把好凭据删掉，直接退化成「每次开机重注册一次」。
+
+### 验收点（刷机后）
+
+```
+[凭据] 已恢复 CAPI 凭据（来源 /etc/config/crowdsec_credentials_keep.yaml），无需重新 register/enroll
+```
+
+且 `cscli console status` 直接是 `✅ authenticated` / `✅ enrolled`，console 里实例数不变。
+反之若看到 `[凭据] 无可用备份，enroll 步将用注册码重注册`，说明刷机前那次引导没跑完
+（`_cred_keep_save` 没执行），或者设备从来没注册成功过。
+
+### 注意
+
+* 持久副本是**凭据 token**，与 enroll key 一样敏感，`chmod 600`、只在 `/etc/config` 下。
+* `/etc/sysupgrade.conf` 里保留 tarball 的那两条（由 `files/etc/uci-defaults/99-custom.sh` 自动追加）
+  会让 sysupgrade **用旧 tarball 覆盖新固件自带的那份**，容器镜像因此被冻结在上一版。
+  本次未改（属保留策略，需先实测 md5 确认），核对方法：刷机前后各跑一次
+  `md5sum /etc/crowdsec/lxc-crowdsec.tar.gz`。
+
 # crowdsec 引导流程图
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)

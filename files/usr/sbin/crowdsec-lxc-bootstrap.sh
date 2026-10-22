@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-22.108.50-bp"
+SCRIPT_VER="2026-10-22.108.51-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -69,6 +69,14 @@ STAMP_FILE="$STATE_DIR/installed"
 REINSTALL_FAIL_FILE="$STATE_DIR/reinstall_fail"
 REINSTALL_PENDING_FILE="$STATE_DIR/reinstall_pending"
 CRED_BACKUP_DIR="$STATE_DIR/cred-backup"
+# 【v.108.51】凭据的「活过刷机」那一份：/srv/lxc 既不 /etc/sysupgrade.conf，也不在
+# 任何 /lib/upgrade/keep.d 里 —— 刷机时整个容器连同凭据一起消失（真机核对 2026-10-22：
+# sysupgrade.conf 只有 /etc/crowdsec/lxc-crowdsec.tar.gz 与 lxc-ubuntu.tar.gz 两条，
+# keep.d 33 项全是包名，没有一个覆盖 /srv）。
+# 而 /etc/config 由 base-files-essential 保留，所以持久副本放这里：
+# 刷机后 rootfs 重解压、凭据为空时由 _cred_restore 放回去，console 侧实例身份不变，
+# 不用重新 register/enroll，也不会在 console 里多出一条 offline 记录。
+CRED_KEEP_FILE="${CS_BOOTSTRAP_CRED_KEEP:-/etc/config/crowdsec_credentials_keep.yaml}"
 # 【v.108.25】静态配置的 sha 基线：只覆盖脚本自己写的那几份文件（主配置 / 采集源 /
 # 两个解析器）。跑完一轮后记下它们长什么样，之后每次 verify 重算比对 ——
 # 「文件在、结构对」不等于「内容还是我写的那份」，被人改过一个字符也算不符。
@@ -1645,6 +1653,10 @@ verify_rootfs() {
 build_rootfs() {
     log "rootfs 未就绪，从镜像解压"
     rebuild_from_image || { log "镜像解压失败"; return 1; }
+    # 【v.108.51】刚解压出来的 rootfs 里凭据是「镜像构建时」的状态（不存在或 0 字节），
+    # 而刷机又把 /srv 整个带走了 —— 这里是把 /etc/config 持久副本放回去的唯一时机。
+    # 以前只有 tier-3 重装才会 _cred_restore（那时 /srv 还在），刷机这条路从没恢复过。
+    _cred_restore || log "[凭据] 恢复未成功，enroll 步将走重注册"
     _recovering=true
 }
 # 容器内构建子步骤判定（v.93 起由 ct_net/ct_bootlink/ct_resolv/acquis 等节点各自闭环）：
@@ -3443,14 +3455,57 @@ _cred_backup() {
 
 # 二遍 rootfs 解压完成后调用：凭证落回新 rootfs + best-effort 重启容器内 crowdsec
 _cred_restore() {
-    [ -s "$CRED_BACKUP_DIR/online_api_credentials.yaml" ] || {
-        log "[重装] 无凭证备份，enroll 步将用注册码重注册（仅需网站端 Accept）"; return 0; }
     [ -d "$ROOTFS/etc/crowdsec" ] || return 0
-    cp -a "$CRED_BACKUP_DIR/online_api_credentials.yaml" "$ROOTFS/$_CRED_REL" 2>/dev/null \
-        || { log "[重装] 凭证恢复失败"; return 1; }
-    log "[重装] 凭证已恢复（console enroll 可直接判 Enrolled，无需重注册）"
+    # 【v.108.51】现场已有凭据就不覆盖：开机复核时这份可能比备份更新
+    # （本轮刚 register 过），用旧副本盖回去等于把刚注册的身份作废。
+    if [ -s "$ROOTFS/$_CRED_REL" ]; then
+        log "[凭据] 现场已有 CAPI 凭据，保持不动"
+        return 0
+    fi
+    _cr_src=""
+    if [ -s "$CRED_KEEP_FILE" ]; then
+        _cr_src="$CRED_KEEP_FILE"
+    elif [ -s "$CRED_BACKUP_DIR/online_api_credentials.yaml" ]; then
+        _cr_src="$CRED_BACKUP_DIR/online_api_credentials.yaml"
+        log "[凭据] 无持久副本，改用重装前备份"
+    fi
+    if [ -z "$_cr_src" ]; then
+        log "[凭据] 无可用备份，enroll 步将用注册码重注册（仅需网站端 Accept）"
+        return 0
+    fi
+    cp -f "$_cr_src" "$ROOTFS/$_CRED_REL" 2>/dev/null \
+        || { log "[凭据] 恢复失败（来源 $_cr_src）"; return 1; }
+    chmod 600 "$ROOTFS/$_CRED_REL" 2>/dev/null
+    log "[凭据] 已恢复 CAPI 凭据（来源 $_cr_src），无需重新 register/enroll"
     ct_running && _ct_restart_crowdsec || true
     return 0
+}
+
+# 【v.108.51】把现场凭据存成持久副本（/etc/config 下，靠 base-files-essential 活过刷机）。
+# 幂等：内容没变也照抄一遍（162 字节，代价可忽略），但只在首次建文件时打日志。
+# --verify-only（探针体检）承诺「一个字节都不写」，那条路径必须跳过。
+_cred_keep_save() {
+    [ "${_VERIFY_ONLY:-0}" = "1" ] && return 0
+    [ -s "$ROOTFS/$_CRED_REL" ] || return 0
+    _cks_new=0
+    [ -s "$CRED_KEEP_FILE" ] || _cks_new=1
+    mkdir -p "$(dirname "$CRED_KEEP_FILE")" 2>/dev/null
+    cp -f "$ROOTFS/$_CRED_REL" "$CRED_KEEP_FILE" 2>/dev/null \
+        || { log "[凭据] 持久副本写入失败（$CRED_KEEP_FILE），刷机后需重新注册"; return 1; }
+    chmod 600 "$CRED_KEEP_FILE" 2>/dev/null
+    [ "$_cks_new" = "1" ] && log "[凭据] 已建立持久副本（$CRED_KEEP_FILE），刷机后免重注册"
+    return 0
+}
+
+# 【v.108.51】判「CAPI 明确拒绝现有凭据」：token 被吊销 / 实例被删 / 403。
+# 只认这几句明确报错，不用 console status 的 not registered —— 刚 register、还没
+# enroll 时它同样是 not registered，拿它判死会把好凭据删掉，反而退化成重注册。
+_capi_cred_rejected() {
+    _ccr_out="$(_ct_env "$CSCLI capi status" 2>&1)" || true
+    printf '%s' "$_ccr_out" \
+        | grep -qiE 'invalid credential|unable to authenticate|unauthori[sz]ed|forbidden|wrong credential|(^|[^0-9])40[13]([^0-9]|$)' \
+        && return 0
+    return 1
 }
 
 # 抹前内容级复核（对应用户需求「查看每个组是否置位1」）：只读、只记日志
@@ -3830,6 +3885,13 @@ re_enroll() {
     fi
 
     _cred_file="$ROOTFS/etc/crowdsec/online_api_credentials.yaml"
+
+    # 【v.108.51】凭据还在但 CAPI 明确不认（token 被吊销、实例在 console 里被删）：
+    # 不重建就永远 enroll 不了 —— 老逻辑只看「文件非空」，会把坏凭据当好凭据一路用下去。
+    if [ -s "$_cred_file" ] && _capi_cred_rejected; then
+        log "[enroll] CAPI 拒绝现有凭据（失效/被吊销），删除后重建"
+        rm -f "$_cred_file" 2>/dev/null
+    fi
 
     if [ ! -s "$_cred_file" ]; then
         log "[enroll] online_api_credentials.yaml 缺失，先 cscli capi register 注册 CAPI 凭据"
@@ -4545,6 +4607,12 @@ main() {
         log "[复核] 有节点构建后始终不生效，引导按失败退出"
         exit 1
     fi
+
+    # 【v.108.51】凭据持久副本：放在 _stamp_write 之前。刷机后 /srv 全丢，
+    # 只有 /etc/config 能活下来；这一步把「本轮已验证可用」的 CAPI 凭据存到那里，
+    # 下一次刷机的 build_rootfs → _cred_restore 才有的可恢复。
+    # 排在 stamp 之前是因为：stamp 写入失败会 exit 1，那时凭据仍应被保住。
+    _cred_keep_save || log "[凭据] 持久副本未建立，刷机后需重新 register/enroll"
 
     # 链路全通：置位 installed（enroll 是网站人工面，不计入安装成功判据）
     # 【v.108.30】installed 是探针与「重装自愈」的共同前提：写不进去，探针会一直等

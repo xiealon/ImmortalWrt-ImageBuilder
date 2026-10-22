@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-21.108.46-bp"
+SCRIPT_VER="2026-10-22.108.49-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -92,7 +92,10 @@ INTR_MAX="${CS_BOOTSTRAP_INTR_MAX:-3}"
 #   60s 窗口内拉不到就把整轮引导判死、连 installed 都不写 → 探针永远 wait-install。
 #   LAPI 是否对外开放已经由 verify_lapi_fetch（宿主侧探测）硬性把关，这里再卡一次
 #   只会把「还没到时候」变成「永久停摆」。长期监视本来就是探针的职责。
-SOFT_NODES="${CS_BOOTSTRAP_SOFT_NODES:-bouncer_verify}"
+#   【v.108.49】enroll 加进来：它是「网站侧人工 Accept」这一段外部流程，本地只能
+#   把注册码交上去，是否 authenticated 由用户在 console 里点确认决定。注册码错的
+#   时候不该让整轮引导死掉、连 installed 都不写（那会让探针每 5 分钟重跑全量）。
+SOFT_NODES="${CS_BOOTSTRAP_SOFT_NODES:-bouncer_verify enroll}"
 # 【v.108.33】本轮 build 过的节点（flush 清脏标记前记一笔），收尾复核要用。
 _built_nodes=""
 _BS_FIRST_RUN=0
@@ -945,7 +948,17 @@ build_lan_input() {
 # 防火墙修复入口：六分项独立预检，哪项不符只重建哪项
 # 全对 -> 不 commit 不 reload 直接跳过；只有 ip_forward 被关 -> 只 echo 1；
 
-DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release"
+# 【v.108.49】末尾的 enroll 是本次补上的：ENROLL 组一直在 GROUP_SEQ 里，但
+# DAG_NODES 里从来没有 enroll 这个节点（NODE_GROUP_enroll 也不存在）。而
+# ensure_group / rg_restart_verify 都是「遍历 _order，按 NODE_GROUP_<节点> 筛组内节点」，
+# 于是这一组永远是 0 个小步骤 —— 日志里就是这三行连着出现：
+#     [DAG] 组 ENROLL 就序（0 个小步骤）
+#     ---- 组 ENROLL（Console Enroll）：0 个小步骤 ----
+#     [ENROLL] Console Enroll 完成（0/0）
+# re_enroll / console_enroll_ok / _drop_enroll_key 一次都没被调用过（死代码）。
+# 真机证据（24.10，2026-10-22）：/etc/config/crowdsec_enroll_key.txt 26 字节一直在，
+# 全量日志 grep 不到「已删除注册码文件」，而 cscli console status 是 not registered。
+DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll"
 
 # ---- 网络基线模式（--net-only）----
 # 适用场景：镜像没进固件（v.107.7 起不再有 Include Crowdsec 开关，容器恒内置，
@@ -1026,6 +1039,10 @@ DEP_lapi_fetch="ct_boot"
 DEP_bouncer_fill="lapi_fetch logconf"
 DEP_bouncer_verify="bouncer_fill"
 DEP_capi_release="bouncer_verify"
+# ---- ENROLL：console 注册（v.108.49 补的节点，之前这一组是空壳）----
+# 依赖 capi_release：capi_block 在容器启动前把 online_client 注释掉，bouncer 验证通过
+# 后由 capi_release 放回来；注册要连中央 API，必须等它放出来之后再做。
+DEP_enroll="capi_release"
 
 # INSTALL 排第一：rootfs 解压是 ct_net / ct_bootlink / ct_resolv（写容器内文件）
 # 以及 capi_block / ct_boot 的硬前置。放在 PREP 之后时，PREP 里那些节点拿不到
@@ -1075,6 +1092,7 @@ NODE_GROUP_lapi_fetch=LAPI
 NODE_GROUP_bouncer_fill=LAPI
 NODE_GROUP_bouncer_verify=BOUNCERVERIFY
 NODE_GROUP_capi_release=BOUNCERVERIFY
+NODE_GROUP_enroll=ENROLL
 
 # 层级拓扑排序（v.79）：先校验「每个小步骤都对应到某个组、组间依赖不倒置」，
 # 再按 GROUP_SEQ 分段，段内 Kahn 变体迭代排序（无递归，天然检测环/缺失/跨组依赖倒置）
@@ -3993,7 +4011,7 @@ BOOT_NODES="ct_boot"
 LOGCONF_NODES="logconf"
 LAPI_NODES="lapi_fetch bouncer_fill"
 BOUNCERVERIFY_NODES="bouncer_verify capi_release"
-ENROLL_NODES=""
+ENROLL_NODES="enroll"
 # ---- 8 组组级 verify/build（v.93 按功能切分，组内小步骤各自 ensure）----
 # 组级 verify = 组内节点全部内容一致；组级 build = 组内节点逐个 ensure（各自两次闭环）。
 # 组与组之间只保留一条真实存在的硬顺序：静态准备/安装/屏蔽 CAPI → 启动容器 → 其余。
@@ -4100,18 +4118,27 @@ build_BOUNCERVERIFY() {
     return 0
 }
 
-# ENROLL：console 注册（无注册码视为就绪，不阻断）
-verify_ENROLL() {
+# ENROLL 节点（v.108.49）：console 注册。无注册码视为就绪，不阻断引导。
+# 【为什么改写成节点级函数】v.79 把调度器换成「组 → 遍历 _order 按 NODE_GROUP_ 筛节点」
+# 之后，组级函数（verify_PREP / verify_ENROLL 这一套）就再没被任何路径调用过；
+# 而 enroll 又恰好没进 DAG_NODES，于是这一组连节点都没有，两条死路叠在一起：
+# 「组在、组日志照打、注册码永不消费」。现在 enroll 是真节点，走 ensure() 的
+# verify → build 两段，组级函数保留为薄封装（万一别处还有引用，不至于调空）。
+# 幂等性：验的是「注册码还在、console 还没 Enrolled」这一对条件，成功一次即删码，
+# 下一轮 verify 直接过，不会反复注册。
+verify_enroll() {
     [ -s "$ENROLL_KEY_FILE" ] || return 0
     console_enroll_ok
 }
-build_ENROLL() {
+build_enroll() {
     if [ ! -s "$ENROLL_KEY_FILE" ]; then
-        log "[ENROLL] 未配置注册码，跳过 console enroll"
+        log "[ENROLL] 未配置注册码（$ENROLL_KEY_FILE 缺失或为空），跳过 console enroll"
         return 0
     fi
     re_enroll
 }
+verify_ENROLL() { verify_enroll; }
+build_ENROLL() { build_enroll; }
 
 # 单步：verify 内容一致 → 置位跳过；否则 build 一次（不再复核）
 rg_step() {

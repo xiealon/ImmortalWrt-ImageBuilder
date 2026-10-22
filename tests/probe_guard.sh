@@ -16,7 +16,13 @@ PR="$REPO/files/usr/sbin/crowdsec-lxc-probe.sh"
 IN="$REPO/files/etc/init.d/crowdsec-lxc-probe"
 B24="$REPO/x86-64/build24.sh"
 B25="$REPO/x86-64/build25.sh"
-TMPD=$(mktemp -d "${TMPDIR:-/tmp}/r13.XXXXXX")
+# 本机 busybox-w32 下 $TMPDIR 为空时 mktemp 的模板会解析成空串，TMPD 变成空，
+# 于是 $ROM/$RT 退化成 /rom、/root（C 盘根）。后果不只是脏：上一次跑剩下的
+# /rom/srv/lxc/ubuntu/base 会让下一次的 guard 看到「容器就位」，凭空多出几条日志，
+# 断言就红在一个跟代码无关的地方（真踩过：本轮 R13.3/R13.14/R13.17/R13.39/R13.41）。
+TMPD="$REPO/tests/.r13.$$"
+rm -rf "$TMPD"
+mkdir -p "$TMPD" || { echo "无法创建临时目录 $TMPD"; exit 2; }
 R=0
 ck() { if [ "$2" = "$3" ]; then echo "PASS: $1"; else echo "FAIL: $1 got=[$2] want=[$3]"; R=$((R+1)); fi; }
 # 只统计活代码的命中：整行注释（行首可有空白 + #）不算。
@@ -196,4 +202,6 @@ ck "R13.46 cg 已定义" \
 
 echo "------------------------------------------------------------------"
 echo "R13 RESULT: $R 项失败"
+# 临时目录在 repo/tests 下，跑完必须清掉，否则会被下次 git add -A 带进仓库
+rm -rf "$TMPD"
 exit $R

@@ -105,11 +105,15 @@ case " $PACKAGES " in
 esac
 
 # 【v.108.45 → v.108.56】guard 的静态基准。
-# 现在基底已整份在 squashfs（$BASE_DIR），这 15 个文件本来就在里面，再拷一遍是为了
+# 现在基底已整份在 squashfs（$BASE_DIR），这 16 个文件本来就在里面，再拷一遍是为了
 # 「与 rootfs-skel 单一来源对齐」——prebuilt 包若比仓库旧，以仓库版本为准。
-# 仍然不放进来的：acquis.yaml / config.yaml / crowdsec-net.conf / resolv.conf。
-# 它们由 bootstrap 的 logconf / capi / ct_net / ct_resolv 每轮重写，
+# 仍然不放进来的：config.yaml / crowdsec-net.conf / resolv.conf。
+# 它们由 bootstrap 的 capi / ct_net / ct_resolv 每轮重写，
 # 固化进只读层就是「bootstrap 写 → guard 改回去」的死循环。
+# 【v.108.60】acquis.yaml 反过来从「不进来」变成「必须进来」：它是日志入口，
+# config.yaml 的 acquisition_path 指着它，而 v.108.46 之后 bootstrap 不再重写它
+# （setup_acquis 只校验 router.yaml 那三份）。以前它被删只能靠 _structurally_broken
+# 判整盘损坏 → 重装 288MB，现在由 guard 一次原子 cp 复原。
 # 【v.108.56】容器固定文件进 squashfs：把 prebuilt 包展开成只读基底。
 # 为什么不再「tarball 原样进固件、首启解压」：
 #   ① tarball 是个压缩包，guard 没法用 cmp 比它；展开进 squashfs 后才有同路径散文件；
@@ -160,6 +164,7 @@ for _rel in \
     etc/hosts \
     etc/resolv.conf \
     etc/crowdsec-net.conf \
+    etc/crowdsec/acquis.yaml \
     etc/crowdsec/acquis.d/router.yaml \
     etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml \
     etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml \
@@ -180,11 +185,12 @@ chmod 0644 "$ROOTFS_GUARD_DIR/etc/passwd" "$ROOTFS_GUARD_DIR/etc/group" \
            "$ROOTFS_GUARD_DIR/etc/nsswitch.conf" "$ROOTFS_GUARD_DIR/etc/hosts" \
            "$ROOTFS_GUARD_DIR/etc/resolv.conf" "$ROOTFS_GUARD_DIR/etc/crowdsec-net.conf" \
            "$ROOTFS_GUARD_DIR/etc/inittab"
-chmod 0644 "$ROOTFS_GUARD_DIR/etc/crowdsec/acquis.d/router.yaml" \
+chmod 0644 "$ROOTFS_GUARD_DIR/etc/crowdsec/acquis.yaml" \
+           "$ROOTFS_GUARD_DIR/etc/crowdsec/acquis.d/router.yaml" \
            "$ROOTFS_GUARD_DIR/etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml" \
            "$ROOTFS_GUARD_DIR/etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml"
 fi
-echo "==> 容器内受保护文件已进固件（15 个，/rom 只读基准）"
+echo "==> 容器内受保护文件已进固件（16 个，/rom 只读基准）"
 
 # 出镜像前补齐执行位并逐项断言：路径改名或文件漏拷时让构建直接失败。
 # 不再用 2>/dev/null 把 chmod 的错误吞掉——那样后面那句"已确保可执行"就是在撒谎。

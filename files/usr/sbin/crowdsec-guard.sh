@@ -35,6 +35,21 @@
 #   现在不再依赖 stat：只看有没有执行位（squashfs 会保留权限位，-x 判足够），
 #   而且**内容一致时只 chmod、绝不重写文件** —— 权限漂移不该付出重写 246KB 的代价。
 #
+# 【v.108.60】把容器里「能固定的都固定」，重点是通信 / 日志 / 网络这三条链路：
+#   · acquis.yaml（日志入口，config 的 acquisition_path 指着它）进第一层清单 ——
+#     以前它被删只能等 _structurally_broken 判「容器损坏」→ 整盘重装；现在一次原子 cp。
+#   · /etc/crowdsec 从整目录白名单收窄（见 _ovl_audit）：hub/、config.yaml、两本凭据、
+#     *.db 仍放过；其余（profiles / simulation / scenarios / postoverflows /
+#     notifications / acquis.d）由审计段按只读基底复原。新增文件不动 ——
+#     cscli 自己装的规则是新文件，不该被当成篡改。
+#   · config.yaml 单列 _cs_cfg_audit：它有设计内会变的 online_client 两行，
+#     逐字节比必然互斗，只判 daemonize / listen_uri 这两条「两态相同」的结构行。
+# 代价（明确写下，不藏在实现里）：容器里手改 profiles.yaml 这类文件会被 60 秒内盖回；
+# 要改就改 rootfs-skel/ 重新构建。这是「半不可变」的取舍，与那 3 个解析器一致。
+# 时机上的一个事实：v.108.56 起 prebuilt 包解压成 /rom/.../base 后即删，固件里不再有
+# tarball —— 也就是说 base 是设备上唯一的容器基线，而它在 squashfs 里只读、改不掉。
+# 所以这套「抹 upper = 回基底」的恢复路径不依赖任何可写副本。
+#
 # 【v.108.46】再扩 5 个静态配置（net.conf / resolv.conf / hosts /
 #   acquis.d/router.yaml / parsers 两个），共「宿主 6 + 容器内 15」= 21 个。
 #
@@ -107,7 +122,7 @@ GUARD_CT_PREFIX="/srv/lxc/ubuntu/rootfs"
 # 从前基准与运行期同路径（/rom/srv/lxc/ubuntu/rootfs），容器基底改成「整份摊进 squashfs」
 # 之后，基底在 /rom/srv/lxc/ubuntu/base，基准必须跟着搬。
 # 不搬的后果很隐蔽：_src 指向不存在的路径 → 下面 `[ -f "$_src" ] || continue` 静默跳过
-# 全部 15 个文件，guard_rc 仍是 0、日志一个字不写，看起来「一切正常」。
+# 清单里全部文件，guard_rc 仍是 0、日志一个字不写，看起来「一切正常」。
 GUARD_CT_BASE="${CS_GUARD_CT_BASE:-/srv/lxc/ubuntu/base}"
 # 可写层（overlay upperdir）。审计段用它枚举「哪些文件被碰过」。
 GUARD_CT_UPPER="${CS_GUARD_CT_UPPER:-/overlay/lxc-upper}"
@@ -145,6 +160,7 @@ GUARD_CT_FILES="${CS_GUARD_CT_FILES:-
 /etc/hosts
 /etc/resolv.conf
 /etc/crowdsec-net.conf
+/etc/crowdsec/acquis.yaml
 /etc/crowdsec/acquis.d/router.yaml
 /etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml
 /etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml
@@ -181,7 +197,7 @@ _glog() {
 # 没有 cmp 就比不了基准。不能默认"一致"（那等于静默失效），也不能默认"不一致"
 # （那会每轮无谓覆盖），只能明确报告一次然后让开。
 # 【v.108.56】第二段：可写层白名单审计（只报不杀）。
-# 第一段盯 15 个关键文件、不一致就原子复原，可它永远追不上 rootfs 里的全部文件。
+# 第一段盯清单里那几个关键文件、不一致就原子复原，可它永远追不上 rootfs 里的全部文件。
 # overlay 给了一个现成的可观测面：任何落到 base 之上的写入都会在 upper 留副本，
 # 于是「upper 里有哪些文件」就是「哪些文件被动过」的完整清单 —— 不用遍历几万个文件。
 #
@@ -354,7 +370,22 @@ _ovl_audit() {
         /.base-fingerprint|*.user-*|*.guard-tmp) continue ;;
         # bootstrap 每轮重写 / 容器运行时正常写入
         /etc/resolv.conf|/etc/crowdsec-net.conf|/etc/hostname|/etc/machine-id) continue ;;
-        /etc/crowdsec/*|/etc/config/*|/var/*|/tmp/*|/root/*|/run/*|/dev/*|/proc/*|/sys/*) continue ;;
+        # 【v.108.60】/etc/crowdsec 从「整目录放过」收窄成「只放过运行期必然变的几份」。
+        # 以前一句 `/etc/crowdsec/*` 把通信、日志、规则全交出去了：acquis.yaml 被删、
+        # profiles.yaml 被清空、scenarios/ 被替换，全都没人发现也没人修，只能靠
+        # last_pull 停滞间接看出不对（而那时已经晚了）。现在按判据分三类：
+        #   ① 运行期会变，必须放过：
+        #      hub/                    cscli hub update 整仓重写，按 base 盖回=永久冻结规则库
+        #      config.yaml             capi_block / capi_release 每轮按设计改 online_client 两行
+        #                              （改由 _cs_cfg_audit 的结构判据管，见下）
+        #      online_api_credentials  enroll 会写；local_api_credentials 是 LAPI 密码
+        #      *.db                    决策缓存（实际在 /var，这里只是兜底）
+        #   ② 构建期固定、运行期不该变 → 交给本段按 base 复原（新增的文件不在此列：
+        #      下面 `[ -f "$_ab$_r" ] || continue` 保证「容器自己加的」不被动）
+        #   ③ 其余全是运行数据，照旧放过
+        /etc/crowdsec/hub/*|/etc/crowdsec/config.yaml) continue ;;
+        /etc/crowdsec/online_api_credentials.yaml|/etc/crowdsec/local_api_credentials.yaml) continue ;;
+        /etc/crowdsec/*.db|/etc/config/*|/var/*|/tmp/*|/root/*|/run/*|/dev/*|/proc/*|/sys/*) continue ;;
         esac
         # base 里没有 = 容器自己新增的（ld.so.cache、machine-id 之类）。
         # 不删不改：删了容器可能起不来，而「新增」本身不构成篡改证据。
@@ -390,6 +421,60 @@ _ovl_audit() {
     return 0
 }
 
+# 【v.108.60】容器主配置的结构判据（config.yaml 刻意不进 GUARD_CT_FILES，也不走 _ovl_audit）。
+# 为什么不能逐字节比：它有两行是设计内会变的 —— capi_block 把 online_client 注释掉、
+# capi_release 再放开（bootstrap:3197-3217）。跟 base 逐字节比 → 每轮都判「不一致」→
+# 盖回 base → bootstrap 下一轮又改 → 死循环，且每轮往 /etc/crowdsec 塞一个 .user-* 备份。
+# 所以只判「两种状态下取值相同」的那两行。它们任一被改坏，后果都是静默失效：
+#   daemonize 不是 false → crowdsec 自己 fork 到后台、父进程秒退，supervise 的 wait
+#     立刻返回 → 每 5 秒重拉一次的假循环，还留孤儿进程（prepare:263-270 同一个判据）
+#   listen_uri 不是 0.0.0.0:8080 → 路由器侧 bouncer 永远连不上，而容器内 LAPI 一切正常
+#     （bootstrap ensure_listen_uri 同一个正则）
+# 判据三处必须同期：prepare-crowdsec-minimal.sh（构建期写定）、bootstrap ensure_listen_uri、
+# 本函数。改一处不改另两处，就会出现「构建说对了、引导说对了、guard 说不对」的互斗。
+_cs_cfg_audit() {
+    _cc_rel="/etc/crowdsec/config.yaml"
+    _cc_src="$ROM_DIR$GUARD_CT_BASE$_cc_rel"
+    _cc_f="$ROOT$GUARD_CT_PREFIX$_cc_rel"
+    # 基准里没有 = 这台机器不归我管，不臆造一个 config.yaml 出来
+    [ -f "$_cc_src" ] || return 0
+    _cc_lapi=8080
+    if [ -f "$_cc_f" ] \
+       && grep -qE '^[[:space:]]*daemonize:[[:space:]]*false' "$_cc_f" 2>/dev/null \
+       && grep -qE "^[[:space:]]*listen_uri:[[:space:]]*['\"]?0\.0\.0\.0:${_cc_lapi}['\"]?[[:space:]]*$" "$_cc_f" 2>/dev/null; then
+        return 0
+    fi
+    if [ -f "$_cc_f" ]; then
+        _cc_why="daemonize/listen_uri 判据不符"
+    else
+        _cc_why="被删除"
+    fi
+    _cc_bak=""
+    if [ -f "$_cc_f" ]; then
+        rm -f "$_cc_f".user-* 2>/dev/null
+        _cc_bak="$_cc_f.user-$(date '+%Y%m%d%H%M%S')"
+        cp -f "$_cc_f" "$_cc_bak" 2>/dev/null || _cc_bak=""
+    fi
+    # 原子替换走同目录 .guard-tmp + rename，理由与主循环容器分支完全一致：
+    # 容器随时可能读到半个 config.yaml，而 crowdsec 读不懂 YAML 就直接退出。
+    _cc_tmp="$_cc_f.guard-tmp"
+    if cp -f "$_cc_src" "$_cc_tmp" 2>/dev/null && chmod 0644 "$_cc_tmp" 2>/dev/null; then
+        if ! mv -f "$_cc_tmp" "$_cc_f" 2>/dev/null; then
+            cp -f "$_cc_tmp" "$_cc_f" 2>/dev/null
+            rm -f "$_cc_tmp" 2>/dev/null
+        fi
+        if ! cmp -s "$_cc_src" "$_cc_f"; then
+            _glog "【配置】/etc/crowdsec/config.yaml 已复原，但回读与基准不一致（疑似 overlay 孤立 inode / 缓存未刷新，多因绕过挂载点直接改 upperdir）—— 需重启或 umount 重挂"
+        else
+            _glog "【配置】/etc/crowdsec/config.yaml $_cc_why，已从只读基底复原${_cc_bak:+（原内容另存 $_cc_bak）}—— 容器内 crowdsec 进程读的仍是旧配置，重启容器或 crowdsec 后生效"
+        fi
+    else
+        rm -f "$_cc_tmp" 2>/dev/null
+        _glog "【配置】/etc/crowdsec/config.yaml 复原失败：只读基底不可读或目标不可写"
+    fi
+    return 0
+}
+
 command -v cmp >/dev/null 2>&1 || {
     _glog "【完整性】缺少 cmp，无法与只读基准比对，本次跳过"
     exit 0
@@ -419,7 +504,7 @@ _ct_gate && _CT_OK=1
 # $ROM_DIR$_rel / $ROOT$_rel。不补前缀就变成：
 #     _src=/rom/etc/passwd    ← 固件里宿主自己的 passwd
 #     _f=/etc/passwd          ← 宿主自己的 passwd
-# 于是这一组从头到尾都在「拿固件版覆盖宿主版」，容器里那 15 个文件一次都没比过。
+# 于是这一组从头到尾都在「拿固件版覆盖宿主版」，容器里那批文件一次都没比过。
 # 而且 case "$GUARD_CT_PREFIX"/* 永远不匹配，_ct_gate 的两道门形同虚设（算了不用）。
 # 真机 2026-10-22 11:02:22 那两条「/etc/passwd、/etc/group 与只读基准不一致，已复原」
 # 就是宿主被误伤，不是容器。
@@ -523,6 +608,9 @@ for _rel in $GUARD_FILES $_CT_LIST; do
 done
 
 # 只在容器组通过前置门（rootfs 已就位）时审计，否则 upper 内容没有参照意义。
+# 顺序：先修主配置（能不能被路由器连上全看它），再做整层审计 —— 主配置修好之后，
+# 审计段看到的 online_client 两行才是「这一轮的真实形态」，不会被误判成不一致。
+[ "$_CT_OK" = "1" ] && _cs_cfg_audit
 [ "$_CT_OK" = "1" ] && _ovl_audit
 
 # LAPI 段自带降频（默认 300s），所以这里无条件调用；容器未就位时函数内部直接返回。

@@ -218,10 +218,24 @@ probe_tick() {
         fi
         P_STALL=0
         P_FAIL=0
+        # 【v.108.58】last_pull 自己恢复了 = 根因已消失，停手锁存必须一起解除。
+        # 原来只清 P_STALL/P_FAIL，P_HUMAN 留着 → 下次真停滞时直接「停手」，
+        # 等于自动修复被永久关掉，而日志里只写「需人工介入」不写「因为你上次没修好」。
+        P_HUMAN_PULL=0
         P_ACTION="ok"
         return 0
     fi
     P_STALL=$((${P_STALL:-0} + 1))
+    # 【v.108.58】need-human 之后必须停手。这条检查原来只在补印分支（installed 缺失）
+    # 有 —— v.108.34 修过「达到失败阈值后冷却一过照样重跑」，但只修了那一条路；
+    # 停滞这条路照样每 10 分钟重建一次 lxcbr0、重启一次容器内 crowdsec。
+    # 重跑同一套脚本换不来新结果，代价却是真实的（真机 veth 被甩掉过一次）。
+    # 解除方式与补印分支一致：修好后重启探针、或删掉 $STATE_FILE。
+    if [ "${P_HUMAN_PULL:-0}" = "1" ]; then
+        P_ACTION="need-human-hold"
+        plog "【需人工介入】已停止重跑（last_pull 仍停滞，累计第 ${P_STALL} 轮）。修好后重启探针或删除 $STATE_FILE 解除"
+        return 0
+    fi
     if [ "$P_STALL" -lt "$PROBE_STALL_ROUNDS" ]; then
         P_ACTION="stall-warn"
         plog "【停滞】last_pull 停滞（第 $P_STALL/$PROBE_STALL_ROUNDS 轮）"
@@ -252,6 +266,16 @@ probe_tick() {
     wait "$_bp"
     _rc=$?
     rm -rf "$LOCK" 2>/dev/null
+    # 【v.108.58】bootstrap 退出 0 不等于 last_pull 修好了：bouncer_verify 在
+    # SOFT_NODES 里（首启心跳有 10s 延迟，不该把整轮引导判死），它失败时引导照样
+    # exit 0。原来这里直接 P_FAIL=0 并打「复验完成」，于是 PROBE_FAIL_ALERT 那条
+    # 「需人工介入」对 last_pull 停滞永远不可达 —— 每 10 分钟重跑一轮、日志一路报喜，
+    # 机器卡在坏状态。这是「不报错、只给错误答案」的典型形态。
+    # 退出 0 时再自问一次：仍停滞 = 这轮没修好，按失败计（97 只是给日志一个可辨识的值）。
+    if [ "$_rc" = 0 ] && ! "$BOOT" --probe-check >/dev/null 2>&1; then
+        _rc=97
+        plog "【复验未生效】bootstrap 退出 0，但 last_pull 仍停滞（bouncer_verify 是 SOFT 节点，不参与退出码）—— 按失败计"
+    fi
     if [ "$_rc" = 0 ]; then
         P_FAIL=0
         plog "【复验完成】bootstrap 退出 0（链路就绪或已修复）"
@@ -260,7 +284,10 @@ probe_tick() {
     P_FAIL=$((${P_FAIL:-0} + 1))
     if [ "$P_FAIL" -ge "$PROBE_FAIL_ALERT" ]; then
         P_ACTION="need-human"
-        plog "【需人工介入】bootstrap 连续 $P_FAIL 次退出非 0（本次 $_rc）：判定修复能力对不上现场。按设计此时不重装——重装跑同一套脚本只会重蹈覆辙。请人工检查 $BOOT_LOG"
+        # 锁存写 P_HUMAN_PULL，不写 P_HUMAN：P_HUMAN 归补印链路。
+        # 共用的话，两条链路会互相把对方的自动修复关掉，而根因完全不同。
+        P_HUMAN_PULL=1
+        plog "【需人工介入】bootstrap 连续 $P_FAIL 次未能让 last_pull 恢复（本次 $_rc）：判定修复能力对不上现场。按设计此时不重装——重装跑同一套脚本只会重蹈覆辙。请人工检查 $BOOT_LOG"
     else
         P_ACTION="fix-fail"
         plog "【复验失败】bootstrap 退出 $_rc（连续第 $P_FAIL/${PROBE_FAIL_ALERT} 次，日志见 $BOOT_LOG）"
@@ -270,9 +297,9 @@ probe_tick() {
 
 # ---- 状态落盘 / 恢复：让停滞轮数、冷却、失败计数跨重启仍然准确 ----
 _probe_save() {
-    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s\n' \
+    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s human_pull=%s\n' \
         "${P_STALL:-0}" "${P_LAST_TRIG:-0}" "${P_FAIL:-0}" "${P_ACTION:-none}" "$(date +%s)" \
-        "${P_ROUND:-0}" "${P_AUDIT_BAD:-0}" "${P_HUMAN:-0}" \
+        "${P_ROUND:-0}" "${P_AUDIT_BAD:-0}" "${P_HUMAN:-0}" "${P_HUMAN_PULL:-0}" \
         > "$STATE_FILE" 2>/dev/null
 }
 _probe_load() {
@@ -284,6 +311,9 @@ _probe_load() {
     [ -n "$_v" ] && P_LAST_TRIG="$_v"
     _v=$(printf '%s\n' "$_pl" | sed -n 's/.*fail=\([0-9][0-9]*\).*/\1/p')
     [ -n "$_v" ] && P_FAIL="$_v"
+    # 【v.108.58】停滞链路的独立锁存。旧状态文件没有这个键 → 保持 0（向后兼容）。
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*human_pull=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_HUMAN_PULL="$_v"
     _v=$(printf '%s\n' "$_pl" | sed -n 's/.*round=\([0-9][0-9]*\).*/\1/p')
     [ -n "$_v" ] && P_ROUND="$_v"
     _v=$(printf '%s\n' "$_pl" | sed -n 's/.*audit_bad=\([0-9][0-9]*\).*/\1/p')
@@ -301,6 +331,7 @@ P_LOCK_RECLAIMED=0
 P_ROUND=0
 P_AUDIT_BAD=0
 P_HUMAN=0
+P_HUMAN_PULL=0
 _probe_load
 while true; do
     P_LOCK_RECLAIMED=0

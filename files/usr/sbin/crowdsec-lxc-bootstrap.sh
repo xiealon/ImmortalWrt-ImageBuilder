@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-22.108.54-bp"
+SCRIPT_VER="2026-10-22.108.58-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -2235,6 +2235,26 @@ build_bouncer_verify() {
         sleep "$SLEEP" 2>/dev/null || sleep 1
         _w=$((_w + SLEEP))
     done
+    # 【v.108.58】等不到 ≠「还没到时候」。判据里 bouncer_pulling 依赖 last_pull 推进，
+    # 而 last_pull 不推进的一个常见根因是本地 api_key 与 LAPI 的记录已经对不上
+    # （见 _force_resign_bouncer 的注释）。这一档原来没有任何修复动作 —— 只是干等
+    # 60 秒然后软失败，于是整台机器可以带着「封禁不下发」跑很久，日志里只有一句
+    # 「bouncer 验证失败」，看不出根因。
+    # 处置顺序：先确保服务在跑（进程没起来时重签毫无意义），再重签，再给同样的 60s。
+    log "[bouncer] last_pull 60s 未刷新：先确保宿主机 bouncer 在跑，再按「key 可能已失配」重签后复验"
+    _ensure_bouncer_service
+    if _force_resign_bouncer; then
+        _w=0
+        while [ "$_w" -lt 60 ]; do
+            if verify_bouncer_verify; then
+                log "[bouncer] 重签 api_key 后 last_pull 已刷新（根因是 key 失配）"
+                return 0
+            fi
+            sleep "$SLEEP" 2>/dev/null || sleep 1
+            _w=$((_w + SLEEP))
+        done
+        log "[bouncer] 重签后 60s 内 last_pull 仍未刷新 —— 不是 key 失配（查 bouncer 进程 / 8080 连通 / 容器内 crowdsec）"
+    fi
     return 1
 }
 
@@ -3273,6 +3293,28 @@ _bouncer_service_restart() {
         sleep 1 2>/dev/null || sleep 1
     done
     log "[bouncer] 宿主机 bouncer 重载后 10 秒内 nft 表仍未就位（不阻断，交由 BOUNCERVERIFY 判定）"
+    return 0
+}
+
+# 【v.108.58】强制重签 api_key。
+# 为什么需要它：verify_bouncer_fill 只看本地 uci 三项（api_url / enabled / api_key 非空），
+# 它回答的是「本地配置齐不齐」，不是「这个 key 还被 LAPI 认不认」。于是最典型的一种失效
+# 它永远看不见 —— 换固件时 upper 与基底指纹不符、整层丢弃，LAPI 里的 bouncer 记录随之
+# 清零，而 /etc/config/crowdsec（含 api_key）在 sysupgrade 保留清单里活了下来。
+# 表现就是：每轮引导在 BOUNCERVERIFY 干等 60 秒 → 软失败（SOFT_NODES 不中止）→
+# 下一轮重来，日志里没有一处说「key 已经不认了」。
+# 复用 _bouncer_register_once：它本身就是「先删同名 → 清理残留坏记录 → add」，
+# 等于把旧 key 作废重发，不需要新写一套注册逻辑。
+_force_resign_bouncer() {
+    # LAPI 必须真的可用，否则「注册失败」会被误读成「key 修不好」。
+    _wait_lapi_ready 60 || { log "[bouncer] 重签失败：容器内 LAPI 60s 内未就绪"; return 1; }
+    _bouncer_register_once || { log "[bouncer] 重签失败：向 LAPI 注册 bouncer 失败（拿不到 key）"; return 1; }
+    log "[bouncer] 已重签 api_key（${BOUNCER_NAME}），重启宿主机 bouncer 让进程读到新值"
+    if cs_active_on_host; then
+        _bouncer_service_restart
+    else
+        _ensure_bouncer_service
+    fi
     return 0
 }
 

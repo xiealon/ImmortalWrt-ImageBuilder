@@ -62,7 +62,9 @@ ck "R19.3b tick 里按轮数取模触发" \
 ck "R19.3c 体检跑的是 --verify-only（首检 + 复检共 2 次）" \
    "$(body probe_tick "$PR_C" | grep -c '"$BOOT" --verify-only')" "2"
 ck "R19.3d 首检不符先问 ②：last_pull 此刻有效吗" \
-   "$(body probe_tick "$PR_C" | grep -c '"$BOOT" --probe-check')" "2"
+   "$(body probe_tick "$PR_C" | grep -c '"$BOOT" --probe-check')" "3"
+# 3 处 = ① 审计分支（首检不符时先问链路）② 主判定 ③ 【v.108.58】触发后复核退出码
+# （bootstrap 退出 0 不代表 last_pull 修好了：bouncer_verify 是 SOFT 节点，不参与退出码）
 ck "R19.3e last_pull 无效时不抢跑（交给停滞判定）" \
    "$(body probe_tick "$PR_C" | grep -c 'audit-wait-bouncer')" "1"
 ck "R19.3f 两次都不符才重跑引导（修复只走一个入口）" \

@@ -1469,6 +1469,7 @@ ensure_group() {
 # uci show 一条不少、日志全绿，容器却出不去。
 # 这里只报告、不参与判定：刚写完还没 reload 时看到的是旧表，拿来判死会误杀。
 _nft_fw_report() {
+    _nft_reported=1
     command -v nft >/dev/null 2>&1 || return 0
     if ! nft list chain inet fw4 forward_lxc >/dev/null 2>&1; then
         log "[FW] 未找到 nft 链 forward_lxc（zone 未绑 lxcbr0 或 firewall 未生成）"
@@ -4524,6 +4525,12 @@ main() {
         fi
         log "[WAN] 收口复核已恢复"
     fi
+
+    # 【v.108.50】防火墙「编译结果」报告：本轮没有 reload 过防火墙时也要看一眼。
+    # flush 路径里已经报过就不重复（_nft_reported=1）。这一行的意义是把
+    # 「uci 写了 proto=all」和「nft 里真的没有 l4proto 限制」分开说清楚 ——
+    # 出问题时不至于再靠人去猜是没写还是没生效。只报告，不参与判定。
+    [ "${_nft_reported:-0}" = 1 ] || _nft_fw_report
 
     # 【v.108.33】落地复核：本轮 build 过的节点必须在 flush 之后真的生效。
     # 这一关专门抓「build 返回 0、配置却没写成」——以前只有 30 轮后的体检能发现。

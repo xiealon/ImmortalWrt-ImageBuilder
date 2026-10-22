@@ -347,7 +347,9 @@ done
     rm -f "$R"/var/lib/crowdsec/data/*.download 2>/dev/null || true
     sleep 10
 done
-[ "$_HUB_TRY" -gt 1 ] && say "chroot 初始化在第 $_HUB_TRY 次尝试成功"
+if [ "$_HUB_TRY" -gt 1 ]; then
+    say "chroot 初始化在第 $_HUB_TRY 次尝试成功（前几次是下载被重置）"
+fi
 
 chroot "$R" /bin/sh -c 'ls -1 /etc/crowdsec/hub >/dev/null 2>&1 && echo hub_entries=$(ls -1 /etc/crowdsec/hub | wc -l)'
 

@@ -109,6 +109,8 @@ GUARD_CT_PREFIX="/srv/lxc/ubuntu/rootfs"
 # 不搬的后果很隐蔽：_src 指向不存在的路径 → 下面 `[ -f "$_src" ] || continue` 静默跳过
 # 全部 15 个文件，guard_rc 仍是 0、日志一个字不写，看起来「一切正常」。
 GUARD_CT_BASE="${CS_GUARD_CT_BASE:-/srv/lxc/ubuntu/base}"
+# 可写层（overlay upperdir）。审计段用它枚举「哪些文件被碰过」。
+GUARD_CT_UPPER="${CS_GUARD_CT_UPPER:-/overlay/lxc-upper}"
 GUARD_CT_FILES="${CS_GUARD_CT_FILES:-
 /etc/passwd
 /etc/group
@@ -151,6 +153,44 @@ _glog() {
 
 # 没有 cmp 就比不了基准。不能默认"一致"（那等于静默失效），也不能默认"不一致"
 # （那会每轮无谓覆盖），只能明确报告一次然后让开。
+# 【v.108.56】第二段：可写层白名单审计（只报不杀）。
+# 第一段盯 15 个关键文件、不一致就原子复原，可它永远追不上 rootfs 里的全部文件。
+# overlay 给了一个现成的可观测面：任何落到 base 之上的写入都会在 upper 留副本，
+# 于是「upper 里有哪些文件」就是「哪些文件被动过」的完整清单 —— 不用遍历几万个文件。
+#
+# 但「进过 upper」不等于「被改坏」：真机实测 chmod/utime 也会 copy-up，
+# 容器还会自己写 hostname / machine-id。所以判据不是「有没有」，而是「内容是否仍等于 base」。
+# base 里没有这个文件 = 容器新增的（machine-id 就是），不算篡改，跳过。
+#
+# 只报不杀：运行时写入与篡改在字节上不可区分，先观察误报率再决定要不要升级成复原。
+# 单个文件不一致就让整盘回滚，代价远大于收益。
+_ovl_audit() {
+    _ab="$ROM_DIR$GUARD_CT_BASE"
+    [ -d "$_ab" ] || return 0
+    [ -d "$GUARD_CT_UPPER" ] || return 0
+    _n=0
+    _shown=0
+    for _u in $(find "$GUARD_CT_UPPER" -type f 2>/dev/null); do
+        _r="${_u#"$GUARD_CT_UPPER"}"
+        case "$_r" in
+        # 我们自己的元数据与 guard 备份
+        /.base-fingerprint|*.user-*|*.guard-tmp) continue ;;
+        # bootstrap 每轮重写 / 容器运行时正常写入
+        /etc/resolv.conf|/etc/crowdsec-net.conf|/etc/hostname|/etc/machine-id) continue ;;
+        /etc/crowdsec/*|/etc/config/*|/var/*|/tmp/*|/root/*|/run/*|/dev/*|/proc/*|/sys/*) continue ;;
+        esac
+        [ -f "$_ab$_r" ] || continue
+        cmp -s "$_ab$_r" "$_u" && continue
+        _n=$((_n + 1))
+        if [ "$_shown" -lt 10 ]; then
+            _shown=$((_shown + 1))
+            _glog "【审计】$_r 的可写层副本与只读基底不一致（只报不杀，请人工确认）"
+        fi
+    done
+    [ "$_n" -gt 10 ] && _glog "【审计】另有 $((_n - 10)) 处不一致未列出（本轮共 $_n 处）"
+    return 0
+}
+
 command -v cmp >/dev/null 2>&1 || {
     _glog "【完整性】缺少 cmp，无法与只读基准比对，本次跳过"
     exit 0
@@ -282,5 +322,8 @@ for _rel in $GUARD_FILES $_CT_LIST; do
         ;;
     esac
 done
+
+# 只在容器组通过前置门（rootfs 已就位）时审计，否则 upper 内容没有参照意义。
+[ "$_CT_OK" = "1" ] && _ovl_audit
 
 exit 0

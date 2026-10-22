@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-22.108.49-bp"
+SCRIPT_VER="2026-10-22.108.50-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -1463,6 +1463,27 @@ ensure_group() {
     return 0
 }
 
+# 编译结果自检（v.108.50）：uci 里写了 proto=all ≠ nft 里真的没有协议限制。
+# 真机踩过的坑（v.108.48 之前）：config rule 不写 option proto 时 fw4 默认按 tcpudp
+# 编译，一条规则被拆成 tcp + udp 两条，ICMP/ESP/GRE 全落在规则外 ——
+# uci show 一条不少、日志全绿，容器却出不去。
+# 这里只报告、不参与判定：刚写完还没 reload 时看到的是旧表，拿来判死会误杀。
+_nft_fw_report() {
+    command -v nft >/dev/null 2>&1 || return 0
+    if ! nft list chain inet fw4 forward_lxc >/dev/null 2>&1; then
+        log "[FW] 未找到 nft 链 forward_lxc（zone 未绑 lxcbr0 或 firewall 未生成）"
+        return 0
+    fi
+    _nr=$(nft list chain inet fw4 forward_lxc 2>/dev/null | grep -c 'meta l4proto')
+    _nr=${_nr:-0}
+    if [ "$_nr" -gt 0 ]; then
+        log "[FW] 警告：forward_lxc 里仍有 $_nr 条带 l4proto 的规则 → ICMP/ESP/GRE 会被漏掉，检查 proto=all 是否真的写进去"
+    else
+        log "[FW] forward_lxc 无协议限制（proto=all 已生效，ICMP 可通）"
+    fi
+    return 0
+}
+
 # 分组 flush（v.95：验证 + 修改语义）：按 DAG 收集的 _dirty_* 决定 commit / reload，
 # 每组至多一次。commit 只把内存改动落到 /etc/config/*，reload 才让运行中的进程读到新值，
 # 两者必须成对：
@@ -1530,6 +1551,7 @@ flush_uci() {
         fi
         if /etc/init.d/firewall reload >/dev/null 2>&1; then
             log "[flush] firewall 已重载（nft 表已重建）"
+            _nft_fw_report
         else
             _fu_bad="$_fu_bad firewall-reload"
             log "[flush] firewall 重载失败（配置已落盘，下次重载/重启仍生效）"
@@ -1724,13 +1746,29 @@ verify_sub_ct_cfg() {
 
 # ---- PREP / ct_net：容器网络静态文件（IP / 网关 / DNS）+ 双向连通性 ----
 # 文件正确只是"配置对"，ping 通才是"真的通"。两个方向都要验：
+# 容器内 ping 的一次尝试：写法依次降级。
+# 真机现象（24.10，2026-10-22）：脚本判「容器 ping 网桥失败」，人手进容器 ping 却是通的。
+# 两种原因都会造成假失败，且都不该判「不符」：
+#   · 极简 rootfs 的 busybox ping 未必认 `-W`（老版本只有 `-w`），选项错 → rc≠0；
+#   · veth 刚被 netifd 重建过时，第一次 ping 常因邻居表还没建立而丢包。
+# 口径：先严后宽，中间隔 1 秒，任一写法通即算通。
+_ct_ping_ok() {
+    _cpk_h="$1"
+    _ct_env "ping -c 1 -W 2 $_cpk_h" >/dev/null 2>&1 && return 0
+    _ct_env "ping -c 1 -w 3 $_cpk_h" >/dev/null 2>&1 && return 0
+    sleep 1
+    _ct_env "ping -c 1 $_cpk_h" >/dev/null 2>&1 && return 0
+    return 1
+}
+_host_ping_ok() {
+    ping -c 1 -W 2 "$1" >/dev/null 2>&1 && return 0
+    sleep 1
+    ping -c 1 "$1" >/dev/null 2>&1
+}
 verify_ct_net_ping() {
     ct_running || return 0          # 未启动：不判 ping，交给后续组
-    _p1=1; _p2=1
-    ping -c 1 -W 2 "$CONTAINER_IP" >/dev/null 2>&1 && _p1=0
-    _ct_env "ping -c 1 -W 2 $BRIDGE_IP" >/dev/null 2>&1 && _p2=0
-    [ "$_p1" = 0 ] || { log "[网络] 宿主机 ping 容器 $CONTAINER_IP 失败"; return 1; }
-    [ "$_p2" = 0 ] || { log "[网络] 容器 ping 网桥 $BRIDGE_IP 失败"; return 1; }
+    _host_ping_ok "$CONTAINER_IP" || { log "[网络] 宿主机 ping 容器 $CONTAINER_IP 失败"; return 1; }
+    _ct_ping_ok "$BRIDGE_IP" || { log "[网络] 容器 ping 网桥 $BRIDGE_IP 失败"; return 1; }
     return 0
 }
 verify_ct_net() {
@@ -1745,6 +1783,15 @@ build_ct_net() {
             _ct_env "/etc/init.d/netconf restart" >/dev/null 2>&1 || true
         else
             _ct_env "systemctl restart systemd-networkd" >/dev/null 2>&1 || true
+        fi
+        # 【v.108.50】改完文件不等于通了。真机上「每轮判不符 → 每轮重建一次」的根因
+        # 往往是 veth 已经从 lxcbr0 上掉了（netifd 重建过网桥），而 netconf restart
+        # 只套用地址、不负责把端口接回去。这里接回去再验一次：修好了下一轮自然通过，
+        # 修不好也要把话说出来，不许假绿。
+        if ! verify_ct_net_ping; then
+            log "[网络] 重建后仍不通，检查 veth 是否掉线并尝试重接"
+            _reattach_ct_veth || true
+            verify_ct_net_ping || log "[网络] veth 重接后仍不通（宿主机侧链路问题，等下次网络重载/重启）"
         fi
     fi
     return 0
@@ -1858,10 +1905,36 @@ build_ct_resolv() {
 # ---- CAPIBLOCK / capi_block：容器启动前注释掉 online_client ----
 # 关键：这一步必须在 ct_boot 之前。config.yaml 是 crowdsec 启动时读取的，
 # 启动后再改等于没改（服务不重载），新装阶段会因拿不到中央 API 凭证而反复重启。
+#
+# 【v.108.50】「本轮到底需不需要屏蔽」抽成单独判据，修的是每轮开机的自相矛盾：
+#   capi_block 要求 off，capi_release 要求 on —— 同一台机器上这两条不可能同时成立。
+#   以前 verify_capi_block 无条件要求 off，于是只要容器已经跑过一轮「放出」，
+#   下一轮（探针重跑、阶段 3 的逐节点复验）必然判不符 → 注释 → 紧接着
+#   capi_release 又判不符 → 放回 + 重启 crowdsec + 等 8080 回来（真机 29s）。
+#   一来一回，日志里就是 _done_capi_block=B 与 _done_capi_release=B 同时出现。
+#
+#   两种情况下「启动前屏蔽」这个义务本身就不存在：
+#   ① 容器已经在跑：启动窗口已经过去，此时注释只在下次重启才生效，
+#      而 capi_release 的目标恰恰是 on —— 改了纯属自相矛盾；
+#   ② 已装机（有 installed 标记）且 CAPI 凭据文件非空：新装期那个
+#      「拿不到凭证 → 引擎反复重启」的前提不成立（空文件才是硬错误），
+#      直接带着 on 启动即可，连那一次「放开后重启」都省了。
+_capi_block_needed() {
+    ct_running && return 1
+    if _stamp_present && [ -s "$ROOTFS/etc/crowdsec/online_api_credentials.yaml" ]; then
+        return 1
+    fi
+    return 0
+}
 verify_capi_block() {
+    _capi_block_needed || return 0
     verify_online_client_off
 }
 build_capi_block() {
+    if ! _capi_block_needed; then
+        log "[CAPI] 本轮无需启动前屏蔽（容器已在跑，或已装机且 CAPI 凭据非空），跳过注释"
+        return 0
+    fi
     # v.108.34：build 返回 0 只代表 sed 没报错，不代表文件真的变成了 off。
     # 因为 capi_block 已从收尾复核里豁免（见 _post_verify_skip 的理由），
     # 「真的没写成」必须在当场抓住 —— 否则它会被 capi_release 悄悄盖过去。
@@ -3697,7 +3770,17 @@ _bs_on_signal() {
 }
 
 console_enroll_ok() {
-    _out="$(_ct_env "$CSCLI capi status" 2>&1)"
+    # ① 首选 cscli console status：它直接回答「这台机器有没有绑到 console」，
+    #    真机输出里 CAPI 一行是 `Central API (CAPI) ❌ not registered` / `✔️ ...`。
+    #    加 timeout 是因为这条会顺带问一次中央 API，网络不好时可能挂住。
+    #    （v.108.50 之前只 grep capi status 里的 enrolled，词不达意就会误判）
+    _out="$(_ct_env "timeout 10 $CSCLI console status" 2>&1)"
+    if printf '%s' "$_out" | grep -qi 'central api'; then
+        printf '%s' "$_out" | grep -qi 'not registered' && return 1
+        return 0
+    fi
+    # ② 退回 capi status 的 enrolled 判据（console status 不可用时的兜底）
+    _out="$(_ct_env "timeout 10 $CSCLI capi status" 2>&1)"
     [ -n "$_out" ] || return 1
     _line="$(printf '%s\n' "$_out" | grep -i 'enrolled' | head -n1)"
     [ -n "$_line" ] || return 1

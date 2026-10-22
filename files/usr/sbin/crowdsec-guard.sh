@@ -44,6 +44,11 @@
 #     cscli 自己装的规则是新文件，不该被当成篡改。
 #   · config.yaml 单列 _cs_cfg_audit：它有设计内会变的 online_client 两行，
 #     逐字节比必然互斗，只判 daemonize / listen_uri 这两条「两态相同」的结构行。
+#   · profiles.yaml / simulation.yaml 进第一层清单：它们在 upper 里被改坏，crowdsec
+#     启动就在解析阶段失败 —— 那不是「配置不合适」，是 LAPI 已经死了。
+#   · 同类但无法逐文件列举的（scenarios / parsers / postoverflows / notifications /
+#     acquis.d），在审计段里豁免单轮上限 OVL_FIX_MAX：那个上限是防「白名单漏了大目录
+#     被整层推回出厂态」，不该拦「动了就死」的配置。
 # 代价（明确写下，不藏在实现里）：容器里手改 profiles.yaml 这类文件会被 60 秒内盖回；
 # 要改就改 rootfs-skel/ 重新构建。这是「半不可变」的取舍，与那 3 个解析器一致。
 # 时机上的一个事实：v.108.56 起 prebuilt 包解压成 /rom/.../base 后即删，固件里不再有
@@ -164,6 +169,8 @@ GUARD_CT_FILES="${CS_GUARD_CT_FILES:-
 /etc/crowdsec/acquis.d/router.yaml
 /etc/crowdsec/parsers/s01-parse/openwrt-dropbear.yaml
 /etc/crowdsec/parsers/s02-enrich/openwrt-whitelist.yaml
+/etc/crowdsec/profiles.yaml
+/etc/crowdsec/simulation.yaml
 /etc/inittab
 /etc/init.d/rcS
 /etc/init.d/crowdsec
@@ -395,10 +402,20 @@ _ovl_audit() {
         # 单轮上限：正常 upper 里只有几十个文件，某一轮突然冒出上百个不一致，
         # 多半是白名单漏了某个目录（某个包在写 /usr/lib 之类）。这时全量复原
         # 等于把整个 rootfs 推回出厂状态，必须先停下来只记录。
-        if [ "$_fixed" -ge "$OVL_FIX_MAX" ]; then
-            _skip=$((_skip + 1))
-            continue
-        fi
+        #
+        # 【v.108.60】但 /etc/crowdsec 下的一切不吃这个上限：profiles / simulation /
+        # scenarios / parsers / postoverflows 被改坏，crowdsec 启动就在解析阶段失败，
+        # LAPI 直接死 —— 那不是「某个包在批量写」那种可疑迹象，是已经在流血的伤口。
+        # 上限存在的目的是防误伤陌生路径，不该拦「动了就死」的配置。
+        case "$_r" in
+        /etc/crowdsec/*) ;;
+        *)
+            if [ "$_fixed" -ge "$OVL_FIX_MAX" ]; then
+                _skip=$((_skip + 1))
+                continue
+            fi
+            ;;
+        esac
         _f="$ROOT$GUARD_CT_PREFIX$_r"
         # 备份只留最近一份，避免 /etc 下 .user-* 随轮次堆积
         rm -f "$_u".user-* 2>/dev/null

@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-22.108.58-bp"
+SCRIPT_VER="2026-10-22.108.59-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -152,6 +152,29 @@ fi
 BRIDGE_IP="${BRIDGE_IP:-10.1.0.1}"
 
 log() { echo "[$(date '+%F %T')] $*"; }
+
+# ---- 日志封顶（v.108.59）----
+# 三处日志里只有这一个没有上限：rc.local 与探针都用 >> 追加同一份文件，
+# 而 /root 在 overlay 上层，写进去都是 flash。阈值取 1MB（约十几轮完整引导），
+# 超限保留最后 2000 行 —— 一次完整引导约 600~900 行，留够「上一轮 + 这一轮」
+# 好对照，常态占用回落到几十 KB。
+# 只在真引导开始时截一次：截得太勤会把「上一轮怎么失败的」抹掉，那正是最该看的。
+BOOT_LOG="${CS_BOOTSTRAP_LOG:-/root/crowdsec-lxc-bootstrap.log}"
+BOOT_LOG_MAX="${CS_BOOTSTRAP_LOG_MAX:-1048576}"
+BOOT_LOG_KEEP="${CS_BOOTSTRAP_LOG_KEEP:-2000}"
+_boot_log_trim() {
+    [ -f "$BOOT_LOG" ] || return 0
+    _bl_sz=$(wc -c <"$BOOT_LOG" 2>/dev/null) || return 0
+    [ -n "$_bl_sz" ] || return 0
+    [ "$_bl_sz" -gt "$BOOT_LOG_MAX" ] 2>/dev/null || return 0
+    tail -n "$BOOT_LOG_KEEP" "$BOOT_LOG" >"$BOOT_LOG.tmp" 2>/dev/null || {
+        rm -f "$BOOT_LOG.tmp" 2>/dev/null
+        return 0
+    }
+    mv -f "$BOOT_LOG.tmp" "$BOOT_LOG" 2>/dev/null || return 0
+    log "【日志】$BOOT_LOG 超过 ${BOOT_LOG_MAX} 字节，已截断为最后 ${BOOT_LOG_KEEP} 行"
+    return 0
+}
 
 case "$0" in
     /*) _SELF="$0" ;;
@@ -5040,5 +5063,8 @@ if [ "${1:-}" = "--only-funcs" ]; then
     sed -n '1,/^main "\$@"$/p' "$0" | sed '$d'
     exit 0
 fi
+
+# ---- 日志封顶：真引导才截，--verify-only / --probe-check 早就 exit 了 ----
+_boot_log_trim
 
 main "$@"

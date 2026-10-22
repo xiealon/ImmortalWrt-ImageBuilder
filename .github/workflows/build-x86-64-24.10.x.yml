@@ -200,11 +200,17 @@ jobs:
 
       - name: Download prebuilt Crowdsec LXC tarball (Crowdsec-LXC Release)
         id: lxc_prebuilt
-        # 先用 Crowdsec-LXC 仓库构建好的 rootfs tarball（每周一自动滚一次），
-        # 命中就省掉本地 apt 拉包 + 打包（约 50s，且不受 packagecloud 抖动影响）。
+        # 【v.108.59】唯一来源：Crowdsec-LXC 仓库出的 rootfs tarball。
+        # 本仓原来还有一条「本地 apt 拉包 + 打包」的回退，已经删掉 —— 容器出包这件事
+        # 早就分到 Crowdsec-LXC 了，留着两条路只会让「包没下到」被本地构建盖过去。
+        # 现在取不到就在这一步 ::error:: + exit 1，不会走到 make image 才报。
+        #
         # 判据是 MANIFEST 里的 prepare_script_sha256 / rootfs_skel_sha256 与当前仓库
-        # 逐字节一致 —— 只认「同一份代码产出的镜像」，不是同一份就回退本地构建。
-        # 任何一步失败都不 fail 本步骤（set 不用 -e），最终由 ok 输出决定走哪条路。
+        # 逐字节一致 —— 只认「同一份代码产出的镜像」。
+        # 注意 shell/prepare-crowdsec-minimal.sh 与 rootfs-skel/ 的所有权仍在本仓：
+        # Crowdsec-LXC 的 workflow 会 checkout 本仓来跑那个脚本、用这个 skel 算指纹。
+        # 这两处一改，本地指纹立刻和新包对不上，构建会红 —— 必须先去那边 dispatch 一次
+        # 重新出包（那边没有 schedule，只能手动触发）。
         run: |
           set -uo pipefail
           OUT_DIR="files/etc/crowdsec"
@@ -281,58 +287,24 @@ jobs:
           done
           if [ "$OK" != "1" ]; then
             rm -f "$OUT"
-            echo "[预构建] 未取得可用 tarball（原因：${REASON# }）→ 回退本地构建"
-            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "[预构建] 未取得可用 tarball（原因：${REASON# }）→ 没有回退可走"
+            # 失败也写进 step summary：退出以后日志能翻，摘要页面上却只剩空白。
+            {
+              echo "### Crowdsec LXC rootfs 来源"
+              echo ""
+              echo "- **取不到**：${REASON# }"
+              echo "- 本仓不再本地构建容器镜像（v.108.59），没有基底就不产出固件"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::未取得可用的 Crowdsec LXC 基底（原因：${REASON# }）—— 去 Crowdsec-LXC 手动 dispatch 一次，或确认 lxc-latest 的 MANIFEST 指纹与本次 commit 一致"
+            exit 1
           fi
+          # 失败那条已经在上面 exit 了，这里只剩命中一种情况，不再留死分支。
           {
             echo "### Crowdsec LXC rootfs 来源"
             echo ""
-            if [ "$OK" = "1" ]; then
-              echo "- 预构建命中：Crowdsec-LXC Release \`$TAG\`，crowdsec \`$M_CS\`"
-              echo "- 指纹校验：prepare_script / rootfs_skel 与本次 commit 一致"
-            else
-              echo "- 预构建不可用，**回退本地构建**（原因：${REASON# }）"
-            fi
+            echo "- 预构建命中：Crowdsec-LXC Release \`$TAG\`，crowdsec \`$M_CS\`"
+            echo "- 指纹校验：prepare_script / rootfs_skel 与本次 commit 一致"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Prepare Crowdsec LXC Rootfs (minimal, no distro layer)
-        id: lxc_prepare_local
-        if: steps.lxc_prebuilt.outputs.ok != 'true'
-        run: |
-          RUNAS=""
-          [ "$(id -u)" = "0" ] || RUNAS="sudo -n"
-          # 回退路径同样守版本：pin 住期望版本，避免「预构建不可用」时静默装成最新。
-          if [ -n "${CROWDSEC_VERSION:-}" ]; then
-            $RUNAS mkdir -p /etc/apt/preferences.d
-            printf 'Package: crowdsec\nPin: version %s*\nPin-Priority: 1001\n' "$CROWDSEC_VERSION" \
-              | $RUNAS tee /etc/apt/preferences.d/crowdsec-pin >/dev/null
-            echo "本地构建已 pin crowdsec ${CROWDSEC_VERSION}："
-            cat /etc/apt/preferences.d/crowdsec-pin
-          else
-            echo "未锁版本，本地构建将安装 packagecloud 最新 crowdsec"
-          fi
-          chmod +x shell/prepare-crowdsec-minimal.sh
-          $RUNAS env CONTAINER_IP="${CS_CT_IP:-10.1.0.10}" BRIDGE_IP="${CS_BRIDGE_IP:-10.1.0.1}" \
-               bash shell/prepare-crowdsec-minimal.sh
-          echo "容器 rootfs 体积（极简：busybox + 静态 crowdsec，不含发行版层）："
-          ls -lh files/etc/crowdsec/lxc-crowdsec.tar.gz
-          # 记录实际用到的版本（无论是否锁版本），写进 Release 说明，便于回溯。
-          DEB="$(ls /tmp/lxc-crowdsec-minimal/crowdsec_*.deb 2>/dev/null | head -1 || true)"
-          GOT="$(basename "${DEB:-crowdsec_none.deb}" | sed -E 's/^crowdsec_(.+)_[a-z0-9]+\.deb$/\1/')"
-          printf 'version=%s\nsource=local-build\n' "$GOT" > "$GITHUB_WORKSPACE/crowdsec-build.txt"
-          echo "本地构建 crowdsec 版本：$GOT"
-          # 只有显式锁了版本时才强校验（pin 没命中时 apt 会安静回落到最新，必须挡住）。
-          if [ -n "${CROWDSEC_VERSION:-}" ]; then
-            case "$GOT" in
-              "$CROWDSEC_VERSION"|"$CROWDSEC_VERSION"-*|"$CROWDSEC_VERSION"~*|"$CROWDSEC_VERSION"+*) : ;;
-              *)
-                echo "::error::本地构建的 crowdsec 是 $GOT，期望 $CROWDSEC_VERSION —— pin 未命中，拒绝继续"
-                exit 1
-                ;;
-            esac
-            echo "本地构建 crowdsec 版本校验通过：$GOT"
-          fi
-          echo "⚠️ 若下一步 make image 报空间不足，请把 profile 调到 2G 或更大"
 
       - name: Build ImmortalWrt x86-64 EFI 24.10.x
         run: |

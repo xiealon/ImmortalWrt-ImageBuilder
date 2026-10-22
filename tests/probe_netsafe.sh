@@ -378,10 +378,12 @@ for _w in "$W24" "$W25"; do
     ck "R16.5 $_n 空间不足直接失败（不自动跳过）" \
        "$(grep -c '请把 Profile 调到 2G / 3G / 4G / 10G 后重跑' "$_w")" "1"
 done
-# 反过来确认核心步骤还在：删条件不能把整步一起删了
+# 两种结构都算过：master 只有 Download（v.108.59 删掉了 Prepare 回退），
+# patch-1 这类「纯本地构建」分支只有 Prepare —— 判据是「至少有一条产出容器的路」。
 for _w in "$W24" "$W25"; do
-    ck "R16.6 $(basename "$_w" .yml) 仍会跑容器 rootfs 准备" \
-       "$(grep -c 'prepare-crowdsec-rootfs.sh' "$_w")" "2"
+    ck "R16.6 $(basename "$_w" .yml) 仍会取容器 rootfs（Download 或 Prepare 至少一条在）" \
+       "$(grep -cE 'Download prebuilt Crowdsec LXC tarball|Prepare Crowdsec LXC Rootfs' "$_w" \
+          | awk '{ print ($1 >= 1) ? "1" : "0" }')" "1"
 done
 
 echo "== 17 断言自身不许再被注释糊弄 =="

@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-22.108.51-bp"
+SCRIPT_VER="2026-10-22.108.52-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -49,6 +49,12 @@ LEGACY_TARBALL="/opt/lxc-ubuntu.tar.gz"
 LAPI_PORT="${LAPI_PORT:-8080}"
 BOUNCER_NAME="${BOUNCER_NAME:-openwrt-fw}"
 ENROLL_KEY_FILE="${ENROLL_KEY_FILE:-/etc/config/crowdsec_enroll_key.txt}"
+# 【v.108.52】注册码「保险柜」：注册成功后不再 rm 掉 key，而是移到同名 .keep（600）。
+# 为什么改：v.99 起「注册成功即删」是为了不让明文 key 留在公开固件上，但 key 同时也是
+# 设备唯一的自愈凭据 —— 网页端手滑关闭实例后 re_enroll 读不到 key，只能重刷固件。
+# 折中：留在 /etc/config（sysupgrade 默认保留 → 升级后自愈能力不丢），但不参与固件分发，
+# 且日志里只出现路径不出现内容。
+ENROLL_KEY_KEEP="${ENROLL_KEY_KEEP:-${ENROLL_KEY_FILE}.keep}"
 MAX_WAIT="${MAX_WAIT:-60}"
 SLEEP=5
 CROWDSEC_CFG="$ROOTFS/etc/crowdsec/config.yaml"
@@ -139,7 +145,10 @@ esac
 [ -n "$_SELF" ] && chmod +x "$_SELF" 2>/dev/null
 chmod +x /etc/rc.local 2>/dev/null
 
-ct() { timeout 30 lxc-attach -P "$LXC_PATH" -n "$LXC_NAME" -- "$@"; }
+# 【v.108.52】30s → 60s：极简 rootfs 首次 attach 要等 PID1 就绪，30s 会截断成假失败，
+# 而调用方看到的是「命令失败」而不是「attach 超时」，非常难查。可用 CT_TIMEOUT 覆盖。
+CT_TIMEOUT="${CT_TIMEOUT:-60}"
+ct() { timeout "$CT_TIMEOUT" lxc-attach -P "$LXC_PATH" -n "$LXC_NAME" -- "$@"; }
 ct_running() { lxc-ls -P "$LXC_PATH" --running 2>/dev/null | grep -qw "$LXC_NAME"; }
 ct_exists() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; }
 ct_pid() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>/dev/null | sed -n 's/^PID:[[:space:]]*//p' | head -n1; }
@@ -963,7 +972,7 @@ build_lan_input() {
 #     [DAG] 组 ENROLL 就序（0 个小步骤）
 #     ---- 组 ENROLL（Console Enroll）：0 个小步骤 ----
 #     [ENROLL] Console Enroll 完成（0/0）
-# re_enroll / console_enroll_ok / _drop_enroll_key 一次都没被调用过（死代码）。
+# re_enroll / console_enroll_ok / 注册码保管（v.108.52 起为 _park_enroll_key）一次都没被调用过（死代码）。
 # 真机证据（24.10，2026-10-22）：/etc/config/crowdsec_enroll_key.txt 26 字节一直在，
 # 全量日志 grep 不到「已删除注册码文件」，而 cscli console status 是 not registered。
 DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll"
@@ -1572,7 +1581,15 @@ flush_uci() {
     for _o in $DAG_NODES; do
         # 【v.108.33】清之前先记一笔：这一轮到底 build 过谁。收尾复核按这份名单走，
         # 不能按 _done_ 走（_done_ 里还有本轮本来就没问题的节点，复核它们纯属浪费）。
-        _bs_flag_on "_dirty_$_o" && _built_nodes="$_built_nodes $_o"
+        if _bs_flag_on "_dirty_$_o"; then
+            # 【v.108.52】去重：flush_uci 一轮里会被调用不止一次（收尾复核前还要再 flush），
+            # 真机日志出现过 `[复核] 首轮不符： ct_net ct_net`，重复项让「不符 N 个」虚高，
+            # 也让同一个节点被复验两次、白等一轮。
+            case " $_built_nodes " in
+                *" $_o "*) ;;
+                *) _built_nodes="$_built_nodes $_o" ;;
+            esac
+        fi
         _bs_flag_clear "_dirty_$_o"   # v.99：置位值是 B:<ts>，归零 = 清空（写 0 会被判成脏）
     done
     [ "$_n$_d$_f" = "000" ] && log "[flush] 无配置改动，零 commit、零 reload"
@@ -1773,6 +1790,20 @@ _ct_ping_ok() {
     _ct_env "ping -c 1 $_cpk_h" >/dev/null 2>&1 && return 0
     return 1
 }
+# 【v.108.52】ping 失败时的分层诊断：attach 本身通不通、三种写法的 rc 与输出各是什么。
+# 只在失败路径调用（成功一次就 return，零额外开销），日志里带 rc，便于下次一眼定位。
+_ct_ping_diag() {
+    _cpd_h="$1"
+    _cpd_t="$(_ct_env "true" 2>&1)"; _cpd_trc=$?
+    log "[网络]   attach 探针 rc=$_cpd_trc ${_cpd_t:-（无输出）}"
+    _cpd_a="$(_ct_env "ping -c 1 -W 2 $_cpd_h" 2>&1)"; _cpd_arc=$?
+    log "[网络]   ping -c 1 -W 2 → rc=$_cpd_arc $(printf '%s' "$_cpd_a" | tr '\n' ' ' | cut -c1-200)"
+    _cpd_b="$(_ct_env "ping -c 1 -w 3 $_cpd_h" 2>&1)"; _cpd_brc=$?
+    log "[网络]   ping -c 1 -w 3 → rc=$_cpd_brc $(printf '%s' "$_cpd_b" | tr '\n' ' ' | cut -c1-200)"
+    _cpd_c="$(_ct_env "ping -c 1 $_cpd_h" 2>&1)"; _cpd_crc=$?
+    log "[网络]   ping -c 1     → rc=$_cpd_crc $(printf '%s' "$_cpd_c" | tr '\n' ' ' | cut -c1-200)"
+    return 0
+}
 _host_ping_ok() {
     ping -c 1 -W 2 "$1" >/dev/null 2>&1 && return 0
     sleep 1
@@ -1780,8 +1811,23 @@ _host_ping_ok() {
 }
 verify_ct_net_ping() {
     ct_running || return 0          # 未启动：不判 ping，交给后续组
-    _host_ping_ok "$CONTAINER_IP" || { log "[网络] 宿主机 ping 容器 $CONTAINER_IP 失败"; return 1; }
-    _ct_ping_ok "$BRIDGE_IP" || { log "[网络] 容器 ping 网桥 $BRIDGE_IP 失败"; return 1; }
+    if ! _host_ping_ok "$CONTAINER_IP"; then
+        log "[网络] 宿主机 ping 容器 $CONTAINER_IP 失败（仅告警，不计入不符）"
+        _ct_ping_diag "$CONTAINER_IP"
+        return 0
+    fi
+    if ! _ct_ping_ok "$BRIDGE_IP"; then
+        # 【v.108.52】ping 从「硬判据」降为「告警」。
+        # 真机（24.10，2026-10-22）：人手 lxc-attach 进容器 ping 网桥 1/1 通，脚本在
+        # 同一时刻用同一条命令却 rc=1；而 _ct_env "echo hi"、"command -v ping" 都 rc=0，
+        # ct ls 也 rc=0 —— 失败夹在「attach 成功」与「ping 返回」之间，既不是防火墙
+        # （input_lxc 已是 jump accept，forward_lan 有 lan2lxc 且无 l4proto），也不是 DNS。
+        # 既然文件内容核对（verify_sub_ct_net）才是硬判据，ping 就不该让整轮引导 exit 1：
+        # 那会把「一次手工重跑」变成「构建后始终不符 → 引导失败」的假故障。
+        # 保留完整诊断输出，下次真出问题能一眼定位是哪一层。
+        log "[网络] 容器 ping 网桥 $BRIDGE_IP 失败（仅告警，不计入不符；静态内容已核对）"
+        _ct_ping_diag "$BRIDGE_IP"
+    fi
     return 0
 }
 verify_ct_net() {
@@ -3826,13 +3872,21 @@ _bs_on_signal() {
 }
 
 console_enroll_ok() {
-    # ① 首选 cscli console status：它直接回答「这台机器有没有绑到 console」，
-    #    真机输出里 CAPI 一行是 `Central API (CAPI) ❌ not registered` / `✔️ ...`。
+    # ① 首选 cscli console status：它直接回答「这台机器有没有绑到 console」。
+    #    ⚠️【v.108.52 根因修正】真机输出（24.10，网页端关闭实例后，2026-10-22）：
+    #      | Central API (CAPI) | ✅ authenticated |
+    #      | Enrolled           | ❌ not enrolled  |
+    #    CAPI 的 authenticated 与 console 的 Enrolled 是**两件事**：网页上把实例
+    #    「关闭/删除」后，CAPI 凭据照样被接受（authenticated），只有 Enrolled 变成
+    #    not enrolled。v.108.51 及之前只 grep 字符串 'not registered'，于是把
+    #    「未注册」误判成「已注册」→ verify_enroll 直接 return 0 → 设备永远发现不了
+    #    自己被摘掉，也就永不重注册。这就是「网页端不小心关闭后路由器不回来」的根因
+    #    （比「注册成功即删 key」更前置：判据先瞎了，key 根本轮不到被用）。
+    #    两个词都要认：老版 cscli 用 not registered，新版用 not enrolled。
     #    加 timeout 是因为这条会顺带问一次中央 API，网络不好时可能挂住。
-    #    （v.108.50 之前只 grep capi status 里的 enrolled，词不达意就会误判）
     _out="$(_ct_env "timeout 10 $CSCLI console status" 2>&1)"
-    if printf '%s' "$_out" | grep -qi 'central api'; then
-        printf '%s' "$_out" | grep -qi 'not registered' && return 1
+    if printf '%s' "$_out" | grep -qiE 'enrolled|central api'; then
+        printf '%s' "$_out" | grep -qiE 'not[[:space:]]*-?[[:space:]]*(enrolled|registered)' && return 1
         return 0
     fi
     # ② 退回 capi status 的 enrolled 判据（console status 不可用时的兜底）
@@ -3858,22 +3912,61 @@ _wait_capi_net() {
     return 1
 }
 
-# 注册码用完即删（v.99-bp.1）
-# key 在固件里是明文（/etc/config/crowdsec_enroll_key.txt），而固件是公开下载的 Release 资产——
-_drop_enroll_key() {
+# ---- 注册码保管（v.108.52：由「注册成功即删」改为「移入保险柜」）----
+# 历史包袱：v.99-bp.1 起注册成功就 rm 掉 key，理由是固件公开下载、明文不该留在设备上。
+# 但 key 同时也是设备唯一的自愈凭据 —— 删掉之后网页端一旦把实例关掉/删掉，
+# re_enroll 读不到 key 只能放弃，用户只能重刷固件或手动 enroll。
+# 现在改为两处存放：
+#   主文件 $ENROLL_KEY_FILE       固件里带的（一次性的，注册成功后不再需要）
+#   保险柜 $ENROLL_KEY_KEEP(.keep) 600，注册成功后搬到这里，sysupgrade 默认保留
+# 读取顺序：主文件 → 保险柜。
+_park_enroll_key() {
     [ -f "$ENROLL_KEY_FILE" ] || return 0
-    rm -f "$ENROLL_KEY_FILE" 2>/dev/null \
-        && log "[enroll] 已删除注册码文件（$ENROLL_KEY_FILE，避免明文长期留在设备上）"
+    _pek_new="$(head -n1 "$ENROLL_KEY_FILE" 2>/dev/null | tr -d ' \t\r\n')"
+    [ -n "$_pek_new" ] || { rm -f "$ENROLL_KEY_FILE" 2>/dev/null; return 0; }
+    _pek_old=""
+    [ -s "$ENROLL_KEY_KEEP" ] && _pek_old="$(head -n1 "$ENROLL_KEY_KEEP" 2>/dev/null | tr -d ' \t\r\n')"
+    if [ -f "$ENROLL_KEY_KEEP" ] && [ "$_pek_old" = "$_pek_new" ]; then
+        # 保险柜里已经是同一把码，主文件多余
+        rm -f "$ENROLL_KEY_FILE" 2>/dev/null
+        log "[enroll] 注册码已在保险柜（$ENROLL_KEY_KEEP），清掉主文件"
+        return 0
+    fi
+    if mv -f "$ENROLL_KEY_FILE" "$ENROLL_KEY_KEEP" 2>/dev/null; then
+        chmod 600 "$ENROLL_KEY_KEEP" 2>/dev/null
+        log "[enroll] 注册码已移入保险柜（$ENROLL_KEY_KEEP，600）：网页端被摘后可自动重注册"
+    else
+        rm -f "$ENROLL_KEY_FILE" 2>/dev/null
+        log "[enroll] 注册码移入保险柜失败，已删除主文件（下次被摘需手动 enroll）"
+    fi
+    return 0
+}
+
+# 读注册码：主文件 → 保险柜 两级回落。
+# 结果放全局 $_ENROLL_KEY_V，不写 stdout —— log() 走 stdout，用 $(...) 取值会被日志污染。
+_enroll_key_load() {
+    _ENROLL_KEY_V=""
+    if [ -s "$ENROLL_KEY_FILE" ]; then
+        _ENROLL_KEY_V="$(head -n1 "$ENROLL_KEY_FILE" 2>/dev/null | tr -d ' \t\r\n')"
+        [ -n "$_ENROLL_KEY_V" ] && return 0
+    fi
+    if [ -s "$ENROLL_KEY_KEEP" ]; then
+        _ENROLL_KEY_V="$(head -n1 "$ENROLL_KEY_KEEP" 2>/dev/null | tr -d ' \t\r\n')"
+        [ -n "$_ENROLL_KEY_V" ] \
+            && log "[enroll] 主注册码缺失，改用保险柜里的注册码（$ENROLL_KEY_KEEP）"
+    fi
     return 0
 }
 
 re_enroll() {
     log "[enroll] console 未注册，用注册码 enroll（注册码固定有效，可反复使用，不消耗）"
 
-    _enroll_key=""
-    [ -f "$ENROLL_KEY_FILE" ] && _enroll_key="$(head -n1 "$ENROLL_KEY_FILE" | tr -d ' \t\r\n')"
+    # v.108.52：主文件缺失时回落到保险柜 —— 网页端把实例关掉后，靠这里自愈。
+    _enroll_key_load
+    _enroll_key="$_ENROLL_KEY_V"
     if [ -z "$_enroll_key" ]; then
-        log "[enroll] 无注册码（$ENROLL_KEY_FILE 缺失或为空），放弃 enroll"
+        log "[enroll] 无注册码（$ENROLL_KEY_FILE / $ENROLL_KEY_KEEP 都缺失或为空），放弃 enroll"
+        log "[enroll] 补救：网页端 app.crowdsec.net 取注册码后执行 cscli console enroll <key>"
         return 1
     fi
 
@@ -3922,7 +4015,7 @@ re_enroll() {
         _i=$((_i+1))
         if console_enroll_ok; then
             log "[enroll] 已注册（Enrolled）；网页端 Accept 后 CAPI 才 authenticated，无需脚本干预"
-            _drop_enroll_key
+            _park_enroll_key
             return 0
         fi
         sleep 5
@@ -3931,7 +4024,7 @@ re_enroll() {
     log "[enroll] enroll 已成功，10 秒内本地未显示 Enrolled"
     log "[enroll] 需要前往网站确认接受：请访问 https://app.crowdsec.net 接受该实例（Accept）"
     log "[enroll] 未及时 Accept 前 CAPI 侧可能有报错，属正常过程；Accept 后自动恢复"
-    _drop_enroll_key
+    _park_enroll_key
     return 0
 }
 
@@ -4273,19 +4366,34 @@ build_BOUNCERVERIFY() {
 # 幂等性：验的是「注册码还在、console 还没 Enrolled」这一对条件，成功一次即删码，
 # 下一轮 verify 直接过，不会反复注册。
 verify_enroll() {
-    [ -s "$ENROLL_KEY_FILE" ] || return 0
-    if console_enroll_ok; then
-        # 已经注册了，注册码却还在：可能是人工 enroll 过、或上一版脚本没删。
-        # 明文 key 留在设备上没有意义（固件是公开下载的），顺手清掉。
-        # --verify-only（探针体检）承诺「一个字节都不写」，那条路径只报不删。
-        [ "${_VERIFY_ONLY:-0}" = "1" ] || _drop_enroll_key
+    _enroll_key_load
+    # 【v.108.52】既没主文件也没保险柜：无法自愈，但仍要查一次状态，把
+    # 「未注册且无码」明明白白打出来。旧写法 `[ -s key ] || return 0` 在 key 被删后
+    # 直接静默跳过 —— 日志看起来一切正常，实际设备早就掉线了。
+    if [ -z "$_ENROLL_KEY_V" ]; then
+        console_enroll_ok && return 0
+        log "[ENROLL] ** 未注册且无可用注册码（$ENROLL_KEY_FILE / $ENROLL_KEY_KEEP 都不在），无法自动重注册"
+        log "[ENROLL] ** 补救：app.crowdsec.net 取注册码后执行 cscli console enroll <key>"
         return 0
     fi
+    if console_enroll_ok; then
+        # 已经注册了，注册码却还在主文件：可能人工 enroll 过、或上一版脚本没搬。
+        # 搬进保险柜（不再删除）—— 留着它，网页端哪天被摘掉才能自愈。
+        # --verify-only（探针体检）承诺「一个字节都不写」，那条路径只报不动。
+        if [ "${_VERIFY_ONLY:-0}" = "1" ]; then
+            [ -f "$ENROLL_KEY_FILE" ] && log "[ENROLL] 已注册但主注册码仍在（体检模式：只报，不移动）"
+        else
+            _park_enroll_key
+        fi
+        return 0
+    fi
+    log "[ENROLL] 检测到未注册（网页端可能被关闭/删除），发现可用注册码，交给 build 重注册"
     return 1
 }
 build_enroll() {
-    if [ ! -s "$ENROLL_KEY_FILE" ]; then
-        log "[ENROLL] 未配置注册码（$ENROLL_KEY_FILE 缺失或为空），跳过 console enroll"
+    _enroll_key_load
+    if [ -z "$_ENROLL_KEY_V" ]; then
+        log "[ENROLL] 未配置注册码（$ENROLL_KEY_FILE / $ENROLL_KEY_KEEP 都没有），跳过 console enroll"
         return 0
     fi
     re_enroll

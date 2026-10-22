@@ -2022,6 +2022,105 @@ CAPI 回到 `❌ not registered`；再手动 register 会生成新身份，conso
   本次未改（属保留策略，需先实测 md5 确认），核对方法：刷机前后各跑一次
   `md5sum /etc/crowdsec/lxc-crowdsec.tar.gz`。
 
+## v.108.52：网页端把实例关掉后设备回不来 —— 判据先瞎了，注册码也早被删了
+
+现象：在 CrowdSec console 上把实例「关闭/删除」后，路由器**永远**不会重新注册，
+只能重刷固件或手动 enroll。
+
+### 根因①：`console status` 的两种「未注册」措辞，只认了一种
+
+真机输出（24.10，2026-10-22，网页端关闭实例之后）：
+
+```
+| Central API (CAPI) | ✅ authenticated |
+| Enrolled           | ❌ not enrolled  |
+```
+
+`CAPI` 的 `authenticated` 和 console 的 `Enrolled` 是**两件事**：网页上把实例关掉后，
+CAPI 凭据照样被接受（`authenticated`），只有 `Enrolled` 变成 `not enrolled`。
+
+v.108.51 及之前只 `grep 'not registered'`，于是把 `not enrolled` 判成「已注册」：
+
+* `console_enroll_ok` 返回 0；
+* `verify_enroll` 直接 `return 0`，`build_enroll` 根本不会被调用；
+* 设备永远发现不了自己被摘掉 —— **判据先瞎了，注册码根本轮不到被用**。
+
+修法：两个词都认（老版 cscli 用 `not registered`，新版用 `not enrolled`）：
+
+```sh
+if printf '%s' "$_out" | grep -qiE 'enrolled|central api'; then
+    printf '%s' "$_out" | grep -qiE 'not[[:space:]]*-?[[:space:]]*(enrolled|registered)' && return 1
+    return 0
+fi
+```
+
+### 根因②：注册码在「注册成功那一刻」就被删了
+
+v.99-bp.1 起注册成功即 `rm` 掉 key，理由是固件公开下载、明文不该留在设备上。
+但 key 同时也是设备**唯一的自愈凭据** —— 删掉之后，就算判据修好了，`re_enroll`
+读不到 key 也只能放弃（`[enroll] 无注册码…放弃 enroll`）。两件事直接冲突。
+
+改为「保险柜」（`_drop_enroll_key` → `_park_enroll_key`）：
+
+| 位置 | 用途 |
+| --- | --- |
+| `/etc/config/crowdsec_enroll_key.txt` | 固件里带的，一次性的 |
+| `/etc/config/crowdsec_enroll_key.txt.keep` | 注册成功后搬到这里，`600` |
+
+* 读取按「主文件 → 保险柜」两级回落（`_enroll_key_load`，结果放全局变量而不是
+  stdout —— `log()` 走 stdout，用 `$(...)` 取值会被日志污染）；
+* 保险柜在 `/etc/config` 下，sysupgrade 默认保留 → 升级后自愈能力不丢；
+* 同一把码重复搬移是幂等的；保险柜写失败才退回删除。
+
+关于「明文 key 留在设备上」：这把码本来就印在公开下载的固件里、也出现在构建日志里，
+留在自己设备的 `600` 文件里不增加实际暴露面；真正该管的是**固件分发**这一层。
+
+### `verify_enroll` 不再静默跳过
+
+旧写法 `[ -s key ] || return 0`：key 一被删，整个 enroll 节点就静默通过，
+日志看起来一切正常，实际设备早就掉线了。现在：
+
+* 有码、已注册 → 码搬进保险柜；
+* 有码、未注册 → 打 `检测到未注册（网页端可能被关闭/删除）…交给 build 重注册`，返回 1；
+* 无码、未注册 → 打两行醒目告警（含手动补救命令），**但不让开机失败**（`enroll` 在
+  `SOFT_NODES` 里，网页端 Accept 是人工步骤）。
+
+### 顺带修掉两个真机误报
+
+* **容器 ping 网桥从硬判据降为告警**：真机上人手 `lxc-attach` 进容器 ping 网桥 1/1 通，
+  脚本同一时刻同一条命令却 `rc=1`；而 `_ct_env "echo hi"`、`command -v ping`、`ct ls` 全
+  `rc=0` —— 失败夹在「attach 成功」与「ping 返回」之间，既不是防火墙也不是 DNS。
+  既然静态内容核对（`verify_sub_ct_net`）才是硬判据，ping 就不该让整轮引导 `exit 1`
+  （否则手工重跑必然出现「构建后始终不符 → 引导失败」的假故障）。
+  新增 `_ct_ping_diag`：失败时打 attach 探针 rc + 三种 ping 写法各自的 rc 与输出。
+* **`ct()` 超时 30s → 60s**（`CT_TIMEOUT` 可覆盖）：极简 rootfs 首次 attach 要等 PID1
+  就绪，30s 会截断成「命令失败」而不是「attach 超时」，很难查。
+* **`_built_nodes` 去重**：日志出现过 `[复核] 首轮不符： ct_net ct_net`，重复项让
+  「不符 N 个」虚高、同一节点被复验两次。
+
+### 验收点（下次刷带 key 的固件后）
+
+```
+[enroll] 注册码已移入保险柜（/etc/config/crowdsec_enroll_key.txt.keep，600）：网页端被摘后可自动重注册
+```
+
+然后在网页端把实例关掉、重启路由器，应看到：
+
+```
+[ENROLL] 检测到未注册（网页端可能被关闭/删除），发现可用注册码，交给 build 重注册
+[enroll] console 未注册，用注册码 enroll（注册码固定有效，可反复使用，不消耗）
+```
+
+刷机后核对保险柜是否还在：`ls -l /etc/config/crowdsec_enroll_key.txt*`
+（只需 `.keep`，主文件不在是正常的）。
+
+### 注意
+
+* 已经在跑的老固件（key 早被删）**没有保险柜可回落**，只能刷一次带 key 的固件，
+  或手动 `cscli console enroll <key>`；这次改动救不了历史设备。
+* `--verify-only`（探针体检）承诺「一个字节都不写」：体检路径只报「已注册但主注册码仍在」，
+  不移动、不删除。
+
 # crowdsec 引导流程图
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)

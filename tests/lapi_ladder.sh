@@ -227,27 +227,28 @@ echo "===== R34i. 被拒时要说清「为什么轮不到自动修」 ====="
 ck "R34.43 被拒 → 点明基底 / 宿主侧两类，转人工" \
    "$(body _lapi_ladder "$BS_C" | grep -c '基底本身有问题、宿主侧')" "1"
 
-echo "===== R34j. 联网 cscli 一律带超时（v.108.64） ====="
+echo "===== R34j. 联网 cscli 超时：只有 enroll 收 5s，其余 10s（v.108.65） ====="
 # 目的：这 7 条都要问云端，任一条无超时挂住 = 引导锁不放 + 探针 tick 全被挡。
-# 5s 的前提是 re_enroll 进门前 _wait_capi_net 已确认 api.crowdsec.net 能解析。
-ck "R34.44 console status 带 timeout 5" \
-   "$(grep -c 'timeout 5 \$CSCLI console status' "$BS")" "1"
-ck "R34.45 capi status 三处都带 timeout 5（凭据复核 / 兜底判据 / enroll 后打印）" \
-   "$(grep -c 'timeout 5 \$CSCLI capi status' "$BS")" "3"
-ck "R34.46 capi register 带 timeout 5" \
-   "$(grep -c 'timeout 5 \$CSCLI capi register' "$BS")" "1"
-ck "R34.47 console enroll 带 timeout 5" \
+# 唯一收到 5s 的是 console enroll：网页端不点 Accept 时它会一直等，等下去没有意义。
+# 其余 6 条要的是应答内容，多等几秒才有结果，卡住也不等于「网页没点」→ 维持 10s。
+ck "R34.44 console enroll 带 timeout 5（唯一的 5s）" \
    "$(grep -c 'timeout 5 /usr/bin/cscli console enroll' "$BS")" "1"
-ck "R34.48 console enable --all 带 timeout 5" \
-   "$(grep -c 'timeout 5 /usr/bin/cscli console enable --all' "$BS")" "1"
-ck "R34.49 全文再无 timeout 10（不留半新半旧的超时）" \
-   "$(grep -c 'timeout 10 ' "$BS")" "0"
+ck "R34.45 console status 保持 timeout 10" \
+   "$(grep -c 'timeout 10 \$CSCLI console status' "$BS")" "1"
+ck "R34.46 capi status 三处都保持 timeout 10（凭据复核 / 兜底判据 / enroll 后打印）" \
+   "$(grep -c 'timeout 10 \$CSCLI capi status' "$BS")" "3"
+ck "R34.47 capi register 保持 timeout 10" \
+   "$(grep -c 'timeout 10 \$CSCLI capi register' "$BS")" "1"
+ck "R34.48 console enable --all 保持 timeout 10" \
+   "$(grep -c 'timeout 10 /usr/bin/cscli console enable --all' "$BS")" "1"
+ck "R34.49 timeout 5 全文只有 1 处（不许扩散到别的命令）" \
+   "$(grep -c 'timeout 5 ' "$BS")" "1"
 ck "R34.50 enroll 前先等 DNS 就绪（5s 够用的前提，不能被删）" \
    "$(grep -c '_wait_capi_net 30' "$BS")" "1"
 
 echo "===== R34k. 版本号 ====="
-ck "R34.51 版本推进到 108.64" \
-   "$(grep -c 'SCRIPT_VER="2026-10-24.108.64-bp"' "$BS")" "1"
+ck "R34.51 版本推进到 108.65" \
+   "$(grep -c 'SCRIPT_VER="2026-10-24.108.65-bp"' "$BS")" "1"
 
 echo "------------------------------------------------------------------"
 echo "R34 RESULT: $R 项失败"

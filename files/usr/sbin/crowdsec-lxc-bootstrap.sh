@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-24.108.64-bp"
+SCRIPT_VER="2026-10-24.108.65-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -3759,11 +3759,11 @@ _cred_keep_save() {
 # 只认这几句明确报错，不用 console status 的 not registered —— 刚 register、还没
 # enroll 时它同样是 not registered，拿它判死会把好凭据删掉，反而退化成重注册。
 _capi_cred_rejected() {
-    # 【v.108.64】加 timeout 5：这条要问一次中央 API，网络坏但没断时 cscli 会一直等
+    # 【v.108.65】加 timeout 10：这条要问一次中央 API，网络坏但没断时 cscli 会一直等
     # TCP 超时（分钟级），而调用它的 re_enroll 全程持着引导锁 —— 探针的 tick 会被
     # lock-busy 挡到 PROBE_LOCK_STALE（1800s）才回收，等于保护链路停摆半小时。
     # 超时返回 124、输出为空 → 下面的 grep 不匹配 → return 1（不删凭据），方向是安全的。
-    _ccr_out="$(_ct_env "timeout 5 $CSCLI capi status" 2>&1)" || true
+    _ccr_out="$(_ct_env "timeout 10 $CSCLI capi status" 2>&1)" || true
     printf '%s' "$_ccr_out" \
         | grep -qiE 'invalid credential|unable to authenticate|unauthori[sz]ed|forbidden|wrong credential|(^|[^0-9])40[13]([^0-9]|$)' \
         && return 0
@@ -4282,15 +4282,14 @@ console_enroll_ok() {
     #    自己被摘掉，也就永不重注册。这就是「网页端不小心关闭后路由器不回来」的根因
     #    （比「注册成功即删 key」更前置：判据先瞎了，key 根本轮不到被用）。
     #    两个词都要认：老版 cscli 用 not registered，新版用 not enrolled。
-    #    加 timeout 是因为这条会顺带问一次中央 API，网络不好时可能挂住；
-    #    定 5s：进 re_enroll 前 _wait_capi_net 已确认过 DNS，网络层不会是「完全不通」。
-    _out="$(_ct_env "timeout 5 $CSCLI console status" 2>&1)"
+    #    加 timeout 是因为这条会顺带问一次中央 API，网络不好时可能挂住。
+    _out="$(_ct_env "timeout 10 $CSCLI console status" 2>&1)"
     if printf '%s' "$_out" | grep -qiE 'enrolled|central api'; then
         printf '%s' "$_out" | grep -qiE 'not[[:space:]]*-?[[:space:]]*(enrolled|registered)' && return 1
         return 0
     fi
     # ② 退回 capi status 的 enrolled 判据（console status 不可用时的兜底）
-    _out="$(_ct_env "timeout 5 $CSCLI capi status" 2>&1)"
+    _out="$(_ct_env "timeout 10 $CSCLI capi status" 2>&1)"
     [ -n "$_out" ] || return 1
     _line="$(printf '%s\n' "$_out" | grep -i 'enrolled' | head -n1)"
     [ -n "$_line" ] || return 1
@@ -4404,17 +4403,20 @@ re_enroll() {
 
     if [ ! -s "$_cred_file" ]; then
         log "[enroll] online_api_credentials.yaml 缺失，先 cscli capi register 注册 CAPI 凭据"
-        if ! _capi_reg_out="$(_ct_env "timeout 5 $CSCLI capi register" 2>&1)"; then
+        if ! _capi_reg_out="$(_ct_env "timeout 10 $CSCLI capi register" 2>&1)"; then
             log "[enroll] capi register 失败：$(printf '%s' "$_capi_reg_out" | tr '\n' ' ' | cut -c1-300)"
             return 1
         fi
         log "[enroll] capi register 成功，凭据已写入 online_api_credentials.yaml"
     fi
 
-    # 【v.108.64】timeout 5：这条是整个引导里最可能长时间挂住的地方 —— 提交后要等
-    # 云端应答，网络只丢包不断连时会一直等。挂住的代价是引导锁不放 + 探针 tick 全被挡。
-    # 定 5s 的依据：① 走到这里说明 _wait_capi_net 已确认 api.crowdsec.net 可解析；
+    # 【v.108.65】这是整个引导里唯一用 5s 的地方，也是唯一「等下去没有意义」的地方：
+    # 提交后要等云端应答，而网页端不点 Accept 就会一直停在注册状态（现场遇到过）。
+    # 挂住的代价是引导锁不放 + 探针 tick 全被挡。
+    # 5s 的依据：① 走到这里说明 _wait_capi_net 已确认 api.crowdsec.net 可解析；
     # ② 注册是 POST，云端 5s 不答再等也不会有结果，只会继续占着锁。
+    # 其余几条（console status / capi status / capi register / enable --all）保持 10s：
+    # 它们要的是应答内容，多等几秒才有结果，卡住也不等于「网页没点」。
     # 超时（rc=124）走下面的失败分支：记「注册码未消耗，下次开机重试」，不会重复提交。
     if ! _enroll_out="$(_ct_env "timeout 5 /usr/bin/cscli console enroll \"$_enroll_key\"" 2>&1)"; then
         log "[enroll] enroll 执行失败：$(printf '%s' "$_enroll_out" | tr '\n' ' ' | cut -c1-300)"
@@ -4429,12 +4431,12 @@ re_enroll() {
 
     # 【v.108.64】这两条也要超时：它们同样问云端，而此刻仍持着引导锁。
     # 失败都无害（enable 失败只记一行；capi status 空就跳过打印），但「挂住」有害。
-    _ct_env 'timeout 5 /usr/bin/cscli console enable --all' >/dev/null 2>&1 \
+    _ct_env 'timeout 10 /usr/bin/cscli console enable --all' >/dev/null 2>&1 \
         || log "[enroll] console enable --all 失败或超时（不影响注册；新版本 enrolled 后自动全开）"
 
     _ct_restart_crowdsec || true
 
-    _capi_out="$(_ct_env "timeout 5 $CSCLI capi status" 2>&1)"
+    _capi_out="$(_ct_env "timeout 10 $CSCLI capi status" 2>&1)"
     [ -n "$_capi_out" ] && log "[enroll] capi status：$(printf '%s' "$_capi_out" | tr '\n' ' ' | cut -c1-200)"
 
     _i=0

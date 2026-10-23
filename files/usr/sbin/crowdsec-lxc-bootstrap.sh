@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-24.108.69-bp"
+SCRIPT_VER="2026-10-24.108.70-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -193,18 +193,26 @@ esac
 [ -n "$_SELF" ] && chmod +x "$_SELF" 2>/dev/null
 chmod +x /etc/rc.local 2>/dev/null
 
-# 【v.108.66】外层 attach 超时：平时 10s，容器刚起来那一段 60s。
-# 来由：v.108.52 把 60s 定成唯一值，理由是「极简 rootfs 首次 attach 要等 PID1 就绪，
-# 30s 会截断成假失败」。但那个理由只对「容器刚启动」成立 —— 运行期每条 cscli /
-# grep / cat 都是亚秒级，拿 60s 兜它们只会把「卡住」放大成一分钟，探针 tick 跟着堵。
-# 现在按时间窗区分，不用一个数应付两个场景：
-#   · 容器启动成功后 CT_BOOT_GRACE 秒内（默认 120）→ 用 CT_TIMEOUT_BOOT（60s），
+# 【v.108.66】外层 attach 超时：平时 10s，容器刚起来那一段单独一个上限。
+# 【v.108.70】启动窗口那档 60s→30s、窗口 120s→60s。原来的 60s 是 v.108.52 在
+# 「怕首次 attach 等 PID1 就绪被截断」时取的保守值，不是量出来的。现在有实测：
+# 本机 attach + cscli 0.07~0.38s，纯 shell 更低；容器刚启动时最慢的是 PID1 就绪和
+# cgroup 视图，也在个位数秒内返回。30s 已是实测值的近百倍，60s 只买来「卡住时白等
+# 一分钟」，而这一分钟正好把探针 tick 一起堵住。
+# 两个数各自管什么：
+#   · 容器启动成功后 CT_BOOT_GRACE 秒内（默认 60）→ 用 CT_TIMEOUT_BOOT（30s），
 #     覆盖 PID1 就绪、cgroup 视图、首轮网络检查这些必然要等的地方；
 #   · 窗口之外（正常引导后半段、探针重跑、人工调用）→ 用 CT_TIMEOUT（10s）。
-# 三个数都可用同名环境变量覆盖。
+# 三个数都可用同名环境变量覆盖。真机若出现「首次 attach 被判超时」，先用
+# CT_TIMEOUT_BOOT=60 CT_BOOT_GRACE=120 复现原状，再判断是值不够还是别的原因，
+# 不要直接把这个数改回去掩盖问题。
+# 【v.108.70】内层 cscli 收到 8s（下面各处 `timeout 8 $CSCLI`）。原来外层 10s、
+# 内层也是 10s，两边同时到点，外层先杀 lxc-attach，内层的 rc=124 和它已经打出来的
+# 输出就全丢了，日志只剩一句「attach 超时」—— 分不清是 cscli 卡住还是 attach 卡住。
+# 内层小 2s，让它先退出并把真实原因带回来。
 CT_TIMEOUT="${CT_TIMEOUT:-10}"
-CT_TIMEOUT_BOOT="${CT_TIMEOUT_BOOT:-60}"
-CT_BOOT_GRACE="${CT_BOOT_GRACE:-120}"
+CT_TIMEOUT_BOOT="${CT_TIMEOUT_BOOT:-30}"
+CT_BOOT_GRACE="${CT_BOOT_GRACE:-60}"
 _CT_BOOT_UNTIL=0
 ct() {
     _ct_to="$CT_TIMEOUT"
@@ -3811,7 +3819,7 @@ _capi_cred_rejected() {
     # TCP 超时（分钟级），而调用它的 re_enroll 全程持着引导锁 —— 探针的 tick 会被
     # lock-busy 挡到 PROBE_LOCK_STALE（1800s）才回收，等于保护链路停摆半小时。
     # 超时返回 124、输出为空 → 下面的 grep 不匹配 → return 1（不删凭据），方向是安全的。
-    _ccr_out="$(_ct_env "timeout 10 $CSCLI capi status" 2>&1)" || true
+    _ccr_out="$(_ct_env "timeout 8 $CSCLI capi status" 2>&1)" || true
     printf '%s' "$_ccr_out" \
         | grep -qiE 'invalid credential|unable to authenticate|unauthori[sz]ed|forbidden|wrong credential|(^|[^0-9])40[13]([^0-9]|$)' \
         && return 0
@@ -4331,13 +4339,13 @@ console_enroll_ok() {
     #    （比「注册成功即删 key」更前置：判据先瞎了，key 根本轮不到被用）。
     #    两个词都要认：老版 cscli 用 not registered，新版用 not enrolled。
     #    加 timeout 是因为这条会顺带问一次中央 API，网络不好时可能挂住。
-    _out="$(_ct_env "timeout 10 $CSCLI console status" 2>&1)"
+    _out="$(_ct_env "timeout 8 $CSCLI console status" 2>&1)"
     if printf '%s' "$_out" | grep -qiE 'enrolled|central api'; then
         printf '%s' "$_out" | grep -qiE 'not[[:space:]]*-?[[:space:]]*(enrolled|registered)' && return 1
         return 0
     fi
     # ② 退回 capi status 的 enrolled 判据（console status 不可用时的兜底）
-    _out="$(_ct_env "timeout 10 $CSCLI capi status" 2>&1)"
+    _out="$(_ct_env "timeout 8 $CSCLI capi status" 2>&1)"
     [ -n "$_out" ] || return 1
     _line="$(printf '%s\n' "$_out" | grep -i 'enrolled' | head -n1)"
     [ -n "$_line" ] || return 1
@@ -4451,7 +4459,7 @@ re_enroll() {
 
     if [ ! -s "$_cred_file" ]; then
         log "[enroll] online_api_credentials.yaml 缺失，先 cscli capi register 注册 CAPI 凭据"
-        if ! _capi_reg_out="$(_ct_env "timeout 10 $CSCLI capi register" 2>&1)"; then
+        if ! _capi_reg_out="$(_ct_env "timeout 8 $CSCLI capi register" 2>&1)"; then
             log "[enroll] capi register 失败：$(printf '%s' "$_capi_reg_out" | tr '\n' ' ' | cut -c1-300)"
             return 1
         fi
@@ -4491,7 +4499,7 @@ re_enroll() {
     # 失败无害（空就跳过打印），但「挂住」有害（引导锁不放 + 探针 tick 全被挡）。
     _ct_restart_crowdsec || true
 
-    _capi_out="$(_ct_env "timeout 10 $CSCLI capi status" 2>&1)"
+    _capi_out="$(_ct_env "timeout 8 $CSCLI capi status" 2>&1)"
     [ -n "$_capi_out" ] && log "[enroll] capi status：$(printf '%s' "$_capi_out" | tr '\n' ' ' | cut -c1-200)"
 
     _i=0

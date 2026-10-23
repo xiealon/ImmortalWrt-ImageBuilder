@@ -218,16 +218,20 @@ ck "R11.14 置位为 GSET_PREP 时读得到（不误判未置位）" \
    "$(grep -c 'FULL_REINSTALL' "$TMPD/out4")" "0"
 ck "R11.15 组键读对后一路走到底" "$(grep -c '^REACHED_END' "$TMPD/out4")" "1"
 
-# 【v.108.66】外层 attach 超时：平时 10s，容器刚起来那段 60s
+# 【v.108.66】外层 attach 超时：平时 10s，容器刚起来那段单独一档（v.108.70 收到 30s）
 ck "R11.16 CT_TIMEOUT 默认 10s（不再用 60s 兜所有命令）" \
    "$(grep -c '^CT_TIMEOUT="${CT_TIMEOUT:-10}"$' "$BS_C")" "1"
-ck "R11.17 CT_TIMEOUT_BOOT 默认 60s（容器刚起来那一步保留宽限）" \
-   "$(grep -c '^CT_TIMEOUT_BOOT="${CT_TIMEOUT_BOOT:-60}"$' "$BS_C")" "1"
+# 【v.108.70】60s→30s：实测 attach+cscli 0.07~0.38s，30s 已是近百倍；
+# 60s 只买来「卡住时白等一分钟」，而这一分钟正好把探针 tick 一起堵住。
+ck "R11.17 CT_TIMEOUT_BOOT 默认 30s（容器刚起来那一步保留宽限）" \
+   "$(grep -c '^CT_TIMEOUT_BOOT="${CT_TIMEOUT_BOOT:-30}"$' "$BS_C")" "1"
+ck "R11.17b CT_BOOT_GRACE 默认 60s（窗口本身也从 120 收紧）" \
+   "$(grep -c '^CT_BOOT_GRACE="${CT_BOOT_GRACE:-60}"$' "$BS_C")" "1"
 ck "R11.18 ct() 按时间窗二选一，不是写死一个数" \
    "$(awk '/^ct\(\) \{/,/^}/' "$BS_C" | grep -c 'CT_TIMEOUT_BOOT')" "1"
 ck "R11.19 容器启动成功处才开宽限窗口（build_ct_boot 里置 _CT_BOOT_UNTIL）" \
    "$(awk '/^build_ct_boot\(\)/,/^}/' "$BS_C" | grep -c '_CT_BOOT_UNTIL=')" "1"
-# 行为：同一份定义，窗口外 10、窗口内 60。stub 掉 timeout 与 lxc-attach 只看参数。
+# 行为：同一份定义，窗口外 10、窗口内 30。stub 掉 timeout 与 lxc-attach 只看参数。
 sed -n '/^CT_TIMEOUT="${CT_TIMEOUT:-10}"/,/^}/p' "$BS_C" > "$TMPD/ctdef.sh"
 cat > "$TMPD/ctrun.sh" <<'EOS'
 . "$TMPD/ctdef.sh"
@@ -239,8 +243,8 @@ _CT_BOOT_UNTIL=$(( $(date +%s) + 60 ))
 ct a
 EOS
 TMPD="$TMPD" sh "$TMPD/ctrun.sh" > "$TMPD/ctout" 2>&1
-ck "R11.20 窗口外 10s / 窗口内 60s" \
-   "$(tr '\n' ' ' < "$TMPD/ctout" | tr -s ' ')" "TO=10 TO=60 "
+ck "R11.20 窗口外 10s / 窗口内 30s" \
+   "$(tr '\n' ' ' < "$TMPD/ctout" | tr -s ' ')" "TO=10 TO=30 "
 
 # 【v.108.66】宿主侧外部命令分三档超时（A 方案：不一刀切）
 ck "R11.21 RUN_TIMEOUT 默认 10s" \

@@ -7,6 +7,8 @@
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
+# v.108.70：probe 的 BOOT_LOG 也要与上面同源，R32.1e 用它
+PR="$REPO/files/usr/sbin/crowdsec-lxc-probe.sh"
 
 R=0
 ck() {
@@ -34,6 +36,12 @@ ck "R32.1c 默认保留最后 2000 行" \
    "$(grep -c '^BOOT_LOG_KEEP="\${CS_BOOTSTRAP_LOG_KEEP:-2000}"$' "$BS")" "1"
 ck "R32.1d 默认路径就是 rc.local / 探针共用的那个，且可被环境覆盖" \
    "$(grep -c '^BOOT_LOG="\${CS_BOOTSTRAP_LOG:-/root/crowdsec-lxc-bootstrap.log}"$' "$BS")" "1"
+# 【v.108.70】probe 原来把 BOOT_LOG 写死成 /root/crowdsec-lxc-bootstrap.log。
+# bootstrap 自己认 CS_BOOTSTRAP_LOG，于是「改了日志路径」之后：probe 还在往老文件
+# 追加输出、也在老文件里找「补印」痕迹，两边对不上却没有任何报错 —— 这类
+# 「不报错但给错答案」比直接报错难查得多。现在两边同源。
+ck "R32.1e probe 的 BOOT_LOG 也认 CS_BOOTSTRAP_LOG（与 bootstrap 同源）" \
+   "$(grep -c '^BOOT_LOG="\${CS_BOOTSTRAP_LOG:-/root/crowdsec-lxc-bootstrap.log}"$' "$PR")" "1"
 
 echo "== 32.2 截断逻辑 =="
 ck "R32.2a 未超限直接返回（-gt 判断，取等不截）" \
@@ -54,8 +62,8 @@ ck "R32.3b 调用在 main 之前" \
    "$(awk '/^_boot_log_trim$/{t=NR} /^main "\$@"$/{m=NR} END{print (t && m && t < m) ? "yes" : "no"}' "$BS")" "yes"
 ck "R32.3c --only-funcs 测试钩子仍在调用点之前（导函数时不该截真日志）" \
    "$(awk '/= "--only-funcs"/{o=NR} /^_boot_log_trim$/{t=NR} END{print (o && t && o < t) ? "yes" : "no"}' "$BS")" "yes"
-ck "R32.3d 版本号推进到 108.69" \
-   "$(grep -c 'SCRIPT_VER="2026-10-24.108.69-bp"' "$BS")" "1"
+ck "R32.3d 版本号推进到 108.70" \
+   "$(grep -c 'SCRIPT_VER="2026-10-24.108.70-bp"' "$BS")" "1"
 
 echo "== 32.4 真跑：超限要截 =="
 TMPD=$(mktemp -d)

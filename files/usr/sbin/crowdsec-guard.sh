@@ -201,6 +201,51 @@ _glog() {
     [ "$QUIET" = "1" ] || echo "crowdsec-guard: $*" >&2
 }
 
+# 【v.108.70】单轮耗时自报。以前只有「超时」才有日志，于是「一直是 9s、但还没到
+# 10s」这种余量在收窄的状态完全看不见 —— 要么没事，出事就是一次硬超时。
+# 两个落点，各管一件事：
+#   · 每轮把「时间戳 + 本轮秒数」**覆盖写**进 $GUARD_TIMING（默认 /run，tmpfs：
+#     不磨损 flash，也不占 GLOG 那 64KB / 200 行的预算）。想看余量 cat 一次即可。
+#   · 超过 $GUARD_SLOW_WARN（默认 2s）才额外往 GLOG 写一行。那条是「要留意」，
+#     不是「出事了」，所以措辞是「余量在收窄」而不是「超时」。
+# 毫秒级用 /proc/uptime（两位小数）算，全程纯 shell + 一次 sed，**不依赖 awk** ——
+# 本固件 busybox 不一定编了 awk，而「没有 awk 就静默不记」等于把观测能力悄悄关掉。
+GUARD_TIMING="${CS_GUARD_TIMING:-/run/crowdsec-guard.timing}"
+GUARD_SLOW_WARN="${CS_GUARD_SLOW_WARN:-2}"
+case "$GUARD_SLOW_WARN" in ''|*[!0-9]*) GUARD_SLOW_WARN=2 ;; esac
+# 时钟源。抽成变量只为测试能注入假 uptime（本机 busybox-w32 没有 /proc/uptime，
+# 读不到就只能静默跳过，而这段最该被测的正是「浮点→百分之一秒」的换算）。
+_GUARD_UPTIME="${CS_GUARD_UPTIME:-/proc/uptime}"
+_GUARD_T0=""
+
+# /proc/uptime -> 百分之一秒整数：「12345.67」→「1234567」，「0.07」→「7」。
+# 放在 $( ) 里跑，read 的中间变量不会污染外层。
+_guard_nowcs() {
+    _gn_u=""
+    _gn_rest=""
+    read _gn_u _gn_rest 2>/dev/null <"$_GUARD_UPTIME"
+    [ -n "$_gn_u" ] || return 1
+    _gn_u=$(printf '%s' "$_gn_u" | sed 's/\.//; s/^0*//')
+    [ -n "$_gn_u" ] || _gn_u=0
+    case "$_gn_u" in *[!0-9]*) return 1 ;; esac
+    printf '%s' "$_gn_u"
+}
+_GUARD_T0="$(_guard_nowcs)"
+
+_gt_report() {
+    [ -n "$_GUARD_T0" ] || return 0
+    _gt1="$(_guard_nowcs)" || return 0
+    case "$_gt1" in ''|*[!0-9]*) return 0 ;; esac
+    _gt_dcs=$(( _gt1 - _GUARD_T0 ))
+    [ "$_gt_dcs" -ge 0 ] 2>/dev/null || return 0
+    _gt_v="$(( _gt_dcs / 100 )).$(printf '%02d' "$(( _gt_dcs % 100 ))")"
+    printf '%s 本轮 %ss\n' "$(date '+%F %T')" "$_gt_v" >"$GUARD_TIMING" 2>/dev/null
+    if [ "$_gt_dcs" -ge $(( GUARD_SLOW_WARN * 100 )) ] 2>/dev/null; then
+        _glog "【计时】本轮 ${_gt_v}s（告警线 ${GUARD_SLOW_WARN}s）—— 余量在收窄：/health 的 wget 5s、3 处 attach 各 ${GUARD_CT_TIMEOUT}s，哪一环变慢都会先在这里显形"
+    fi
+    return 0
+}
+
 # 没有 cmp 就比不了基准。不能默认"一致"（那等于静默失效），也不能默认"不一致"
 # （那会每轮无谓覆盖），只能明确报告一次然后让开。
 # 【v.108.56】第二段：可写层白名单审计（只报不杀）。
@@ -642,5 +687,9 @@ done
 
 # LAPI 段自带降频（默认 300s），所以这里无条件调用；容器未就位时函数内部直接返回。
 _lapi_audit
+
+# 【v.108.70】最后一步：记本轮耗时（覆盖写 timing 文件；超阈值才额外进日志）。
+# 放在 exit 前面而不是每段各自记：要的是「整轮」的数，单段耗时对判断余量没意义。
+_gt_report
 
 exit 0

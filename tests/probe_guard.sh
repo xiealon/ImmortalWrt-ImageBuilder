@@ -29,6 +29,8 @@ ck() { if [ "$2" = "$3" ]; then echo "PASS: $1"; else echo "FAIL: $1 got=[$2] wa
 # 注释里提到某关键字（例如记录「曾经 disable」）不该被当成「代码在做这件事」，
 # 否则断言会假红或假绿。
 cg() { grep -v '^[[:space:]]*#' "$1" | grep -c -- "$2"; }
+# 取某个函数的函数体（到第一个行首 } 为止），断言「这个函数里没有某样东西」时用它。
+body() { awk -v fn="$1" '$0 ~ "^"fn"\\(\\)[[:space:]]*\\{" { inside = 1 } inside { print } inside && /^}/ { exit }' "$2"; }
 
 ROM="$TMPD/rom"
 RT="$TMPD/root"
@@ -223,6 +225,55 @@ ck "R13.51 不存在裸 wget 调用（活代码内）" \
    "$(grep -v '^[[:space:]]*#' "$G" | grep -c '^[[:space:]]*if ! wget')" "0"
 ck "R13.52 GUARD_WGET_TIMEOUT 默认 5s" \
    "$(grep -c '^GUARD_WGET_TIMEOUT="\${CS_GUARD_WGET_TIMEOUT:-5}"$' "$G")" "1"
+
+echo "== 18 单轮耗时自报（v.108.70） =="
+# 以前只有「超时」才有日志，于是「一直是 9s、还没到 10s」这种余量在收窄的状态
+# 完全看不见 —— 要么没事，出事就是一次硬超时。现在每轮覆盖写一份 timing，
+# 超阈值才进日志：既不挤占 GLOG 那 64KB / 200 行预算，又不丢「变慢了」这个信号。
+ck "R13.53 GUARD_TIMING / GUARD_SLOW_WARN 默认值" \
+   "$(grep -c '^GUARD_TIMING="\${CS_GUARD_TIMING:-/run/crowdsec-guard.timing}"$' "$G")$(grep -c '^GUARD_SLOW_WARN="\${CS_GUARD_SLOW_WARN:-2}"$' "$G")" "11"
+ck "R13.54 非数字告警线兜底成 2（不炸算术）" \
+   "$(grep -c 'GUARD_SLOW_WARN=2 ;; esac' "$G")" "1"
+ck "R13.55 _gt_report 覆盖写 timing 文件（> 而非 >>，不涨）" \
+   "$(body _gt_report "$G" | grep -c '>"\$GUARD_TIMING"')" "1"
+ck "R13.56 慢轮才写 GLOG（阈值比较存在，措辞是余量在收窄）" \
+   "$(body _gt_report "$G" | grep -c '_glog "【计时】本轮')" "1"
+ck "R13.57 末尾 exit 0 前调用 _gt_report（要的是整轮，不是单段）" \
+   "$(grep -c '^_gt_report$' "$G")" "1"
+ck "R13.58 计时不依赖 awk（本固件 busybox 不一定编了）" \
+   "$(cg "$G" 'awk ')" "0"
+
+# 行为：注入假 uptime，验「浮点→百分之一秒」的换算和两条静默分支。
+GTT="$TMPD/gt"
+mkdir -p "$GTT"
+sed -n '/^_guard_nowcs() {/,/^}$/p' "$G" >"$GTT/fns.sh"
+sed -n '/^_gt_report() {/,/^}$/p' "$G" >>"$GTT/fns.sh"
+cat >"$GTT/run.sh" <<'EOS'
+set -u
+GUARD_TIMING="$1/timing"
+GUARD_SLOW_WARN="$2"
+GUARD_CT_TIMEOUT=10
+_GUARD_UPTIME="$1/uptime"
+_glog() { echo "GLOG:$*"; }
+. "$1/fns.sh"
+printf '%s 1.00\n' "$3" >"$1/uptime"
+_GUARD_T0="$(_guard_nowcs)" 2>/dev/null || _GUARD_T0=""
+printf '%s 1.00\n' "$4" >"$1/uptime"
+_gt_report
+[ -f "$GUARD_TIMING" ] && echo "T=$(cat "$GUARD_TIMING")" || echo "T=NOWRITE"
+EOS
+sh "$GTT/run.sh" "$GTT" 2 100.00 101.50 >"$GTT/o" 2>&1
+ck "R13.59 100.00→101.50 记成 1.50s" "$(grep -c '本轮 1.50s$' "$GTT/o")" "1"
+ck "R13.60 未超告警线（2s）时不写 GLOG" "$(grep -c '^GLOG:' "$GTT/o")" "0"
+sh "$GTT/run.sh" "$GTT" 0 100.00 101.50 >"$GTT/o2" 2>&1
+ck "R13.61 告警线调 0 时写一行 GLOG（【计时】本轮 1.50s）" \
+   "$(grep -c '^GLOG:【计时】本轮 1.50s' "$GTT/o2")" "1"
+sh "$GTT/run.sh" "$GTT" 2 0.07 0.09 >"$GTT/o3" 2>&1
+ck "R13.62 前导零不按八进制算（0.07→0.09 记成 0.02s）" \
+   "$(grep -c '本轮 0.02s$' "$GTT/o3")" "1"
+rm -f "$GTT/timing"
+sh "$GTT/run.sh" "$GTT" 2 200.00 199.00 >"$GTT/o4" 2>&1
+ck "R13.63 时钟倒退不写负数（静默跳过）" "$(grep -c 'T=NOWRITE' "$GTT/o4")" "1"
 
 echo "------------------------------------------------------------------"
 echo "R13 RESULT: $R 项失败"

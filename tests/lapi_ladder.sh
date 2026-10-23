@@ -236,12 +236,16 @@ echo "===== R34j. 联网 cscli 超时：只有 enroll 收 5s，其余 10s（v.10
 # 盖回，是互斗的死代码），R34.48 由「有 timeout 10」改为「不存在调用」的反向断言。
 ck "R34.44 console enroll 带 timeout 5（唯一的 5s）" \
    "$(grep -c 'timeout 5 /usr/bin/cscli console enroll' "$BS")" "1"
-ck "R34.45 console status 保持 timeout 10" \
-   "$(grep -c 'timeout 10 \$CSCLI console status' "$BS")" "1"
-ck "R34.46 capi status 三处都保持 timeout 10（凭据复核 / 兜底判据 / enroll 后打印）" \
-   "$(grep -c 'timeout 10 \$CSCLI capi status' "$BS")" "3"
-ck "R34.47 capi register 保持 timeout 10" \
-   "$(grep -c 'timeout 10 \$CSCLI capi register' "$BS")" "1"
+# 【v.108.70】内层从 10s 收到 8s：外层 attach 也是 10s，两边同时到点会先杀
+# lxc-attach，内层的 rc=124 和已经打出来的输出就全丢了。内层小 2s 先退，才带得回原因。
+ck "R34.45 console status 内层 timeout 8（外层 10 留 2s 收尾）" \
+   "$(grep -c 'timeout 8 \$CSCLI console status' "$BS")" "1"
+ck "R34.46 capi status 三处都是 timeout 8（凭据复核 / 兜底判据 / enroll 后打印）" \
+   "$(grep -c 'timeout 8 \$CSCLI capi status' "$BS")" "3"
+ck "R34.47 capi register 内层 timeout 8" \
+   "$(grep -c 'timeout 8 \$CSCLI capi register' "$BS")" "1"
+ck "R34.47b 内层不再有 timeout 10 的 cscli（防止漏改一处）" \
+   "$(grep -c 'timeout 10 \$CSCLI' "$BS")" "0"
 ck "R34.48 bootstrap 已不再调用 console enable --all（v.108.69 删：写 console.yaml 与 guard 互斗）" \
    "$(grep -c "_ct_env 'timeout 10 /usr/bin/cscli console enable --all'" "$BS")" "0"
 ck "R34.49 timeout 5 全文只有 1 处（不许扩散到别的命令）" \
@@ -250,8 +254,8 @@ ck "R34.50 enroll 前先等 DNS 就绪（5s 够用的前提，不能被删）" \
    "$(grep -c '_wait_capi_net 30' "$BS")" "1"
 
 echo "===== R34k. 版本号 ====="
-ck "R34.51 版本推进到 108.69" \
-   "$(grep -c 'SCRIPT_VER="2026-10-24.108.69-bp"' "$BS")" "1"
+ck "R34.51 版本推进到 108.70" \
+   "$(grep -c 'SCRIPT_VER="2026-10-24.108.70-bp"' "$BS")" "1"
 
 echo "------------------------------------------------------------------"
 echo "R34 RESULT: $R 项失败"

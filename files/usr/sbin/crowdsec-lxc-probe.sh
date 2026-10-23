@@ -28,7 +28,11 @@
 BOOT=/usr/sbin/crowdsec-lxc-bootstrap.sh
 GUARD=/usr/sbin/crowdsec-guard.sh
 LOCK=/tmp/.crowdsec-lxc-bootstrap.lock
-BOOT_LOG=/root/crowdsec-lxc-bootstrap.log
+# 【v.108.70】与 bootstrap 同源。bootstrap 自己认 CS_BOOTSTRAP_LOG（第 171 行），
+# 但 probe 这边原来是硬编码：改了 bootstrap 的日志路径，probe 还在往老文件追加输出、
+# 也在老文件里找「补印」痕迹，两边对不上却没有任何报错 —— 这类「不报错但给错答案」
+# 比直接报错难查得多。现在两边都从同一个变量取默认值。
+BOOT_LOG="${CS_BOOTSTRAP_LOG:-/root/crowdsec-lxc-bootstrap.log}"
 LXC_NAME="${LXC_NAME:-ubuntu}"
 LXC_PATH="${LXC_PATH:-/srv/lxc}"
 # 与 bootstrap 的 STATE_DIR 推导保持一致（CS_BOOTSTRAP_STATE 可整体改根）

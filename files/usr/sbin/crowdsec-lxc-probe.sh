@@ -49,19 +49,41 @@ PROBE_FAIL_ALERT="${CS_PROBE_FAIL_ALERT:-5}"
 # 「bouncer 拉得到吗」，配置被改坏但还能拉的时候它照样是绿的 —— 所以每隔
 # AUDIT_EVERY 轮做一次从头到脚的体检。0 = 关闭。
 PROBE_AUDIT_EVERY="${CS_PROBE_AUDIT_EVERY:-30}"
-# 【v.108.67】整趟调用的时长上限。bootstrap 内部每条宿主命令都套了 10s（v.108.66），
+# 【v.108.67 设上限 / v.108.68 分档】bootstrap 内部每条宿主命令都有上限（v.108.66），
 # 但「节点数 × 10s」没有上界；probe 是常驻进程，卡在 wait 上不退 = procd 不 respawn
 # = 监视链路静默停摆（本文件里最像「看起来在跑、其实什么都没做」的一处）。
-# 1800s 与 PROBE_LOCK_STALE 同口径：正常一轮引导几分钟，命中即说明真卡住了。
-PROBE_BOOT_MAX="${CS_PROBE_BOOT_MAX:-1800}"
+#
+# 一个 1800s 的大锅不行：它比最坏路径还长一倍，等于「真卡住」也要等半小时才有人知道。
+# 按调用类型分三档，每档都按**代码里数得出来的最坏路径**取 1.5 倍：
+#   --probe-check  只判 last_pull（bouncer_pulling：2 次 attach + 时间比较），
+#                  正常 3~5s                                        → 60s（十倍余量）
+#   --verify-only  28 个节点全验、一个字节都不写，正常 20~40s          → 300s
+#   无参数（完整）  ct_force_stop 最多 3×48s≈150s + _wait_lapi_ready 60s
+#                  + _wait_capi_net 30s + 网桥重接 10×1s + DNS 30s
+#                  + enroll 两轮 15s ≈ 5~6 分钟                     → 900s
+# 取最坏路径的倍数而不是正常耗时：上限越短越容易误杀，而误杀要白等一轮冷却，
+# 连续 5 次才锁存 need-human —— 宁可在真卡住时多等几分钟，也不制造假失败。
+PROBE_CHECK_MAX="${CS_PROBE_CHECK_MAX:-60}"
+PROBE_VERIFY_MAX="${CS_PROBE_VERIFY_MAX:-300}"
+PROBE_FIX_MAX="${CS_PROBE_FIX_MAX:-900}"
 # guard 自身有 3 次 attach × 10s，正常几百 ms；60s 是硬顶，不是预期耗时。
 PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
 # 所有 bootstrap 调用都从这里走：一处定义、多处引用，避免漏掉某一处。
+# 按参数选档：--probe-check / --verify-only / 其余（完整引导）。
+# _BOOT_MAX 留给 124 那句日志复用 —— 日志里写的必须是**这一档实际用的**上限，
+# 写成常量名会让人以为所有调用都是同一个数。
 # timeout 只终止 bootstrap 本身，容器（lxc-start -d 拉起的）不受影响。
-_boot() { timeout "$PROBE_BOOT_MAX" "$BOOT" "$@"; }
+_boot() {
+    case "${1:-}" in
+    --probe-check) _BOOT_MAX="$PROBE_CHECK_MAX" ;;
+    --verify-only) _BOOT_MAX="$PROBE_VERIFY_MAX" ;;
+    *) _BOOT_MAX="$PROBE_FIX_MAX" ;;
+    esac
+    timeout "$_BOOT_MAX" "$BOOT" "$@"
+}
 
 # ---- 核心脚本完整性：每轮先复原被改动的脚本，再判定 last_pull ----
 # 必须排在 probe_tick 之前：bootstrap 持锁时 tick 会走 lock-busy 提前返回，
@@ -280,7 +302,7 @@ probe_tick() {
     # 【v.108.67】124 撞的是 _boot 的总上限，语义是「卡住了」，不是「修不好」。
     # 不单独说一句的话，日志只剩「bootstrap 退出 124」，看的人会当成脚本自己的退出码。
     if [ "$_rc" = 124 ]; then
-        plog "【超时】bootstrap 超过 ${PROBE_BOOT_MAX}s 未返回，已终止（容器或网络卡住；锁已回收）"
+        plog "【超时】bootstrap 超过 ${_BOOT_MAX:-$PROBE_FIX_MAX}s 未返回，已终止（容器或网络卡住；锁已回收）"
     fi
     # 【v.108.58】bootstrap 退出 0 不等于 last_pull 修好了：bouncer_verify 在
     # SOFT_NODES 里（首启心跳有 10s 延迟，不该把整轮引导判死），它失败时引导照样

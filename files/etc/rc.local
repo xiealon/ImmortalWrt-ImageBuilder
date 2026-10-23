@@ -63,7 +63,12 @@ date +%s > "$LOCK/ts" 2>/dev/null
 # ---- 阶段【执行引导】：bootstrap 自身按 8 个组链式验证并置位 ----
 # ---- 小步骤 持锁运行 bootstrap ----
 # $BOOT_MODE 故意不加引号：普通模式要展开成零个参数，加了引号会传进一个空串。
-/bin/sh "$BOOT" $BOOT_MODE >>"$LOG" 2>&1
+# 【v.108.67】同步等待加了硬顶。rc.local 由 rcS 收尾阶段执行，这一句卡住会把
+# 开机收尾一起拖住；而 bootstrap 的「节点数 × 10s」本身没有上界。
+# 124 = 撞上限被终止，锁在下一句照常释放（rm -rf），不会留下永久的陈旧锁。
+timeout "${CS_RC_BOOT_MAX:-1800}" /bin/sh "$BOOT" $BOOT_MODE >>"$LOG" 2>&1
+_rc=$?
+[ "$_rc" = 124 ] && echo "[$(date '+%F %T')] 【超时】bootstrap 超过 ${CS_RC_BOOT_MAX:-1800}s 未返回，已终止（容器或网络卡住）" >>"$LOG"
 # ---- 小步骤 释放引导锁 ----
 # 同上：锁里有 pid/ts，rmdir 删不掉非空目录，必须 rm -rf。
 rm -rf "$LOCK" 2>/dev/null

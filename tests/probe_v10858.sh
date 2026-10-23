@@ -26,7 +26,7 @@ body() {
 
 echo "===== R31a. 退出 0 不等于修好（A） ====="
 ck "R31.1 退出 0 时再自问一次 last_pull" \
-   "$(body probe_tick "$PR" | grep -c 'if \[ "\$_rc" = 0 \] && ! "\$BOOT" --probe-check')" "1"
+   "$(body probe_tick "$PR" | grep -c 'if \[ "\$_rc" = 0 \] && ! _boot --probe-check')" "1"
 ck "R31.2 仍停滞则改写退出码，按失败计" \
    "$(body probe_tick "$PR" | grep -c '_rc=97')" "1"
 ck "R31.3 日志点明根因是 SOFT 节点不参与退出码" \

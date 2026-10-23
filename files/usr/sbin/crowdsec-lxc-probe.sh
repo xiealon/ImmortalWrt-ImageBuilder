@@ -49,8 +49,19 @@ PROBE_FAIL_ALERT="${CS_PROBE_FAIL_ALERT:-5}"
 # 「bouncer 拉得到吗」，配置被改坏但还能拉的时候它照样是绿的 —— 所以每隔
 # AUDIT_EVERY 轮做一次从头到脚的体检。0 = 关闭。
 PROBE_AUDIT_EVERY="${CS_PROBE_AUDIT_EVERY:-30}"
+# 【v.108.67】整趟调用的时长上限。bootstrap 内部每条宿主命令都套了 10s（v.108.66），
+# 但「节点数 × 10s」没有上界；probe 是常驻进程，卡在 wait 上不退 = procd 不 respawn
+# = 监视链路静默停摆（本文件里最像「看起来在跑、其实什么都没做」的一处）。
+# 1800s 与 PROBE_LOCK_STALE 同口径：正常一轮引导几分钟，命中即说明真卡住了。
+PROBE_BOOT_MAX="${CS_PROBE_BOOT_MAX:-1800}"
+# guard 自身有 3 次 attach × 10s，正常几百 ms；60s 是硬顶，不是预期耗时。
+PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 
 plog() { logger -t crowdsec-probe "$*"; }
+
+# 所有 bootstrap 调用都从这里走：一处定义、多处引用，避免漏掉某一处。
+# timeout 只终止 bootstrap 本身，容器（lxc-start -d 拉起的）不受影响。
+_boot() { timeout "$PROBE_BOOT_MAX" "$BOOT" "$@"; }
 
 # ---- 核心脚本完整性：每轮先复原被改动的脚本，再判定 last_pull ----
 # 必须排在 probe_tick 之前：bootstrap 持锁时 tick 会走 lock-busy 提前返回，
@@ -62,7 +73,7 @@ _guard_run() {
         cp -f "/rom$GUARD" "$GUARD" 2>/dev/null
         chmod 755 "$GUARD" 2>/dev/null
     fi
-    [ -x "$GUARD" ] && "$GUARD" quiet
+    [ -x "$GUARD" ] && timeout "$PROBE_GUARD_MAX" "$GUARD" quiet
     return 0
 }
 
@@ -152,7 +163,7 @@ probe_tick() {
             plog "【持锁失败】并发占用，本轮放弃"
             return 0
         fi
-        "$BOOT" >>"$BOOT_LOG" 2>&1 &
+        _boot >>"$BOOT_LOG" 2>&1 &
         _rs_pid=$!
         echo "$_rs_pid" > "$LOCK/pid" 2>/dev/null
         date +%s > "$LOCK/ts" 2>/dev/null
@@ -187,20 +198,20 @@ probe_tick() {
     P_ROUND=$((${P_ROUND:-0} + 1))
     if [ "${PROBE_AUDIT_EVERY:-0}" -gt 0 ] 2>/dev/null \
        && [ $((P_ROUND % PROBE_AUDIT_EVERY)) -eq 0 ]; then
-        if "$BOOT" --verify-only >>"$BOOT_LOG" 2>&1; then
+        if _boot --verify-only >>"$BOOT_LOG" 2>&1; then
             plog "【体检】第 ${P_ROUND} 轮：全量验证全部达标"
             P_AUDIT_BAD=0
-        elif ! "$BOOT" --probe-check >/dev/null 2>&1; then
+        elif ! _boot --probe-check >/dev/null 2>&1; then
             P_ACTION="audit-wait-bouncer"
             plog "【体检】第 ${P_ROUND} 轮：有项不符，但 last_pull 此刻无效 —— 不抢跑，交给停滞判定处置"
-        elif "$BOOT" --verify-only >>"$BOOT_LOG" 2>&1; then
+        elif _boot --verify-only >>"$BOOT_LOG" 2>&1; then
             plog "【体检】第 ${P_ROUND} 轮：首检不符、复检通过（偶发），不动现场"
             P_AUDIT_BAD=0
         else
             P_AUDIT_BAD=$((${P_AUDIT_BAD:-0} + 1))
             plog "【体检】第 ${P_ROUND} 轮：首检与复检都不符（连续 ${P_AUDIT_BAD} 次），重跑引导按需补齐"
             if mkdir "$LOCK" 2>/dev/null; then
-                "$BOOT" >>"$BOOT_LOG" 2>&1 &
+                _boot >>"$BOOT_LOG" 2>&1 &
                 _ap=$!
                 echo "$_ap" > "$LOCK/pid" 2>/dev/null
                 date +%s > "$LOCK/ts" 2>/dev/null
@@ -209,7 +220,7 @@ probe_tick() {
             fi
         fi
     fi
-    if "$BOOT" --probe-check >/dev/null 2>&1; then
+    if _boot --probe-check >/dev/null 2>&1; then
         if [ "${P_STALL:-0}" -gt 0 ]; then
             plog "【恢复】last_pull 已恢复（停滞 $P_STALL 轮后）"
         fi
@@ -259,20 +270,25 @@ probe_tick() {
     fi
     # 后台起 bootstrap 并立刻把「它的」pid 写进锁：陈旧判定的依据必须是持有者，
     # 不是探针自己 —— 否则探针被重启时会把一个仍在跑着的 bootstrap 判成陈旧。
-    "$BOOT" >>"$BOOT_LOG" 2>&1 &
+    _boot >>"$BOOT_LOG" 2>&1 &
     _bp=$!
     echo "$_bp" > "$LOCK/pid" 2>/dev/null
     date +%s > "$LOCK/ts"  2>/dev/null
     wait "$_bp"
     _rc=$?
     rm -rf "$LOCK" 2>/dev/null
+    # 【v.108.67】124 撞的是 _boot 的总上限，语义是「卡住了」，不是「修不好」。
+    # 不单独说一句的话，日志只剩「bootstrap 退出 124」，看的人会当成脚本自己的退出码。
+    if [ "$_rc" = 124 ]; then
+        plog "【超时】bootstrap 超过 ${PROBE_BOOT_MAX}s 未返回，已终止（容器或网络卡住；锁已回收）"
+    fi
     # 【v.108.58】bootstrap 退出 0 不等于 last_pull 修好了：bouncer_verify 在
     # SOFT_NODES 里（首启心跳有 10s 延迟，不该把整轮引导判死），它失败时引导照样
     # exit 0。原来这里直接 P_FAIL=0 并打「复验完成」，于是 PROBE_FAIL_ALERT 那条
     # 「需人工介入」对 last_pull 停滞永远不可达 —— 每 10 分钟重跑一轮、日志一路报喜，
     # 机器卡在坏状态。这是「不报错、只给错误答案」的典型形态。
     # 退出 0 时再自问一次：仍停滞 = 这轮没修好，按失败计（97 只是给日志一个可辨识的值）。
-    if [ "$_rc" = 0 ] && ! "$BOOT" --probe-check >/dev/null 2>&1; then
+    if [ "$_rc" = 0 ] && ! _boot --probe-check >/dev/null 2>&1; then
         _rc=97
         plog "【复验未生效】bootstrap 退出 0，但 last_pull 仍停滞（bouncer_verify 是 SOFT 节点，不参与退出码）—— 按失败计"
     fi

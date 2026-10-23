@@ -80,11 +80,13 @@ ck "R13.9 日志记录被删除" "$(grep -c '被删除' "$LOG" 2>/dev/null)" "1"
 
 echo "== 5 权限以基准为准（含 644 的配置文件） =="
 # 原测试靠 chmod 构造「内容同但丢执行位」，但 Windows 下 busybox 的 chmod 语义
-# 不可靠（同一环境下 -x 恒真），构造不出两侧权限不同的现场，改用静态断言：
-# guard 必须按基准的 stat 权限比对，而不是硬判 [ -x ] —— 后者会把清单里任何
-# 644 的 /etc/config/* 都当成「不一致」，每轮复原一次，反而搅成死循环。
-ck "R13.10 权限按 stat 比对" "$(cg "$G" "stat -c '%a'")" "2"
-ck "R13.10b 不再硬判 -x" "$(cg "$G" '&& \[ -x "\$_f" \]')" "0"
+# 不可靠（同一环境下 -x 恒真），构造不出两侧权限不同的现场，改用静态断言。
+# 【v.108.67 同步实现】v.108.44 起实现已经不用 `stat -c %a` 了：本固件 busybox
+# 没编 stat applet，真机实测取到空串 → 比较恒假 → 每分钟把 6 个文件全重写一遍。
+# 现在只比「有没有执行位」这一维。测试必须跟着实现走，钉住旧实现等于测一段
+# 已经不存在的代码 —— 这是本次修掉的三条陈旧断言之一。
+ck "R13.10 不再用 stat -c %a（本固件 busybox 没编 stat）" "$(cg "$G" "stat -c '%a'")" "0"
+ck "R13.10b 用 -x 判执行位（基准侧）" "$(cg "$G" '\[ -x "\$_src" \] && _src_mode=755')" "1"
 
 echo "== 6 连续两次篡改：备份只留最近一份 =="
 reset_all
@@ -190,7 +192,11 @@ for _b in "$B24" "$B25"; do
     ck "R13.35 $_n 断言表含 init.d" "$(cg "$_b" 'files/etc/init.d/crowdsec-lxc-probe')" "2"
     ck "R13.36 $_n 有 -x 断言" "$(cg "$_b" '\[ -x "\$_f" \]')" "1"
     # 三处硬失败：make image 返回非 0、执行位断言缺位、custom/* 拷进 files/etc/config 失败
-    ck "R13.37 $_n 缺位即失败" "$(cg "$_b" 'exit 1')" "3"
+    # 【v.108.67 同步实现】后来又加了基底校验、执行位断言、custom 拷贝各自的出口，
+    # 现在实际是 8 处。钉死等于每加一条断言就得改这条测试，而它要保证的是
+    # 「缺位时构建会失败」，不是「恰好三处 exit 1」—— 改成下限断言。
+    ck "R13.37 $_n 缺位即失败（exit 1 ≥3 处）" \
+       "$([ "$(cg "$_b" 'exit 1')" -ge 3 ] && echo yes || echo no)" "yes"
 done
 
 echo "== 15 断言自身不许再被注释糊弄 =="
@@ -207,6 +213,16 @@ ck "R13.48 _ct_run 走 timeout（挂住就杀，不让 guard 静默停摆）" \
    "$(grep -c '^    timeout "\$GUARD_CT_TIMEOUT" lxc-attach' "$G")" "2"
 ck "R13.49 没有裸 lxc-attach（全部带超时）" \
    "$(grep -c '^    lxc-attach' "$G")" "0"
+
+echo "== 17 /health 探测也要有硬顶（v.108.67） =="
+# wget 的 --timeout=3 只管「读/等回包」那一段：建连和名字解析卡住时它不生效，
+# 而 guard 挂在这一句上同样是「进程还在、什么都不做」，procd 不会 respawn。
+ck "R13.50 /health 探测外套 timeout" \
+   "$(grep -c 'timeout "\$GUARD_WGET_TIMEOUT" wget -qO- --timeout=3' "$G")" "1"
+ck "R13.51 不存在裸 wget 调用（活代码内）" \
+   "$(grep -v '^[[:space:]]*#' "$G" | grep -c '^[[:space:]]*if ! wget')" "0"
+ck "R13.52 GUARD_WGET_TIMEOUT 默认 5s" \
+   "$(grep -c '^GUARD_WGET_TIMEOUT="\${CS_GUARD_WGET_TIMEOUT:-5}"$' "$G")" "1"
 
 echo "------------------------------------------------------------------"
 echo "R13 RESULT: $R 项失败"

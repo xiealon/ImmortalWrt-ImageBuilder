@@ -224,6 +224,12 @@ OVL_FIX_MAX="${CS_GUARD_OVL_FIX_MAX:-20}"
 # procd 不会 respawn（进程还在、没退出），整条保护链路就静默停摆 —— 正是
 # 「看起来在跑、其实什么都没做」的那种坏法。与 bootstrap 的 CT_TIMEOUT 同口径。
 GUARD_CT_TIMEOUT="${CS_GUARD_CT_TIMEOUT:-10}"
+
+# 【v.108.67】/health 探测的硬顶。wget 的 --timeout=3 只覆盖「读/等对端回包」那一段，
+# 建连与名字解析卡住时它不生效；而 guard 一旦挂在这一句上，procd 同样看到「进程还在」，
+# 不会 respawn —— 与上面两处 attach 是同一种静默停摆。目标写的是 IP、正常 1s 内返回，
+# 5s 只兜「卡死」这一种，不改变任何正常路径的判定。
+GUARD_WGET_TIMEOUT="${CS_GUARD_WGET_TIMEOUT:-5}"
 _ct_run() {
     timeout "$GUARD_CT_TIMEOUT" lxc-attach -P "$GUARD_LXC_PATH" -n "$GUARD_LXC_NAME" -- "$@" 2>/dev/null
 }
@@ -340,7 +346,7 @@ _lapi_audit() {
 
     # ① 健康：从宿主探 10.1.0.10:8080。不通就到此为止 —— 链路本身断了，
     # 再报 last_pull 停滞只是把同一个原因说两遍。
-    if ! wget -qO- --timeout=3 "$GUARD_LAPI_URL/health" 2>/dev/null | grep -q '"status"'; then
+    if ! timeout "$GUARD_WGET_TIMEOUT" wget -qO- --timeout=3 "$GUARD_LAPI_URL/health" 2>/dev/null | grep -q '"status"'; then
         _glog "【LAPI】$GUARD_LAPI_URL/health 不可达 —— 容器未跑 / crowdsec 已停 / 8080 未对外开放"
         return 0
     fi

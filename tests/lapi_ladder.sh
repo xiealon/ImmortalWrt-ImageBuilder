@@ -228,9 +228,12 @@ ck "R34.43 被拒 → 点明基底 / 宿主侧两类，转人工" \
    "$(body _lapi_ladder "$BS_C" | grep -c '基底本身有问题、宿主侧')" "1"
 
 echo "===== R34j. 联网 cscli 超时：只有 enroll 收 5s，其余 10s（v.108.65） ====="
-# 目的：这 7 条都要问云端，任一条无超时挂住 = 引导锁不放 + 探针 tick 全被挡。
+# 目的：这几条都要问云端，任一条无超时挂住 = 引导锁不放 + 探针 tick 全被挡。
 # 唯一收到 5s 的是 console enroll：网页端不点 Accept 时它会一直等，等下去没有意义。
-# 其余 6 条要的是应答内容，多等几秒才有结果，卡住也不等于「网页没点」→ 维持 10s。
+# 其余 5 条（console status / capi status ×3 / capi register）要的是应答内容，
+# 多等几秒才有结果，卡住也不等于「网页没点」→ 维持 10s。
+# 【v.108.69】原第 7 条 console enable --all 删除（它写 console.yaml，guard 60s 内
+# 盖回，是互斗的死代码），R34.48 由「有 timeout 10」改为「不存在调用」的反向断言。
 ck "R34.44 console enroll 带 timeout 5（唯一的 5s）" \
    "$(grep -c 'timeout 5 /usr/bin/cscli console enroll' "$BS")" "1"
 ck "R34.45 console status 保持 timeout 10" \
@@ -239,16 +242,16 @@ ck "R34.46 capi status 三处都保持 timeout 10（凭据复核 / 兜底判据 
    "$(grep -c 'timeout 10 \$CSCLI capi status' "$BS")" "3"
 ck "R34.47 capi register 保持 timeout 10" \
    "$(grep -c 'timeout 10 \$CSCLI capi register' "$BS")" "1"
-ck "R34.48 console enable --all 保持 timeout 10" \
-   "$(grep -c 'timeout 10 /usr/bin/cscli console enable --all' "$BS")" "1"
+ck "R34.48 bootstrap 已不再调用 console enable --all（v.108.69 删：写 console.yaml 与 guard 互斗）" \
+   "$(grep -c "_ct_env 'timeout 10 /usr/bin/cscli console enable --all'" "$BS")" "0"
 ck "R34.49 timeout 5 全文只有 1 处（不许扩散到别的命令）" \
    "$(grep -c 'timeout 5 ' "$BS")" "1"
 ck "R34.50 enroll 前先等 DNS 就绪（5s 够用的前提，不能被删）" \
    "$(grep -c '_wait_capi_net 30' "$BS")" "1"
 
 echo "===== R34k. 版本号 ====="
-ck "R34.51 版本推进到 108.68" \
-   "$(grep -c 'SCRIPT_VER="2026-10-24.108.68-bp"' "$BS")" "1"
+ck "R34.51 版本推进到 108.69" \
+   "$(grep -c 'SCRIPT_VER="2026-10-24.108.69-bp"' "$BS")" "1"
 
 echo "------------------------------------------------------------------"
 echo "R34 RESULT: $R 项失败"

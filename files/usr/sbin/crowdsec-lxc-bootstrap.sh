@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-24.108.68-bp"
+SCRIPT_VER="2026-10-24.108.69-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -4463,7 +4463,7 @@ re_enroll() {
     # 挂住的代价是引导锁不放 + 探针 tick 全被挡。
     # 5s 的依据：① 走到这里说明 _wait_capi_net 已确认 api.crowdsec.net 可解析；
     # ② 注册是 POST，云端 5s 不答再等也不会有结果，只会继续占着锁。
-    # 其余几条（console status / capi status / capi register / enable --all）保持 10s：
+    # 其余几条（console status / capi status / capi register）保持 10s：
     # 它们要的是应答内容，多等几秒才有结果，卡住也不等于「网页没点」。
     # 超时（rc=124）走下面的失败分支：记「注册码未消耗，下次开机重试」，不会重复提交。
     if ! _enroll_out="$(_ct_env "timeout 5 /usr/bin/cscli console enroll \"$_enroll_key\"" 2>&1)"; then
@@ -4477,11 +4477,18 @@ re_enroll() {
     _enroll_submit_mark
     log "[enroll] 已记录提交时间（$ENROLL_SUBMIT_FILE）；本次开机不再重复提交（重启可再试一次）"
 
-    # 【v.108.64】这两条也要超时：它们同样问云端，而此刻仍持着引导锁。
-    # 失败都无害（enable 失败只记一行；capi status 空就跳过打印），但「挂住」有害。
-    _ct_env 'timeout 10 /usr/bin/cscli console enable --all' >/dev/null 2>&1 \
-        || log "[enroll] console enable --all 失败或超时（不影响注册；新版本 enrolled 后自动全开）"
-
+    # 【v.108.69】原来这里还有一条 `cscli console enable --all`，已删除 —— 不是
+    # 「没用」，是反向作用：它把 /etc/crowdsec/console.yaml 的四个共享开关全翻成
+    # true（含 share_manual_decisions，即把本机手动封的 IP 上报 CrowdSec 云端），
+    # 而 console.yaml 不在 guard 白名单里，60 秒内就被 /rom 只读基底盖回 false。
+    # 真机日志（2026-10-24 06:52:18）抓到过这次复原，差异正是
+    #   share_manual_decisions: false→true、share_context: false→true。
+    # 它从 v.108.49 起一次都没生效过，只多一次写盘 + 一次复原 + 一行日志。
+    # 删掉比给它开白名单更对：白名单等于把「手动封禁上报」永久化。
+    # 代价：console 网页的「共享统计」保持出厂默认（关）。要开就手动 cscli，
+    # 并同时把 console.yaml 加进 guard 白名单，否则 60 秒后仍会被盖回。
+    # 【v.108.64】capi status 仍要超时：它问云端，而此刻仍持着引导锁；
+    # 失败无害（空就跳过打印），但「挂住」有害（引导锁不放 + 探针 tick 全被挡）。
     _ct_restart_crowdsec || true
 
     _capi_out="$(_ct_env "timeout 10 $CSCLI capi status" 2>&1)"

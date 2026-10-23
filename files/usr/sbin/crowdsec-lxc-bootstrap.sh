@@ -37,7 +37,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-24.108.65-bp"
+SCRIPT_VER="2026-10-24.108.66-bp"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -193,14 +193,58 @@ esac
 [ -n "$_SELF" ] && chmod +x "$_SELF" 2>/dev/null
 chmod +x /etc/rc.local 2>/dev/null
 
-# 【v.108.52】30s → 60s：极简 rootfs 首次 attach 要等 PID1 就绪，30s 会截断成假失败，
-# 而调用方看到的是「命令失败」而不是「attach 超时」，非常难查。可用 CT_TIMEOUT 覆盖。
-CT_TIMEOUT="${CT_TIMEOUT:-60}"
-ct() { timeout "$CT_TIMEOUT" lxc-attach -P "$LXC_PATH" -n "$LXC_NAME" -- "$@"; }
-ct_running() { lxc-ls -P "$LXC_PATH" --running 2>/dev/null | grep -qw "$LXC_NAME"; }
-ct_exists() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; }
-ct_pid() { lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>/dev/null | sed -n 's/^PID:[[:space:]]*//p' | head -n1; }
-_pgrep_bouncer() { pgrep -f "crowdsec-firewall-bouncer" >/dev/null 2>&1; }
+# 【v.108.66】外层 attach 超时：平时 10s，容器刚起来那一段 60s。
+# 来由：v.108.52 把 60s 定成唯一值，理由是「极简 rootfs 首次 attach 要等 PID1 就绪，
+# 30s 会截断成假失败」。但那个理由只对「容器刚启动」成立 —— 运行期每条 cscli /
+# grep / cat 都是亚秒级，拿 60s 兜它们只会把「卡住」放大成一分钟，探针 tick 跟着堵。
+# 现在按时间窗区分，不用一个数应付两个场景：
+#   · 容器启动成功后 CT_BOOT_GRACE 秒内（默认 120）→ 用 CT_TIMEOUT_BOOT（60s），
+#     覆盖 PID1 就绪、cgroup 视图、首轮网络检查这些必然要等的地方；
+#   · 窗口之外（正常引导后半段、探针重跑、人工调用）→ 用 CT_TIMEOUT（10s）。
+# 三个数都可用同名环境变量覆盖。
+CT_TIMEOUT="${CT_TIMEOUT:-10}"
+CT_TIMEOUT_BOOT="${CT_TIMEOUT_BOOT:-60}"
+CT_BOOT_GRACE="${CT_BOOT_GRACE:-120}"
+_CT_BOOT_UNTIL=0
+ct() {
+    _ct_to="$CT_TIMEOUT"
+    if [ "${_CT_BOOT_UNTIL:-0}" -gt 0 ] && [ "$(date +%s)" -lt "$_CT_BOOT_UNTIL" ]; then
+        _ct_to="$CT_TIMEOUT_BOOT"
+    fi
+    timeout "$_ct_to" lxc-attach -P "$LXC_PATH" -n "$LXC_NAME" -- "$@"
+}
+
+# 【v.108.66】宿主侧外部命令统一超时（A 方案：分三档，不搞一刀切）
+# 为什么分档：容器内命令都能 10s，因为它们是「读一个结果」；宿主侧有三类本来就是
+# 「重活」，10s 一砍就变成假失败，而假失败比不设超时更糟 ——
+#   · firewall reload 会重建整张 nft 表，砍在中间留下的是半张表（转发可能直接断）；
+#   · network reload 让 netifd 拆了重加 lxcbr0，砍断等于网络停在半路；
+#   · tar -tzf / -xzf 是 100MB 级本地 I/O，10s 必然被砍 —— 一旦真走到解压兜底，
+#     10s 就等于让这条路永远失败。
+# 所以：
+#   run      10s  常规外部命令（lxc-* / uci / nft list / ip / mount / umount /
+#                 ping / wget / pgrep / log·logd·dropbear reload）
+#   run_svc  60s  重建类与启动类（firewall / network / dnsmasq reload|restart、
+#                 lxc-auto start、crowdsec-firewall-bouncer 的 init.d 启停）
+#   run_tar  不限（TAR_TIMEOUT=0）tar 校验与解压
+# 显式豁免：ping 自带 -W、wget 自带 --timeout 的仍套 run（外层只兜 DNS 卡死），
+# 两者不冲突 —— 内层先到点，外层 10s 只是最后的网。
+RUN_TIMEOUT="${RUN_TIMEOUT:-10}"
+SVC_TIMEOUT="${SVC_TIMEOUT:-60}"
+TAR_TIMEOUT="${TAR_TIMEOUT:-0}"
+run() { timeout "$RUN_TIMEOUT" "$@"; }
+run_svc() { timeout "$SVC_TIMEOUT" "$@"; }
+run_tar() {
+    if [ "${TAR_TIMEOUT:-0}" = "0" ]; then
+        "$@"
+    else
+        timeout "$TAR_TIMEOUT" "$@"
+    fi
+}
+ct_running() { run lxc-ls -P "$LXC_PATH" --running 2>/dev/null | grep -qw "$LXC_NAME"; }
+ct_exists() { run lxc-info -P "$LXC_PATH" -n "$LXC_NAME" >/dev/null 2>&1; }
+ct_pid() { run lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>/dev/null | sed -n 's/^PID:[[:space:]]*//p' | head -n1; }
+_pgrep_bouncer() { run pgrep -f "crowdsec-firewall-bouncer" >/dev/null 2>&1; }
 _ct_env() { ct sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; '"$1"; }
 
 # ---- 容器 init 类型判别（v.109-min）----
@@ -229,14 +273,14 @@ _ct_restart_crowdsec() {
 }
 
 cs_active_on_host() { _pgrep_bouncer; }
-nft_table_ready() { nft list table ip crowdsec >/dev/null 2>&1; }
+nft_table_ready() { run nft list table ip crowdsec >/dev/null 2>&1; }
 
 # 宿主机 bouncer 服务控制（v.99-bp.1）
 # OpenWrt/ImmortalWrt 没有 Debian/Ubuntu 的 `service` 包装器，只有 /etc/init.d/<name> <action>。
 BOUNCER_INIT="${BOUNCER_INIT:-/etc/init.d/crowdsec-firewall-bouncer}"
 bouncer_svc() {
     [ -x "$BOUNCER_INIT" ] || { log "[bouncer] $BOUNCER_INIT 不存在（crowdsec-firewall-bouncer 未进固件）"; return 1; }
-    "$BOUNCER_INIT" "$1" || { log "[bouncer] $BOUNCER_INIT $1 返回非零"; return 1; }
+    run_svc "$BOUNCER_INIT" "$1" || { log "[bouncer] $BOUNCER_INIT $1 返回非零"; return 1; }
     return 0
 }
 
@@ -245,7 +289,7 @@ ct_force_stop() {
     _r=0
     while [ "$_r" -lt 3 ]; do
         _r=$((_r+1))
-        lxc-stop -P "$LXC_PATH" -n "$LXC_NAME" -k >/dev/null 2>&1
+        run lxc-stop -P "$LXC_PATH" -n "$LXC_NAME" -k >/dev/null 2>&1
         _i=0
         while ct_running; do
             _i=$((_i+1))
@@ -296,7 +340,7 @@ _lxc_net() {
 }
 
 _lan_ip() {
-    _si=$(uci -q get network.lan.ipaddr 2>/dev/null)
+    _si=$(run uci -q get network.lan.ipaddr 2>/dev/null)
     [ -n "$_si" ] || { [ -f /etc/config/custom_router_ip.txt ] && _si=$(head -n1 /etc/config/custom_router_ip.txt | tr -d ' \t\r\n'); }
     [ -n "$_si" ] || _si='10.0.0.201'
     echo "$_si"
@@ -383,8 +427,8 @@ _norm_list() { ( for _w in $1; do printf '%s\n' "$_w"; done ) | sort | tr '\n' '
 # 按职责(name)定位 firewall zone 的 section 名，不赌 @zone[N] 索引
 # （索引会因其他包 insert zone / 定制改序而漂移，name 才是稳定职责标识）
 _zone_sec() {
-    for _z in $(uci show firewall 2>/dev/null | grep -E '=zone$' | cut -d. -f2 | cut -d= -f1); do
-        [ "$(uci -q get firewall.$_z.name 2>/dev/null)" = "$1" ] && { echo "$_z"; return 0; }
+    for _z in $(run uci show firewall 2>/dev/null | grep -E '=zone$' | cut -d. -f2 | cut -d= -f1); do
+        [ "$(run uci -q get firewall.$_z.name 2>/dev/null)" = "$1" ] && { echo "$_z"; return 0; }
     done
     return 1
 }
@@ -392,7 +436,7 @@ _zone_sec() {
 # LAN zone 网络接口名唯一出处：按 name 定责取 firewall zone(lan).network 首值
 _zone_lan_network() {
     _lz=$(_zone_sec lan) || return 1
-    _zn=$(uci -q get firewall.$_lz.network 2>/dev/null | head -n1)
+    _zn=$(run uci -q get firewall.$_lz.network 2>/dev/null | head -n1)
     [ -n "$_zn" ] || return 1
     echo "$_zn"
 }
@@ -403,44 +447,44 @@ verify_lxc_zone() {
     # 而这里原来写死 firewall.lxczone —— 用户在界面上明明配好了 lxc zone，
     # verify 却说没有，于是每次开机都重建一遍。判据必须和 builder 用同一个定位方式。
     _vz=$(_zone_sec lxc) || return 1
-    [ "$(uci -q get "firewall.$_vz.network")" = "lxc" ] || return 1
-    [ "$(uci -q get "firewall.$_vz.input")" = "ACCEPT" ] || return 1
-    [ "$(uci -q get "firewall.$_vz.output")" = "ACCEPT" ] || return 1
-    [ "$(uci -q get "firewall.$_vz.forward")" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get "firewall.$_vz.network")" = "lxc" ] || return 1
+    [ "$(run uci -q get "firewall.$_vz.input")" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get "firewall.$_vz.output")" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get "firewall.$_vz.forward")" = "ACCEPT" ] || return 1
 }
 
 verify_fwd_rules() {
     # 【v.108.24】不只看 src/dest：build 写的四项（段类型 rule / src / dest / target）
     # 必须全部对上。原来只比 src/dest，于是 target 被清掉、段类型被改坏时判「已就绪」，
     # 规则实际是 reject/不生效 —— 容器能起、拉不到日志，症状极难倒推。
-    [ "$(uci -q get firewall.lxc2lan)" = "rule" ] || return 1
-    [ "$(uci -q get firewall.lxc2lan.src)" = "lxc" ] || return 1
-    [ "$(uci -q get firewall.lxc2lan.dest)" = "lan" ] || return 1
-    [ "$(uci -q get firewall.lxc2lan.target)" = "ACCEPT" ] || return 1
-    [ "$(uci -q get firewall.lxc2lan.proto)" = "all" ] || return 1
-    [ "$(uci -q get firewall.lxc2docker)" = "rule" ] || return 1
-    [ "$(uci -q get firewall.lxc2docker.src)" = "lxc" ] || return 1
-    [ "$(uci -q get firewall.lxc2docker.dest)" = "docker" ] || return 1
-    [ "$(uci -q get firewall.lxc2docker.target)" = "ACCEPT" ] || return 1
-    [ "$(uci -q get firewall.lxc2docker.proto)" = "all" ] || return 1
-    [ "$(uci -q get firewall.lxc2vpn)" = "rule" ] || return 1
-    [ "$(uci -q get firewall.lxc2vpn.src)" = "lxc" ] || return 1
-    [ "$(uci -q get firewall.lxc2vpn.dest)" = "vpn" ] || return 1
-    [ "$(uci -q get firewall.lxc2vpn.target)" = "ACCEPT" ] || return 1
-    [ "$(uci -q get firewall.lxc2vpn.proto)" = "all" ] || return 1
-    [ "$(uci -q get firewall.lan2lxc)" = "rule" ] || return 1
-    [ "$(uci -q get firewall.lan2lxc.src)" = "lan" ] || return 1
-    [ "$(uci -q get firewall.lan2lxc.dest)" = "lxc" ] || return 1
-    [ "$(uci -q get firewall.lan2lxc.target)" = "ACCEPT" ] || return 1
-    [ "$(uci -q get firewall.lan2lxc.proto)" = "all" ] || return 1
+    [ "$(run uci -q get firewall.lxc2lan)" = "rule" ] || return 1
+    [ "$(run uci -q get firewall.lxc2lan.src)" = "lxc" ] || return 1
+    [ "$(run uci -q get firewall.lxc2lan.dest)" = "lan" ] || return 1
+    [ "$(run uci -q get firewall.lxc2lan.target)" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get firewall.lxc2lan.proto)" = "all" ] || return 1
+    [ "$(run uci -q get firewall.lxc2docker)" = "rule" ] || return 1
+    [ "$(run uci -q get firewall.lxc2docker.src)" = "lxc" ] || return 1
+    [ "$(run uci -q get firewall.lxc2docker.dest)" = "docker" ] || return 1
+    [ "$(run uci -q get firewall.lxc2docker.target)" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get firewall.lxc2docker.proto)" = "all" ] || return 1
+    [ "$(run uci -q get firewall.lxc2vpn)" = "rule" ] || return 1
+    [ "$(run uci -q get firewall.lxc2vpn.src)" = "lxc" ] || return 1
+    [ "$(run uci -q get firewall.lxc2vpn.dest)" = "vpn" ] || return 1
+    [ "$(run uci -q get firewall.lxc2vpn.target)" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get firewall.lxc2vpn.proto)" = "all" ] || return 1
+    [ "$(run uci -q get firewall.lan2lxc)" = "rule" ] || return 1
+    [ "$(run uci -q get firewall.lan2lxc.src)" = "lan" ] || return 1
+    [ "$(run uci -q get firewall.lan2lxc.dest)" = "lxc" ] || return 1
+    [ "$(run uci -q get firewall.lan2lxc.target)" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get firewall.lan2lxc.proto)" = "all" ] || return 1
 }
 
 # SNAT 段定位：按 name="lxc-snat" 找 nat 段，不赌段名。
 # LuCI 删了重建会把段名变成 @nat[0] / cfg0a1b2c 之类，写死 lxcsnat 会在
 # 「用户在界面上明明配了」的情况下误判缺失，然后每小时开机都报一遍待办。
 _snat_sec() {
-    for _s in $(uci show firewall 2>/dev/null | grep -E '=nat$' | cut -d. -f2 | cut -d= -f1); do
-        [ "$(uci -q get "firewall.$_s.name" 2>/dev/null)" = "lxc-snat" ] \
+    for _s in $(run uci show firewall 2>/dev/null | grep -E '=nat$' | cut -d. -f2 | cut -d= -f1); do
+        [ "$(run uci -q get "firewall.$_s.name" 2>/dev/null)" = "lxc-snat" ] \
             && { printf '%s\n' "$_s"; return 0; }
     done
     return 1
@@ -448,11 +492,11 @@ _snat_sec() {
 
 verify_snat_rule() {
     _sn=$(_snat_sec) || return 1
-    [ "$(uci -q get "firewall.$_sn.target" 2>/dev/null)" = "SNAT" ] || return 1
-    [ "$(uci -q get "firewall.$_sn.proto"  2>/dev/null)" = "all" ] || return 1
-    [ "$(uci -q get "firewall.$_sn.src"    2>/dev/null)" = "lan" ] || return 1
-    [ "$(uci -q get "firewall.$_sn.src_ip" 2>/dev/null)" = "$(_lxc_net)" ] || return 1
-    [ "$(uci -q get "firewall.$_sn.snat_ip" 2>/dev/null)" = "$(_lan_ip)" ] || return 1
+    [ "$(run uci -q get "firewall.$_sn.target" 2>/dev/null)" = "SNAT" ] || return 1
+    [ "$(run uci -q get "firewall.$_sn.proto"  2>/dev/null)" = "all" ] || return 1
+    [ "$(run uci -q get "firewall.$_sn.src"    2>/dev/null)" = "lan" ] || return 1
+    [ "$(run uci -q get "firewall.$_sn.src_ip" 2>/dev/null)" = "$(_lxc_net)" ] || return 1
+    [ "$(run uci -q get "firewall.$_sn.snat_ip" 2>/dev/null)" = "$(_lan_ip)" ] || return 1
     return 0
 }
 
@@ -469,7 +513,7 @@ verify_ip_forward() {
 # 判据：宿主侧 veth 的 iflink == 容器 eth0 的 ifindex（veth 对端的编号关系）。
 # 兜底：找不到对端就什么都不做，绝不 ip link del 网桥（那会把容器网彻底打死）。
 _reattach_ct_veth() {
-    ip link show lxcbr0 >/dev/null 2>&1 || return 1
+    run ip link show lxcbr0 >/dev/null 2>&1 || return 1
     # 已经有端口挂着了：说明没掉，什么都不用做
     ip -d link show master lxcbr0 2>/dev/null | grep -q 'veth' && return 0
     ct_running || return 0
@@ -479,14 +523,14 @@ _reattach_ct_veth() {
         [ -e "$_rv_v" ] || continue
         [ "$(cat "$_rv_v/iflink" 2>/dev/null)" = "$_rv_idx" ] || continue
         _rv_n=$(basename "$_rv_v")
-        ip link set "$_rv_n" master lxcbr0 2>/dev/null || continue
-        ip link set "$_rv_n" up 2>/dev/null || true
-        ip link set lxcbr0 up 2>/dev/null || true
+        run ip link set "$_rv_n" master lxcbr0 2>/dev/null || continue
+        run ip link set "$_rv_n" up 2>/dev/null || true
+        run ip link set lxcbr0 up 2>/dev/null || true
         log "[网桥] 容器 veth 掉线，已重接回 lxcbr0（宿主 $_rv_n ↔ 容器 eth0 if${_rv_idx}）"
         # 立刻用 ping 证明修好了；修不好也要说出来，不能假绿
         _rv_i=0
         while [ "$_rv_i" -lt 10 ]; do
-            ping -c 1 -W 1 "$CONTAINER_IP" >/dev/null 2>&1 && { log "[网桥] 重接后 ping $CONTAINER_IP 已通"; return 0; }
+            run ping -c 1 -W 1 "$CONTAINER_IP" >/dev/null 2>&1 && { log "[网桥] 重接后 ping $CONTAINER_IP 已通"; return 0; }
             _rv_i=$((_rv_i+1)); sleep 1
         done
         log "[网桥] 重接后仍 ping 不通 $CONTAINER_IP（可能还有防火墙/路由问题，不在此函数职责内）"
@@ -502,22 +546,22 @@ verify_bridge() {
     # ipaddr=BRIDGE_IP / netmask，原来只比 proto + 内核 IP：
     # device 被改成 eth0、ipaddr 被改成别的，只要内核地址还在就判「已就绪」，
     # 重启后 netifd 按 uci 重新拉起，lxcbr0 就没了。
-    [ "$(uci -q get network.lxc)" = "interface" ] || return 1
-    [ "$(uci -q get network.lxc.proto 2>/dev/null)" = "static" ] || return 1
-    [ "$(uci -q get network.lxc.device 2>/dev/null)" = "lxcbr0" ] || return 1
-    [ "$(uci -q get network.lxc.ipaddr 2>/dev/null)" = "$BRIDGE_IP" ] || return 1
+    [ "$(run uci -q get network.lxc)" = "interface" ] || return 1
+    [ "$(run uci -q get network.lxc.proto 2>/dev/null)" = "static" ] || return 1
+    [ "$(run uci -q get network.lxc.device 2>/dev/null)" = "lxcbr0" ] || return 1
+    [ "$(run uci -q get network.lxc.ipaddr 2>/dev/null)" = "$BRIDGE_IP" ] || return 1
     # 【v.108.37】netmask 也要验：build 写了它，verify 原来不看，
     # 掩码被改成 /16 之类时接口照起、地址照在，但整个 10.1.0.0/16 都会被算进直连，
     # 容器和 LAN 网段的转发判定跟着变 —— 属于「写了没验」的漏项。
-    [ "$(uci -q get network.lxc.netmask 2>/dev/null)" = "255.255.255.0" ] || return 1
+    [ "$(run uci -q get network.lxc.netmask 2>/dev/null)" = "255.255.255.0" ] || return 1
     # 【v.108.34】设备必须自己声明过：没有 config device 时 netifd 把 lxcbr0 当外部设备，
     # 「有就拿来用、没有也不建」。于是重启后网桥不存在，全靠脚本开机时 ip link add 兜着；
     # 脚本在 bridge 之前任何一步失败，网桥就没了 —— 这正是「ip link show 里没有 lxcbr0」。
-    [ "$(uci -q get network.lxcbr0)" = "device" ] || return 1
-    [ "$(uci -q get network.lxcbr0.type 2>/dev/null)" = "bridge" ] || return 1
-    [ "$(uci -q get network.lxcbr0.name 2>/dev/null)" = "lxcbr0" ] || return 1
+    [ "$(run uci -q get network.lxcbr0)" = "device" ] || return 1
+    [ "$(run uci -q get network.lxcbr0.type 2>/dev/null)" = "bridge" ] || return 1
+    [ "$(run uci -q get network.lxcbr0.name 2>/dev/null)" = "lxcbr0" ] || return 1
     # 空网桥没有 bridge_empty='1' 时 netifd 直接不建（端口要等容器 veth 接进来）
-    [ "$(uci -q get network.lxcbr0.bridge_empty 2>/dev/null)" = "1" ] || return 1
+    [ "$(run uci -q get network.lxcbr0.bridge_empty 2>/dev/null)" = "1" ] || return 1
     # 【首台真机 2026-10-22】端口在位才算就绪。
     #   netifd reload 会把 lxcbr0 拆了重建，端口跟着掉光变成 NO-CARRIER，
     #   而上面这些判据（device/proto/ipaddr/netmask/bridge_empty/地址）**全都还成立** ——
@@ -526,7 +570,7 @@ verify_bridge() {
     if ct_running; then
         ip -d link show master lxcbr0 2>/dev/null | grep -q 'veth' || return 1
     fi
-    ip link show lxcbr0 >/dev/null 2>&1 || return 1
+    run ip link show lxcbr0 >/dev/null 2>&1 || return 1
     _vb=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
     [ -n "$_vb" ] && [ "$_vb" = "$BRIDGE_IP" ]
 }
@@ -534,8 +578,8 @@ verify_bridge() {
 # LAN zone 放行独立验证（定责 name=lan）：input/forward 必须 ACCEPT
 verify_lan_input() {
     _lz=$(_zone_sec lan) || { log "[FW] 未找到 lan zone，本轮不校验 input/forward"; return 0; }
-    [ "$(uci -q get firewall.$_lz.input 2>/dev/null)" = "ACCEPT" ] || return 1
-    [ "$(uci -q get firewall.$_lz.forward 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get firewall.$_lz.input 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get firewall.$_lz.forward 2>/dev/null)" = "ACCEPT" ] || return 1
     return 0
 }
 
@@ -554,13 +598,13 @@ verify_br_lan_ports() {
     [ -n "$_vp" ] || return 1
     # 段类型必须是 device：`config br_lan 'br_lan'` 这种非 device 段 netifd 不认，
     # 只查 .type='bridge' 会漏过去（运行时桥还在，重启才丢）。
-    [ "$(uci -q get network.br_lan 2>/dev/null)" = "device" ] || return 1
-    [ "$(uci -q get network.br_lan.type 2>/dev/null)" = "bridge" ] || return 1
-    [ "$(uci -q get network.br_lan.name 2>/dev/null)" = "br-lan" ] || return 1
-    [ "$(uci -q get network.lan.device 2>/dev/null)" = "br-lan" ] || return 1
-    for _ds in $(uci show network 2>/dev/null | grep -E '=device$' | cut -d. -f2 | cut -d= -f1); do
+    [ "$(run uci -q get network.br_lan 2>/dev/null)" = "device" ] || return 1
+    [ "$(run uci -q get network.br_lan.type 2>/dev/null)" = "bridge" ] || return 1
+    [ "$(run uci -q get network.br_lan.name 2>/dev/null)" = "br-lan" ] || return 1
+    [ "$(run uci -q get network.lan.device 2>/dev/null)" = "br-lan" ] || return 1
+    for _ds in $(run uci show network 2>/dev/null | grep -E '=device$' | cut -d. -f2 | cut -d= -f1); do
         [ "$_ds" = "br_lan" ] && continue
-        if [ "$(uci -q get "network.$_ds.name" 2>/dev/null)" = "br-lan" ]; then
+        if [ "$(run uci -q get "network.$_ds.name" 2>/dev/null)" = "br-lan" ]; then
             return 1
         fi
     done
@@ -572,7 +616,7 @@ verify_br_lan_ports() {
     # 单网口时两边恰好都是单行，所以问题被掩盖。
     # 单测里没暴露，是因为 mock 的 uci 把 list 存成多条记录、get 时按行输出（多行），
     # 与 _phys_ports 同格式 —— 与真机 uci 行为不一致。归一化后两种格式都能正确比对。
-    [ "$(_norm_list "$_vp")" = "$(_norm_list "$(uci -q get network.br_lan.ports 2>/dev/null)")" ]
+    [ "$(_norm_list "$_vp")" = "$(_norm_list "$(run uci -q get network.br_lan.ports 2>/dev/null)")" ]
 }
 
 # LAN 静态地址验证：proto/device/ipaddr/netmask/gateway/dns 与 _lan_static_conf 推导值一致
@@ -580,28 +624,28 @@ verify_lan_static() {
     # 这里就是要让它按空白拆开、按位置取 $1..$4；加引号反而会变成一个整体。
     # shellcheck disable=SC2046
     set -- $(_lan_static_conf)
-    [ "$(uci -q get network.lan.proto 2>/dev/null)" = "static" ] || return 1
-    [ "$(uci -q get network.lan.device 2>/dev/null)" = "br-lan" ] || return 1
-    [ "$(uci -q get network.lan.ipaddr 2>/dev/null)" = "$1" ] || return 1
-    [ "$(uci -q get network.lan.netmask 2>/dev/null)" = "$2" ] || return 1
-    [ "$(uci -q get network.lan.gateway 2>/dev/null)" = "$3" ] || return 1
-    [ "$(uci -q get network.lan.dns 2>/dev/null)" = "$4" ] || return 1
+    [ "$(run uci -q get network.lan.proto 2>/dev/null)" = "static" ] || return 1
+    [ "$(run uci -q get network.lan.device 2>/dev/null)" = "br-lan" ] || return 1
+    [ "$(run uci -q get network.lan.ipaddr 2>/dev/null)" = "$1" ] || return 1
+    [ "$(run uci -q get network.lan.netmask 2>/dev/null)" = "$2" ] || return 1
+    [ "$(run uci -q get network.lan.gateway 2>/dev/null)" = "$3" ] || return 1
+    [ "$(run uci -q get network.lan.dns 2>/dev/null)" = "$4" ] || return 1
     return 0
 }
 
 # DHCP 让权验证：lan ignore=1（旁路由不提供 DHCP，上游光猫发）+ IPv6 RA 项清净 + 无权威 DNS
 # DHCP 让权验证：只认「不对外发地址」这个实质结果。
 verify_dhcp_ignore() {
-    [ "$(uci -q get dhcp.lan.ignore 2>/dev/null)" = "1" ] || return 1
+    [ "$(run uci -q get dhcp.lan.ignore 2>/dev/null)" = "1" ] || return 1
     # 【v.108.24】删除项也要验。build 除了置 ignore=1，还删了 ra/dhcpv6/ndp/
     # ra_management 以及所有 dnsmasq 段的 authoritative。原来只验 ignore，
     # 于是「ignore 对、但 ra 又被 LuCI 打开」这种半吊子状态会被判成已就绪 ——
     # 旁路由一边说不发地址、一边还在发 RA，主机拿到 IPv6 却上不了网。
     for _k in ra dhcpv6 ndp ra_management; do
-        [ -z "$(uci -q get "dhcp.lan.$_k" 2>/dev/null)" ] || return 1
+        [ -z "$(run uci -q get "dhcp.lan.$_k" 2>/dev/null)" ] || return 1
     done
-    for _dm in $(uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
-        [ -z "$(uci -q get "dhcp.$_dm.authoritative" 2>/dev/null)" ] || return 1
+    for _dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
+        [ -z "$(run uci -q get "dhcp.$_dm.authoritative" 2>/dev/null)" ] || return 1
     done
     return 0
 }
@@ -611,7 +655,7 @@ verify_dhcp_ignore() {
 # 在精简 uci（busybox 版、测试 mock）里两段式路径一律 exit 1，会把"存在"误判成"不存在"。
 _wan_sections() {
     for _ws in wan wan6; do
-        if uci -q show "network.$_ws" 2>/dev/null | grep -q "^network\.$_ws="; then
+        if run uci -q show "network.$_ws" 2>/dev/null | grep -q "^network\.$_ws="; then
             printf '%s\n' "$_ws"
         fi
     done
@@ -636,7 +680,7 @@ _wan_ifaces() {
 _wan_refs() {
     _wr_all=""
     for _wr_net in wan wan6; do
-        for _wr_sec in $(uci show firewall 2>/dev/null \
+        for _wr_sec in $(run uci show firewall 2>/dev/null \
             | sed -n "s/^firewall\.\([^.]*\)\.network=.*'$_wr_net'.*/\1/p" | sort -u); do
             if [ -n "$_wr_all" ]; then
                 _wr_all="$_wr_all $_wr_sec:$_wr_net"
@@ -659,7 +703,7 @@ _wan_refs() {
 purge_wan_sections() {
     # network 配置本身写坏时 uci show 会失败、输出为空 —— 那不是「没有 wan 段」，
     # 是「读不出来」。不区分的话，一台配置文件损坏的机器会被判成「WAN 已清空」。
-    if ! uci show network >/dev/null 2>&1; then
+    if ! run uci show network >/dev/null 2>&1; then
         log "[WAN] 无法解析 /etc/config/network，不能判断 wan 段状态"
         return 1
     fi
@@ -678,9 +722,9 @@ purge_wan_sections() {
     fi
     log "[WAN] 旁路由锁定：发现 $_pw_left，整段删除"
     for _pw_n in $_pw_left; do
-        uci -q delete "network.$_pw_n" 2>/dev/null
+        run uci -q delete "network.$_pw_n" 2>/dev/null
     done
-    if ! uci -q commit network 2>/dev/null; then
+    if ! run uci -q commit network 2>/dev/null; then
         log "[WAN] 删除后提交失败（改动只在内存里，重启即丢）"
         return 1
     fi
@@ -715,23 +759,23 @@ purge_wan_refs() {
     for _pr_one in $_pr_hit; do
         _pr_sec=${_pr_one%%:*}
         _pr_net=${_pr_one##*:}
-        if ! uci -q del_list "firewall.$_pr_sec.network=$_pr_net" 2>/dev/null; then
+        if ! run uci -q del_list "firewall.$_pr_sec.network=$_pr_net" 2>/dev/null; then
             log "[WAN] firewall.$_pr_sec 解除 $_pr_net 引用失败"
             return 1
         fi
         log "[WAN] firewall.$_pr_sec 不再引用 $_pr_net（该接口段已删除）"
     done
-    if ! uci -q commit firewall 2>/dev/null; then
+    if ! run uci -q commit firewall 2>/dev/null; then
         log "[WAN] firewall 引用改动提交失败（改动只在内存里）"
         return 1
     fi
-    /etc/init.d/firewall reload >/dev/null 2>&1
+    run_svc /etc/init.d/firewall reload >/dev/null 2>&1
     return 0
 }
 
 # reload 单独抽一层：直接写绝对路径的话，「删完到底有没有让内核重建接口」
 # 就只剩一句注释可以相信了 —— 抽出来测试才能真的数到这次调用。
-_net_reload() { /etc/init.d/network reload >/dev/null 2>&1; }
+_net_reload() { run_svc /etc/init.d/network reload >/dev/null 2>&1; }
 
 # 管理服务监听面验证（v.77 同源）：dropbear(SSH) 绑 LAN zone 对应接口
 # ——取代原 99-custom 的「Interface 清空=无差别监听所有口」：那种写法会把 SSH 暴露到 WAN
@@ -742,7 +786,7 @@ _net_reload() { /etc/init.d/network reload >/dev/null 2>&1; }
 # 于是配置写得完全正确也被判成「写了没生效」，收口复核直接 exit 1（见 v.108.40 说明）。
 verify_svc_bind() {
     _wn=$(_zone_lan_network) || { log "[服务] 无 name=lan 的 zone，本轮不校验管理服务绑定"; return 0; }
-    [ "$(uci -q get dropbear.@dropbear[0].Interface 2>/dev/null)" = "$_wn" ] || return 1
+    [ "$(run uci -q get dropbear.@dropbear[0].Interface 2>/dev/null)" = "$_wn" ] || return 1
     return 0
 }
 
@@ -753,26 +797,26 @@ verify_docker_fw() {
     # 【v.108.37】段类型也要验：build 里 `uci set firewall.docker=zone`，
     # verify 原来只查 name/input/output/forward/subnet。段类型被写坏（例如变成 rule 段）
     # 时这些 option 一样在，fw4 却根本不把它当 zone —— docker 网段的转发策略全失效。
-    [ "$(uci -q get firewall.docker 2>/dev/null)" = "zone" ] || return 1
-    [ "$(uci -q get firewall.docker.name 2>/dev/null)" = "docker" ] || return 1
-    [ "$(uci -q get firewall.docker.input 2>/dev/null)" = "ACCEPT" ] || return 1
-    [ "$(uci -q get firewall.docker.output 2>/dev/null)" = "ACCEPT" ] || return 1
-    [ "$(uci -q get firewall.docker.forward 2>/dev/null)" = "ACCEPT" ] || return 1
-    uci -q get firewall.docker.subnet 2>/dev/null | grep -qx '172.16.0.0/12' || return 1
-    [ "$(uci -q get firewall.docker2lan.src 2>/dev/null)" = "docker" ] || return 1
-    [ "$(uci -q get firewall.docker2lan.dest 2>/dev/null)" = "lan" ] || return 1
-    [ "$(uci -q get firewall.docker2lan.target 2>/dev/null)" = "ACCEPT" ] || return 1
-    [ "$(uci -q get firewall.docker2lan.proto 2>/dev/null)" = "all" ] || return 1
-    [ "$(uci -q get firewall.docker2wan.src 2>/dev/null)" = "docker" ] || return 1
-    [ "$(uci -q get firewall.docker2wan.dest 2>/dev/null)" = "wan" ] || return 1
-    [ "$(uci -q get firewall.docker2wan.target 2>/dev/null)" = "ACCEPT" ] || return 1
-    [ "$(uci -q get firewall.docker2wan.proto 2>/dev/null)" = "all" ] || return 1
-    [ "$(uci -q get firewall.lan2docker.src 2>/dev/null)" = "lan" ] || return 1
-    [ "$(uci -q get firewall.lan2docker.dest 2>/dev/null)" = "docker" ] || return 1
+    [ "$(run uci -q get firewall.docker 2>/dev/null)" = "zone" ] || return 1
+    [ "$(run uci -q get firewall.docker.name 2>/dev/null)" = "docker" ] || return 1
+    [ "$(run uci -q get firewall.docker.input 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get firewall.docker.output 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get firewall.docker.forward 2>/dev/null)" = "ACCEPT" ] || return 1
+    run uci -q get firewall.docker.subnet 2>/dev/null | grep -qx '172.16.0.0/12' || return 1
+    [ "$(run uci -q get firewall.docker2lan.src 2>/dev/null)" = "docker" ] || return 1
+    [ "$(run uci -q get firewall.docker2lan.dest 2>/dev/null)" = "lan" ] || return 1
+    [ "$(run uci -q get firewall.docker2lan.target 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get firewall.docker2lan.proto 2>/dev/null)" = "all" ] || return 1
+    [ "$(run uci -q get firewall.docker2wan.src 2>/dev/null)" = "docker" ] || return 1
+    [ "$(run uci -q get firewall.docker2wan.dest 2>/dev/null)" = "wan" ] || return 1
+    [ "$(run uci -q get firewall.docker2wan.target 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get firewall.docker2wan.proto 2>/dev/null)" = "all" ] || return 1
+    [ "$(run uci -q get firewall.lan2docker.src 2>/dev/null)" = "lan" ] || return 1
+    [ "$(run uci -q get firewall.lan2docker.dest 2>/dev/null)" = "docker" ] || return 1
     # 【v.108.48】target / proto 原来没验：build 会写 ACCEPT，但被改成 REJECT
     # 或者丢掉 proto 时 verify 仍判就绪，规则实际是坏的却不重建。
-    [ "$(uci -q get firewall.lan2docker.target 2>/dev/null)" = "ACCEPT" ] || return 1
-    [ "$(uci -q get firewall.lan2docker.proto 2>/dev/null)" = "all" ] || return 1
+    [ "$(run uci -q get firewall.lan2docker.target 2>/dev/null)" = "ACCEPT" ] || return 1
+    [ "$(run uci -q get firewall.lan2docker.proto 2>/dev/null)" = "all" ] || return 1
     return 0
 }
 
@@ -781,9 +825,9 @@ verify_docker_fw() {
 # 【v.108.40】ttyd 不再处理（本机不用网页终端）。
 build_svc_bind() {
     _wn=$(_zone_lan_network) || { log "[服务] 无 name=lan 的 zone，跳过管理服务绑定"; return 0; }
-    uci -q set dropbear.@dropbear[0].Interface="$_wn"
-    uci -q commit dropbear 2>/dev/null
-    /etc/init.d/dropbear reload >/dev/null 2>&1 || true
+    run uci -q set dropbear.@dropbear[0].Interface="$_wn"
+    run uci -q commit dropbear 2>/dev/null
+    run /etc/init.d/dropbear reload >/dev/null 2>&1 || true
     log "[服务] dropbear 绑定 $_wn"
     return 0
 }
@@ -792,23 +836,23 @@ build_svc_bind() {
 # 装了则补 docker zone（ACCEPT + 172.16.0.0/12）与三条 forwarding。
 build_docker_fw() {
     command -v dockerd >/dev/null 2>&1 || { log "[docker] 未安装 dockerd，跳过"; return 0; }
-    if ! uci -q get firewall.docker >/dev/null 2>&1; then
-        uci -q set firewall.docker=zone >/dev/null 2>&1
+    if ! run uci -q get firewall.docker >/dev/null 2>&1; then
+        run uci -q set firewall.docker=zone >/dev/null 2>&1
     fi
-    uci -q set firewall.docker.name=docker
-    uci -q set firewall.docker.input=ACCEPT
-    uci -q set firewall.docker.output=ACCEPT
-    uci -q set firewall.docker.forward=ACCEPT
-    uci -q delete firewall.docker.subnet 2>/dev/null
-    uci -q add_list firewall.docker.subnet=172.16.0.0/12
+    run uci -q set firewall.docker.name=docker
+    run uci -q set firewall.docker.input=ACCEPT
+    run uci -q set firewall.docker.output=ACCEPT
+    run uci -q set firewall.docker.forward=ACCEPT
+    run uci -q delete firewall.docker.subnet 2>/dev/null
+    run uci -q add_list firewall.docker.subnet=172.16.0.0/12
     _fw_rule_d() {
         _frd="$1"; _frs="$2"; _frdst="$3"
-        uci -q get "firewall.$_frd" >/dev/null 2>&1 || uci -q set "firewall.$_frd=rule"
-        uci -q set "firewall.$_frd.src=$_frs"
-        uci -q set "firewall.$_frd.dest=$_frdst"
-        uci -q set "firewall.$_frd.target=ACCEPT"
+        run uci -q get "firewall.$_frd" >/dev/null 2>&1 || uci -q set "firewall.$_frd=rule"
+        run uci -q set "firewall.$_frd.src=$_frs"
+        run uci -q set "firewall.$_frd.dest=$_frdst"
+        run uci -q set "firewall.$_frd.target=ACCEPT"
         # 【v.108.48】同 _fw_rule：不写 proto 就被 fw4 默认成 tcpudp，ICMP 漏掉。
-        uci -q set "firewall.$_frd.proto=all"
+        run uci -q set "firewall.$_frd.proto=all"
     }
     _fw_rule_d docker2lan docker lan
     _fw_rule_d docker2wan docker wan
@@ -859,25 +903,25 @@ build_br_lan_ports() {
     # 不存在的段建成 `config br_lan 'br_lan'`；netifd 只认 config device / interface，
     # 遇到别的类型直接忽略该段。表现：运行中的桥还在（内核里没拆），一重启 br-lan
     # 就没了。network.lxc 那边写了 =interface，这里此前漏了这一行。
-    uci -q set network.br_lan='device'
+    run uci -q set network.br_lan='device'
 
     # 清掉除 br_lan 之外、name 也是 br-lan 的 device 段（默认 network 的匿名段、
     # LuCI 重建留下的 cfg0xxxxx），它们会和 br_lan 抢同一批物理口。
     # 按 name 找，不赌具体段名。
-    for _ds in $(uci show network 2>/dev/null | grep -E '=device$' | cut -d. -f2 | cut -d= -f1); do
+    for _ds in $(run uci show network 2>/dev/null | grep -E '=device$' | cut -d. -f2 | cut -d= -f1); do
         [ "$_ds" = "br_lan" ] && continue
-        [ "$(uci -q get "network.$_ds.name" 2>/dev/null)" = "br-lan" ] || continue
-        uci -q delete "network.$_ds" 2>/dev/null
+        [ "$(run uci -q get "network.$_ds.name" 2>/dev/null)" = "br-lan" ] || continue
+        run uci -q delete "network.$_ds" 2>/dev/null
         log "[BR_LAN] 已清除重复的 br-lan device 段：$_ds"
     done
 
-    uci -q set network.br_lan.type='bridge'
-    uci -q set network.br_lan.name='br-lan'
-    uci -q delete network.br_lan.ports 2>/dev/null
+    run uci -q set network.br_lan.type='bridge'
+    run uci -q set network.br_lan.name='br-lan'
+    run uci -q delete network.br_lan.ports 2>/dev/null
     for _p in $_vp; do
-        uci -q add_list network.br_lan.ports="$_p"
+        run uci -q add_list network.br_lan.ports="$_p"
     done
-    uci -q set network.lan.device='br-lan'
+    run uci -q set network.lan.device='br-lan'
     log "[BR_LAN] 已写入 br-lan 桥，ports=$_vp"
     return 0
 }
@@ -896,13 +940,13 @@ build_lan_static() {
         return 1
     fi
     _net_write_guard "lan 静态地址"
-    uci -q set network.lan.proto='static'
-    uci -q set network.lan.device='br-lan'
-    uci -q set network.lan.ipaddr="$1"
-    uci -q set network.lan.netmask="$2"
-    uci -q set network.lan.gateway="$3"
-    uci -q delete network.lan.dns 2>/dev/null
-    uci -q add_list network.lan.dns="$4"
+    run uci -q set network.lan.proto='static'
+    run uci -q set network.lan.device='br-lan'
+    run uci -q set network.lan.ipaddr="$1"
+    run uci -q set network.lan.netmask="$2"
+    run uci -q set network.lan.gateway="$3"
+    run uci -q delete network.lan.dns 2>/dev/null
+    run uci -q add_list network.lan.dns="$4"
     log "[LAN] 已写入静态地址 $1/$2 网关 $3 DNS $4"
     return 0
 }
@@ -910,18 +954,18 @@ build_lan_static() {
 # DHCP 让权 builder：dhcp.lan.ignore=1；清 IPv6 RA 相关项；所有 dnsmasq 段删 authoritative
 build_dhcp_ignore() {
     # dhcp.lan 段不存在就先建（dnsmasq 未装则无事可做）
-    if ! uci -q get dhcp.lan >/dev/null 2>&1; then
-        uci -q add dhcp dhcp >/dev/null 2>&1 || { log "[DHCP] 无 dhcp 配置，跳过让权"; return 0; }
-        uci -q rename dhcp.@dhcp[-1]='lan' >/dev/null 2>&1
+    if ! run uci -q get dhcp.lan >/dev/null 2>&1; then
+        run uci -q add dhcp dhcp >/dev/null 2>&1 || { log "[DHCP] 无 dhcp 配置，跳过让权"; return 0; }
+        run uci -q rename dhcp.@dhcp[-1]='lan' >/dev/null 2>&1
     fi
-    uci -q set dhcp.lan.ignore='1'
-    uci -q delete dhcp.lan.ra 2>/dev/null
-    uci -q delete dhcp.lan.dhcpv6 2>/dev/null
-    uci -q delete dhcp.lan.ndp 2>/dev/null
-    uci -q delete dhcp.lan.ra_management 2>/dev/null
+    run uci -q set dhcp.lan.ignore='1'
+    run uci -q delete dhcp.lan.ra 2>/dev/null
+    run uci -q delete dhcp.lan.dhcpv6 2>/dev/null
+    run uci -q delete dhcp.lan.ndp 2>/dev/null
+    run uci -q delete dhcp.lan.ra_management 2>/dev/null
     # 所有 dnsmasq 段删掉 authoritative：旁路由不是权威 DHCP，避免抢答
-    for _dm in $(uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
-        uci -q delete "dhcp.$_dm.authoritative" 2>/dev/null
+    for _dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
+        run uci -q delete "dhcp.$_dm.authoritative" 2>/dev/null
     done
     log "[DHCP] 已让权：lan.ignore=1，并清除 RA/authoritative"
     return 0
@@ -930,27 +974,27 @@ build_dhcp_ignore() {
 # lxc zone + 四条转发规则（lxc2lan / lxc2docker / lxc2vpn / lan2lxc）
 build_lxc_zone_fwd() {
     if [ -z "$(_zone_sec lxc)" ]; then
-        uci -q add firewall zone >/dev/null 2>&1
-        _lzs=$(uci show firewall 2>/dev/null | grep -E '=zone$' | cut -d. -f2 | cut -d= -f1 | tail -n1)
+        run uci -q add firewall zone >/dev/null 2>&1
+        _lzs=$(run uci show firewall 2>/dev/null | grep -E '=zone$' | cut -d. -f2 | cut -d= -f1 | tail -n1)
         [ -n "$_lzs" ] || { log "[FW] 无法新建 lxc zone"; return 1; }
-        uci -q rename "firewall.$_lzs"='lxczone' >/dev/null 2>&1 || _lzs='lxczone'
+        run uci -q rename "firewall.$_lzs"='lxczone' >/dev/null 2>&1 || _lzs='lxczone'
     else
         _lzs=$(_zone_sec lxc)
     fi
-    uci -q set "firewall.$_lzs.name=lxc"
-    uci -q set "firewall.$_lzs.network=lxc"
-    uci -q set "firewall.$_lzs.input=ACCEPT"
-    uci -q set "firewall.$_lzs.output=ACCEPT"
-    uci -q set "firewall.$_lzs.forward=ACCEPT"
+    run uci -q set "firewall.$_lzs.name=lxc"
+    run uci -q set "firewall.$_lzs.network=lxc"
+    run uci -q set "firewall.$_lzs.input=ACCEPT"
+    run uci -q set "firewall.$_lzs.output=ACCEPT"
+    run uci -q set "firewall.$_lzs.forward=ACCEPT"
 
     _fw_rule() {
         _fr_sec="$1"; _fr_src="$2"; _fr_dst="$3"
-        if ! uci -q get "firewall.$_fr_sec" >/dev/null 2>&1; then
-            uci -q set "firewall.$_fr_sec=rule"
+        if ! run uci -q get "firewall.$_fr_sec" >/dev/null 2>&1; then
+            run uci -q set "firewall.$_fr_sec=rule"
         fi
-        uci -q set "firewall.$_fr_sec.src=$_fr_src"
-        uci -q set "firewall.$_fr_sec.dest=$_fr_dst"
-        uci -q set "firewall.$_fr_sec.target=ACCEPT"
+        run uci -q set "firewall.$_fr_sec.src=$_fr_src"
+        run uci -q set "firewall.$_fr_sec.dest=$_fr_dst"
+        run uci -q set "firewall.$_fr_sec.target=ACCEPT"
         # 【v.108.48】必须显式写 proto=all，否则 ICMP 被漏掉。
         # fw4 对 config rule 不写 proto 时默认按 tcpudp 处理，编译出来是：
         #     meta l4proto tcp ... jump accept_to_lan "!fw4: lxc2lan"
@@ -960,7 +1004,7 @@ build_lxc_zone_fwd() {
         # forward_lxc 链里那两条规则的 counter 恒为 0，极易被误判成「没写入」。
         # 对比：config forwarding 段没有 proto 概念，天然放行所有协议 ——
         # 这就是为什么用户在 LuCI 里手加两条 forwarding 之后网络立刻通了。
-        uci -q set "firewall.$_fr_sec.proto=all"
+        run uci -q set "firewall.$_fr_sec.proto=all"
     }
     _fw_rule lxc2lan    lxc lan
     _fw_rule lxc2docker lxc docker
@@ -979,17 +1023,17 @@ build_fwd_rules() { build_lxc_zone_fwd; }
 build_snat() {
     _sn=$(_snat_sec)
     if [ -z "$_sn" ]; then
-        uci -q add firewall nat >/dev/null 2>&1 || { log "[SNAT] 无法新建 nat 段"; return 1; }
-        _sn=$(uci show firewall 2>/dev/null | grep -E '=nat$' | cut -d. -f2 | cut -d= -f1 | tail -n1)
+        run uci -q add firewall nat >/dev/null 2>&1 || { log "[SNAT] 无法新建 nat 段"; return 1; }
+        _sn=$(run uci show firewall 2>/dev/null | grep -E '=nat$' | cut -d. -f2 | cut -d= -f1 | tail -n1)
         [ -n "$_sn" ] || return 1
-        uci -q rename "firewall.$_sn"='lxcsnat' >/dev/null 2>&1 || _sn='lxcsnat'
+        run uci -q rename "firewall.$_sn"='lxcsnat' >/dev/null 2>&1 || _sn='lxcsnat'
     fi
-    uci -q set "firewall.$_sn.name=lxc-snat"
-    uci -q set "firewall.$_sn.target=SNAT"
-    uci -q set "firewall.$_sn.proto=all"
-    uci -q set "firewall.$_sn.src=lan"
-    uci -q set "firewall.$_sn.src_ip=$(_lxc_net)"
-    uci -q set "firewall.$_sn.snat_ip=$(_lan_ip)"
+    run uci -q set "firewall.$_sn.name=lxc-snat"
+    run uci -q set "firewall.$_sn.target=SNAT"
+    run uci -q set "firewall.$_sn.proto=all"
+    run uci -q set "firewall.$_sn.src=lan"
+    run uci -q set "firewall.$_sn.src_ip=$(_lxc_net)"
+    run uci -q set "firewall.$_sn.snat_ip=$(_lan_ip)"
     log "[SNAT] 已写入 $(_lxc_net) → $(_lan_ip) 源地址改写"
     return 0
 }
@@ -997,8 +1041,8 @@ build_snat() {
 # LAN zone 放行：input/forward 锁定 ACCEPT
 build_lan_input() {
     _lz=$(_zone_sec lan) || { log "[FW] 无 lan zone，跳过"; return 0; }
-    uci -q set "firewall.$_lz.input=ACCEPT"
-    uci -q set "firewall.$_lz.forward=ACCEPT"
+    run uci -q set "firewall.$_lz.input=ACCEPT"
+    run uci -q set "firewall.$_lz.forward=ACCEPT"
     log "[FW] lan zone input/forward 已置 ACCEPT"
     return 0
 }
@@ -1536,11 +1580,11 @@ ensure_group() {
 _nft_fw_report() {
     _nft_reported=1
     command -v nft >/dev/null 2>&1 || return 0
-    if ! nft list chain inet fw4 forward_lxc >/dev/null 2>&1; then
+    if ! run nft list chain inet fw4 forward_lxc >/dev/null 2>&1; then
         log "[FW] 未找到 nft 链 forward_lxc（zone 未绑 lxcbr0 或 firewall 未生成）"
         return 0
     fi
-    _nr=$(nft list chain inet fw4 forward_lxc 2>/dev/null | grep -c 'meta l4proto')
+    _nr=$(run nft list chain inet fw4 forward_lxc 2>/dev/null | grep -c 'meta l4proto')
     _nr=${_nr:-0}
     if [ "$_nr" -gt 0 ]; then
         log "[FW] 警告：forward_lxc 里仍有 $_nr 条带 l4proto 的规则 → ICMP/ESP/GRE 会被漏掉，检查 proto=all 是否真的写进去"
@@ -1569,13 +1613,13 @@ flush_uci() {
 
     # ---- network：桥/地址/端口，reload 才让 netifd 重建接口 ----
     if [ "$_n" = 1 ]; then
-        if uci -q commit network; then
+        if run uci -q commit network; then
             log "[flush] network 已提交，执行 reload"
         else
             _fu_bad="$_fu_bad network-commit"
             log "[flush] network 提交失败：改动只在内存里，重启即丢"
         fi
-        if /etc/init.d/network reload >/dev/null 2>&1; then
+        if run_svc /etc/init.d/network reload >/dev/null 2>&1; then
             log "[flush] network 已重载"
             # 【首台真机 2026-10-22 现场】netifd reload 会按 uci 重建 lxcbr0：
             # 网桥被拆了重加，而容器已经在跑 —— LXC 只在 lxc-start 时插 veth，
@@ -1593,13 +1637,13 @@ flush_uci() {
 
     # ---- dhcp：dnsmasq 需 restart 才读取新配置（reload 不够彻底）----
     if [ "$_d" = 1 ]; then
-        if uci -q commit dhcp; then
+        if run uci -q commit dhcp; then
             log "[flush] dhcp 已提交，重启 dnsmasq"
         else
             _fu_bad="$_fu_bad dhcp-commit"
             log "[flush] dhcp 提交失败：改动只在内存里，重启即丢"
         fi
-        if /etc/init.d/dnsmasq restart >/dev/null 2>&1; then
+        if run_svc /etc/init.d/dnsmasq restart >/dev/null 2>&1; then
             log "[flush] dnsmasq 已重启"
         else
             _fu_bad="$_fu_bad dnsmasq-restart"
@@ -1609,13 +1653,13 @@ flush_uci() {
 
     # ---- firewall：reload 会重建整张 nft 表，上一组改动在此刻真正生效 ----
     if [ "$_f" = 1 ]; then
-        if uci -q commit firewall; then
+        if run uci -q commit firewall; then
             log "[flush] firewall 已提交，执行 reload"
         else
             _fu_bad="$_fu_bad firewall-commit"
             log "[flush] firewall 提交失败：改动只在内存里，重启即丢"
         fi
-        if /etc/init.d/firewall reload >/dev/null 2>&1; then
+        if run_svc /etc/init.d/firewall reload >/dev/null 2>&1; then
             log "[flush] firewall 已重载（nft 表已重建）"
             _nft_fw_report
         else
@@ -1664,7 +1708,7 @@ verify_img_migrate() {
     # 原来要求 etc/ 与 usr/ 同时出现——tar 是深度优先打包（-C "$R" .），./usr 排在
     # ./etc 的上万条文件之后，前 200 条里永远看不到它，于是完好的包被判成半截，
     # verify 每轮都不过、build 又认定包完整直接 return 0，容器于是永远建不起来。
-    tar -tzf "$TARBALL" 2>/dev/null | head -n 200 | grep -qE '^(\./)?(etc|usr|bin|lib)/'
+    run_tar tar -tzf "$TARBALL" 2>/dev/null | head -n 200 | grep -qE '^(\./)?(etc|usr|bin|lib)/'
 }
 build_img_migrate() {
     if [ -f "$TARBALL" ]; then
@@ -1698,7 +1742,7 @@ verify_ct_config() {
     grep -q "lxc.rootfs.path" "$CFG" 2>/dev/null || return 1
     grep -q "lxc.net.0.type" "$CFG" 2>/dev/null || return 1
     if command -v lxc-info >/dev/null 2>&1; then
-        _vcc=$(lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>&1)
+        _vcc=$(run lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>&1)
         printf '%s\n' "$_vcc" | grep -q 'at line "' && return 1
     fi
     return 0
@@ -1867,9 +1911,9 @@ _ct_ping_diag() {
     return 0
 }
 _host_ping_ok() {
-    ping -c 1 -W 2 "$1" >/dev/null 2>&1 && return 0
+    run ping -c 1 -W 2 "$1" >/dev/null 2>&1 && return 0
     sleep 1
-    ping -c 1 "$1" >/dev/null 2>&1
+    run ping -c 1 "$1" >/dev/null 2>&1
 }
 verify_ct_net_ping() {
     ct_running || return 0          # 未启动：不判 ping，交给后续组
@@ -2113,18 +2157,18 @@ verify_log_forward() {
     [ -n "$CONTAINER_IP" ] || return 1
     _sys=$(_system_section) || return 1
     [ -n "$_sys" ] || return 1
-    [ "$(uci -q get "$_sys.log_ip" 2>/dev/null)" = "$CONTAINER_IP" ] || return 1
-    [ "$(uci -q get "$_sys.log_port" 2>/dev/null)" = "514" ] || return 1
-    [ "$(uci -q get "$_sys.log_proto" 2>/dev/null)" = "udp" ] || return 1
-    [ "$(uci -q get "$_sys.log_remote" 2>/dev/null)" = "1" ] || return 1
+    [ "$(run uci -q get "$_sys.log_ip" 2>/dev/null)" = "$CONTAINER_IP" ] || return 1
+    [ "$(run uci -q get "$_sys.log_port" 2>/dev/null)" = "514" ] || return 1
+    [ "$(run uci -q get "$_sys.log_proto" 2>/dev/null)" = "udp" ] || return 1
+    [ "$(run uci -q get "$_sys.log_remote" 2>/dev/null)" = "1" ] || return 1
     return 0
 }
 
 # 取 /etc/config/system 中第一个 system 段的段名（v.93：verify 与 build 共用同一套
 # 段定位逻辑，避免两处各写一遍 uci show 解析而出现「一个判就绪、一个又去写」的抖动）
 _system_section() {
-    uci show system 2>/dev/null | grep -q '=system$' || return 1
-    uci show system 2>/dev/null | grep '=system$' | head -n1 | cut -d= -f1
+    run uci show system 2>/dev/null | grep -q '=system$' || return 1
+    run uci show system 2>/dev/null | grep '=system$' | head -n1 | cut -d= -f1
 }
 
 # 标记日志入库验证：成功 0，失败 1。容器没跑 / cscli 不可用则返回 1（不可判）。
@@ -2217,11 +2261,11 @@ build_lapi_fetch() {
 
 # ---- LAPI / bouncer_fill：把 LAPI 与密钥填进路由器 bouncer ----
 verify_bouncer_fill() {
-    _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    _sec=$(run uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
     [ -n "$_sec" ] || return 1
-    [ "$(uci -q get "$_sec.api_url" 2>/dev/null)" = "http://${CONTAINER_IP}:${LAPI_PORT}/" ] || return 1
-    [ "$(uci -q get "$_sec.enabled" 2>/dev/null)" = "1" ] || return 1
-    [ -n "$(uci -q get "$_sec.api_key" 2>/dev/null)" ] || return 1
+    [ "$(run uci -q get "$_sec.api_url" 2>/dev/null)" = "http://${CONTAINER_IP}:${LAPI_PORT}/" ] || return 1
+    [ "$(run uci -q get "$_sec.enabled" 2>/dev/null)" = "1" ] || return 1
+    [ -n "$(run uci -q get "$_sec.api_key" 2>/dev/null)" ] || return 1
     return 0
 }
 build_bouncer_fill() {
@@ -2235,9 +2279,9 @@ build_bouncer_fill() {
         _key="$(_ct_env "$CSCLI bouncers add ${BOUNCER_NAME} -o raw" 2>/dev/null | tr -d ' \t\r\n')"
     fi
     [ -n "$_key" ] || { log "[bouncer] 向 LAPI 注册 bouncer 失败"; return 1; }
-    _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
-    uci set "$_sec.api_key=$_key"
-    uci commit crowdsec
+    _sec=$(run uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    run uci set "$_sec.api_key=$_key"
+    run uci commit crowdsec
     log "[bouncer] 已注册并写入 api_key（${BOUNCER_NAME}）"
     # 宿主机 bouncer 进程仍持着旧 key（或根本还没起来）：uci 写完必须重启一次才读到新值。
     # 不重启的话，紧接着的 BOUNCERVERIFY 会白等 60 秒再判 hard。
@@ -2385,13 +2429,13 @@ _ensure_lxc_auto() {
     fi
     _ea_dirty=0
     # ① 容器名：服务按 /etc/config/lxc-auto 里的 name 启动，没有段/名字不符都拉不起来
-    _ea_name=$(uci -q get lxc-auto.@container[0].name 2>/dev/null)
+    _ea_name=$(run uci -q get lxc-auto.@container[0].name 2>/dev/null)
     if [ "$_ea_name" != "$LXC_NAME" ]; then
-        if uci -q get lxc-auto.@container[0] >/dev/null 2>&1; then
-            uci -q set "lxc-auto.@container[0].name=$LXC_NAME"
+        if run uci -q get lxc-auto.@container[0] >/dev/null 2>&1; then
+            run uci -q set "lxc-auto.@container[0].name=$LXC_NAME"
         else
-            uci -q add lxc-auto container
-            uci -q set "lxc-auto.@container[-1].name=$LXC_NAME"
+            run uci -q add lxc-auto container
+            run uci -q set "lxc-auto.@container[-1].name=$LXC_NAME"
         fi
         _ea_dirty=1
         log "[lxc-auto] /etc/config/lxc-auto 已补写容器 $LXC_NAME（原为「${_ea_name:-空}」）"
@@ -2400,7 +2444,7 @@ _ensure_lxc_auto() {
     #    写太短会在容器还没退干净时就当它停了）。名字对了也要查这一项。
     _ea_to=$(uci -q get lxc-auto.@container[0].timeout 2>/dev/null)
     if [ "$_ea_to" != "300" ]; then
-        uci -q set "lxc-auto.@container[0].timeout=300"
+        run uci -q set "lxc-auto.@container[0].timeout=300"
         _ea_dirty=1
         log "[lxc-auto] timeout 已校正为 300（原为「${_ea_to:-空}」）"
     fi
@@ -2409,18 +2453,18 @@ _ensure_lxc_auto() {
     #    `list command '...'`，开机就会以 root 执行它。镜像固化的容器段没有这一项，
     #    出现即为被注入（别的脚本写坏 / 从别处拷来的配置），必须清掉。
     #    只清 @container[0]：镜像只认这一个段，用户自己加的段不归本脚本管。
-    if uci -q get lxc-auto.@container[0].command >/dev/null 2>&1; then
-        uci -q delete lxc-auto.@container[0].command
+    if run uci -q get lxc-auto.@container[0].command >/dev/null 2>&1; then
+        run uci -q delete lxc-auto.@container[0].command
         _ea_dirty=1
         log "[lxc-auto] 已删除 @container[0].command：lxc-auto 会把它当命令以 root 执行，而镜像配置里没有这一项"
     fi
     # ④ 多余段：只告警、不删。删掉别人加的容器段属于破坏性操作，
     #    和「只维护第一段」的边界冲突，交给人判断。
-    if uci -q get lxc-auto.@container[1] >/dev/null 2>&1; then
+    if run uci -q get lxc-auto.@container[1] >/dev/null 2>&1; then
         log "[lxc-auto] 注意：/etc/config/lxc-auto 里还有第 2 个 container 段，本脚本只维护第一段，不当处置"
     fi
     if [ "$_ea_dirty" = 1 ]; then
-        uci -q commit lxc-auto \
+        run uci -q commit lxc-auto \
             || { log "[lxc-auto] 写 /etc/config/lxc-auto 失败"; return 1; }
     fi
     # ② 服务必须 enabled：disabled 时 S99 不拉起，重启后容器就不在了
@@ -2457,10 +2501,10 @@ verify_lxc_auto() {
     # 受 /rom 保护：缺失就是异常，不是「不适用」
     [ -x "$LXC_AUTO_INIT" ] || return 1
     [ -f "$LXC_AUTO_CFG" ] || return 1
-    [ "$(uci -q get lxc-auto.@container[0].name 2>/dev/null)" = "$LXC_NAME" ] || return 1
+    [ "$(run uci -q get lxc-auto.@container[0].name 2>/dev/null)" = "$LXC_NAME" ] || return 1
     [ "$(uci -q get lxc-auto.@container[0].timeout 2>/dev/null)" = "300" ] || return 1
     # 段里出现 command = 开机以 root 执行它（镜像固化的段没有这一项），出现即判不符
-    uci -q get lxc-auto.@container[0].command >/dev/null 2>&1 && return 1
+    run uci -q get lxc-auto.@container[0].command >/dev/null 2>&1 && return 1
     "$LXC_AUTO_INIT" enabled >/dev/null 2>&1 || return 1
     return 0
 }
@@ -2580,13 +2624,13 @@ build_ct_boot() {
     if _ensure_lxc_auto; then
         _purge_legacy_lxcboot
         log "启动容器 $LXC_NAME（经 lxc-auto 服务）"
-        /etc/init.d/lxc-auto start >/dev/null 2>&1 || log "[lxc-auto] start 返回非 0，继续兜底"
+        run_svc /etc/init.d/lxc-auto start >/dev/null 2>&1 || log "[lxc-auto] start 返回非 0，继续兜底"
     fi
     # 兜底：服务缺失 / 被 disable / start 异常时直接起，不让开机链断在这一步
-    ct_running || lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
+    ct_running || run lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
     if ! _wait_ct_running; then
         log "首启未拉起，重试 lxc-start -d"
-        lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
+        run lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
         if ! _wait_ct_running; then
             _ct_revive || { log "容器启动修复链无效，引导失败"; return 1; }
         fi
@@ -2597,13 +2641,17 @@ build_ct_boot() {
         log "[cgroup] 容器内 cgroup 视图不可用，补挂宿主层级并重启容器一次"
         _mount_systemd_cgroup || true
         ct_force_stop || true
-        lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
+        run lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
         if ! _wait_ct_running || ! verify_ct_cgroup; then
             log "[cgroup] 容器内 cgroup 视图仍不可用，引导失败"
             return 1
         fi
         log "[cgroup] 补挂并重启后，容器内 cgroup 视图已可用"
     fi
+    # 【v.108.66】从这一刻起 CT_BOOT_GRACE 秒内，容器内命令用 60s 超时：
+    # PID1 刚就绪，首次 attach（cgroup 视图、网络检查）都可能要等它。
+    # 窗口过后自动收紧到 10s —— 探针重跑时容器早已运行，走的就是 10s。
+    _CT_BOOT_UNTIL=$(( $(date +%s) + CT_BOOT_GRACE ))
     log "容器已启动"
 }
 
@@ -2617,7 +2665,7 @@ build_ct_boot() {
 #   · 内核侧：设备不存在就建，存在则校正地址（先删旧地址再按 uci 加，幂等）
 build_bridge() {
     _nb_ip="$BRIDGE_IP"
-    _nb_mask="$(uci -q get network.lxc.netmask 2>/dev/null)"
+    _nb_mask="$(run uci -q get network.lxc.netmask 2>/dev/null)"
     [ -n "$_nb_mask" ] || _nb_mask="255.255.255.0"
 
     _net_write_guard "lxcbr0 网桥与地址"
@@ -2632,42 +2680,42 @@ build_bridge() {
     #    bridge_empty='1' 是必须的：netifd 对「一个端口都没有的 bridge」默认
     #    不认为它是 present（device_set_present false），于是根本不创建。
     #    lxcbr0 恰恰是空网桥 —— 端口要等容器启动时 veth 才接进来。
-    if [ "$(uci -q get network.lxcbr0 2>/dev/null)" != "device" ] \
-       || [ "$(uci -q get network.lxcbr0.type 2>/dev/null)" != "bridge" ] \
-       || [ "$(uci -q get network.lxcbr0.name 2>/dev/null)" != "lxcbr0" ] \
-       || [ "$(uci -q get network.lxcbr0.bridge_empty 2>/dev/null)" != "1" ]; then
-        uci -q set network.lxcbr0='device'
-        uci -q set network.lxcbr0.name='lxcbr0'
-        uci -q set network.lxcbr0.type='bridge'
-        uci -q set network.lxcbr0.bridge_empty='1'
+    if [ "$(run uci -q get network.lxcbr0 2>/dev/null)" != "device" ] \
+       || [ "$(run uci -q get network.lxcbr0.type 2>/dev/null)" != "bridge" ] \
+       || [ "$(run uci -q get network.lxcbr0.name 2>/dev/null)" != "lxcbr0" ] \
+       || [ "$(run uci -q get network.lxcbr0.bridge_empty 2>/dev/null)" != "1" ]; then
+        run uci -q set network.lxcbr0='device'
+        run uci -q set network.lxcbr0.name='lxcbr0'
+        run uci -q set network.lxcbr0.type='bridge'
+        run uci -q set network.lxcbr0.bridge_empty='1'
         log "[网桥] 已声明 network.lxcbr0（device / type=bridge / bridge_empty=1），netifd 自己建，重启不再靠脚本"
     fi
 
     # ② 内核：设备不存在则补建（reload 之前就要能用，所以不干等 netifd）。
     #    补建失败必须说出来 —— 以前 `ip link add ... 2>/dev/null` 不看返回值，
     #    建不出来也记「已补建」，下一轮 verify 才发现，中间容器起不来。
-    if ! ip link show lxcbr0 >/dev/null 2>&1; then
-        if ip link add lxcbr0 type bridge 2>/dev/null; then
+    if ! run ip link show lxcbr0 >/dev/null 2>&1; then
+        if run ip link add lxcbr0 type bridge 2>/dev/null; then
             log "[网桥] 内核中无 lxcbr0，已补建"
-        elif ip link show lxcbr0 >/dev/null 2>&1; then
+        elif run ip link show lxcbr0 >/dev/null 2>&1; then
             log "[网桥] lxcbr0 已由 netifd 建出（与本次补建并发，忽略）"
         else
             log "[网桥] 无法创建 lxcbr0（ip link add 失败），网桥不存在，容器网络无从谈起"
             return 1
         fi
     fi
-    ip link set lxcbr0 up 2>/dev/null || log "[网桥] lxcbr0 up 失败（设备在但没起来）"
+    run ip link set lxcbr0 up 2>/dev/null || log "[网桥] lxcbr0 up 失败（设备在但没起来）"
 
     # ③ uci：interface 段。设备已经在，这里只负责引用 + 地址
     #    （该段缺失时 ping 判据也过不去）。
-    if [ "$(uci -q get network.lxc.proto 2>/dev/null)" != "static" ] \
-       || [ "$(uci -q get network.lxc.device 2>/dev/null)" != "lxcbr0" ] \
-       || [ "$(uci -q get network.lxc.ipaddr 2>/dev/null)" != "$_nb_ip" ]; then
-        uci -q set network.lxc='interface'
-        uci -q set network.lxc.proto='static'
-        uci -q set network.lxc.device='lxcbr0'
-        uci -q set network.lxc.ipaddr="$_nb_ip"
-        uci -q set network.lxc.netmask="$_nb_mask"
+    if [ "$(run uci -q get network.lxc.proto 2>/dev/null)" != "static" ] \
+       || [ "$(run uci -q get network.lxc.device 2>/dev/null)" != "lxcbr0" ] \
+       || [ "$(run uci -q get network.lxc.ipaddr 2>/dev/null)" != "$_nb_ip" ]; then
+        run uci -q set network.lxc='interface'
+        run uci -q set network.lxc.proto='static'
+        run uci -q set network.lxc.device='lxcbr0'
+        run uci -q set network.lxc.ipaddr="$_nb_ip"
+        run uci -q set network.lxc.netmask="$_nb_mask"
         log "[网桥] 已写入 network.lxc（$_nb_ip/$_nb_mask 设备 lxcbr0）"
     fi
 
@@ -2677,8 +2725,8 @@ build_bridge() {
     [ -n "$_nb_pfx" ] || _nb_pfx=24
     _nb_cur=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
     if [ "$_nb_cur" != "$_nb_ip" ]; then
-        [ -n "$_nb_cur" ] && ip addr del "$_nb_cur/$_nb_pfx" dev lxcbr0 2>/dev/null
-        if ! ip addr add "$_nb_ip/$_nb_pfx" dev lxcbr0 2>/dev/null; then
+        [ -n "$_nb_cur" ] && run ip addr del "$_nb_cur/$_nb_pfx" dev lxcbr0 2>/dev/null
+        if ! run ip addr add "$_nb_ip/$_nb_pfx" dev lxcbr0 2>/dev/null; then
             # add 失败可能是「地址其实已经在」（并发/重复执行），复核一次再定论
             _nb_chk=$(ip -4 addr show lxcbr0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p' | head -n1)
             if [ "$_nb_chk" != "$_nb_ip" ]; then
@@ -2731,16 +2779,16 @@ setup_log_forward() {
 
     _sys=$(_system_section) || _sys=""
     if [ -z "$_sys" ]; then
-        uci add system system >/dev/null 2>&1
+        run uci add system system >/dev/null 2>&1
         _sys=$(_system_section) || _sys=""
     fi
     [ -n "$_sys" ] || { log "[日志] 无 system 段，无法配置远程日志"; return 1; }
 
     _want_ip="$CONTAINER_IP"
-    _cur_ip=$(uci -q get "$_sys.log_ip" 2>/dev/null)
-    _cur_port=$(uci -q get "$_sys.log_port" 2>/dev/null)
-    _cur_proto=$(uci -q get "$_sys.log_proto" 2>/dev/null)
-    _cur_remote=$(uci -q get "$_sys.log_remote" 2>/dev/null)
+    _cur_ip=$(run uci -q get "$_sys.log_ip" 2>/dev/null)
+    _cur_port=$(run uci -q get "$_sys.log_port" 2>/dev/null)
+    _cur_proto=$(run uci -q get "$_sys.log_proto" 2>/dev/null)
+    _cur_remote=$(run uci -q get "$_sys.log_remote" 2>/dev/null)
 
     if [ "$_cur_ip" = "$_want_ip" ] && [ "$_cur_port" = "514" ] \
        && [ "$_cur_proto" = "udp" ] && [ "$_cur_remote" = "1" ]; then
@@ -2748,13 +2796,13 @@ setup_log_forward() {
         return 0
     fi
 
-    uci -q set "$_sys.log_ip=$_want_ip"
-    uci -q set "$_sys.log_port=514"
-    uci -q set "$_sys.log_proto=udp"
-    uci -q set "$_sys.log_remote=1"
-    uci commit system
+    run uci -q set "$_sys.log_ip=$_want_ip"
+    run uci -q set "$_sys.log_port=514"
+    run uci -q set "$_sys.log_proto=udp"
+    run uci -q set "$_sys.log_remote=1"
+    run uci commit system
 
-    /etc/init.d/log reload >/dev/null 2>&1 || /etc/init.d/logd reload >/dev/null 2>&1 || true
+    run /etc/init.d/log reload >/dev/null 2>&1 || run /etc/init.d/logd reload >/dev/null 2>&1 || true
     log "[日志] 宿主机系统日志已转发到容器 ${_want_ip}:514/udp"
     return 0
 }
@@ -2768,7 +2816,7 @@ write_cfg() {
     # lxc.utsname），随后 verify_ct_config 判「不完整」、BOOT 组 hard 失败。
     # 版本取不到就按新键写（4.0 以下早已没人用；真写错也只是名字退回目录名）。
     _wm_key="lxc.uts.name"
-    _wm_ver=$(lxc-info --version 2>/dev/null | sed -n 's/^\([0-9][0-9]*\)\..*/\1/p')
+    _wm_ver=$(run lxc-info --version 2>/dev/null | sed -n 's/^\([0-9][0-9]*\)\..*/\1/p')
     if [ -n "$_wm_ver" ] && [ "$_wm_ver" -lt 4 ] 2>/dev/null; then
         _wm_key="lxc.utsname"
     fi
@@ -2799,7 +2847,7 @@ apply_cfg() {
     fi
     _trim=0
     while [ "$_trim" -lt 20 ]; do
-        _err=$(lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>&1) && return 0
+        _err=$(run lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>&1) && return 0
         _bad=$(printf '%s\n' "$_err" | sed -n 's/.*at line "\([^"]*\)".*/\1/p' | head -n1)
         [ -n "$_bad" ] || break
         grep -v -F "$_bad" "$CFG" > "$CFG.tmp1" 2>/dev/null && mv -f "$CFG.tmp1" "$CFG" || break
@@ -2821,7 +2869,7 @@ SRC_TARBALL=""
 _tarball_usable() {
     [ -f "$1" ] || return 1
     [ -s "$1" ] || return 1
-    tar -tzf "$1" >/dev/null 2>&1 || return 1
+    run_tar tar -tzf "$1" >/dev/null 2>&1 || return 1
     return 0
 }
 
@@ -2851,7 +2899,7 @@ _pick_tarball() {
 #   ③ upperdir 不能是 overlayfs 本身：/srv 在 rootfs overlay 上，直接用它 rc=32
 _overlay_mounted() {
     [ -d "$ROOTFS" ] || return 1
-    mount 2>/dev/null | grep -qF " on $ROOTFS type overlay"
+    run mount 2>/dev/null | grep -qF " on $ROOTFS type overlay"
 }
 
 _base_fingerprint() {
@@ -2869,8 +2917,8 @@ _upper_stamp_ok() {
 
 _overlay_umount() {
     _overlay_mounted || return 0
-    umount "$ROOTFS" 2>/dev/null && return 0
-    umount -l "$ROOTFS" 2>/dev/null && return 0
+    run umount "$ROOTFS" 2>/dev/null && return 0
+    run umount -l "$ROOTFS" 2>/dev/null && return 0
     return 1
 }
 
@@ -2892,7 +2940,7 @@ build_overlay_root() {
         rm -rf "$OVL_UPPER" "$OVL_WORK" 2>/dev/null
         mkdir -p "$OVL_UPPER" "$OVL_WORK" 2>/dev/null || return 1
     fi
-    if ! mount -t overlay overlay \
+    if ! run mount -t overlay overlay \
             -o "lowerdir=$ROM_BASE,upperdir=$OVL_UPPER,workdir=$OVL_WORK" "$ROOTFS"; then
         log "[overlay] 挂载失败：lower=$ROM_BASE upper=$OVL_UPPER work=$OVL_WORK"
         return 1
@@ -2913,7 +2961,7 @@ rebuild_from_image() {
     rm -rf "$ROOTFS" 2>/dev/null
     mkdir -p "$ROOTFS" || return 1
     if ( set -C; : > "$ROOTFS/.extracting" ) 2>/dev/null; then
-        if tar -xzf "$SRC_TARBALL" -C "$ROOTFS"; then
+        if run_tar tar -xzf "$SRC_TARBALL" -C "$ROOTFS"; then
             rm -f "$ROOTFS/.extracting"
             log "解压完成（$(du -sh "$ROOTFS" 2>/dev/null | cut -f1)）"
             return 0
@@ -3178,7 +3226,7 @@ ensure_listen_uri() {
 # 容器内 `cscli` / `curl 127.0.0.1` 永远是通的 —— 即使 LAPI 只监听回环。
 # 只用容器内判据，就会出现「全部验证通过、bouncer 一次都拉不到」的假绿。
 verify_lapi_reachable() {
-    wget -qO- --timeout=3 "http://${CONTAINER_IP}:${LAPI_PORT}/health" 2>/dev/null \
+    run wget -qO- --timeout=3 "http://${CONTAINER_IP}:${LAPI_PORT}/health" 2>/dev/null \
         | grep -q '"status"'
 }
 
@@ -3245,22 +3293,22 @@ ensure_online_client_on() {
 }
 
 _bouncer_uci_apply() {
-    _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    _sec=$(run uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
     if [ -z "$_sec" ]; then
-        uci add crowdsec bouncer >/dev/null 2>&1
-        _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+        run uci add crowdsec bouncer >/dev/null 2>&1
+        _sec=$(run uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
     fi
     [ -n "$_sec" ] || { log "/etc/config/crowdsec 无 bouncer 段，bouncer 包未装进固件"; return 1; }
-    uci -q set "$_sec.api_url=http://${CONTAINER_IP}:${LAPI_PORT}/"
-    uci -q set "$_sec.enabled=1"
-    uci -q set "$_sec.ipv4=1"
-    uci -q set "$_sec.ipv6=0"
-    uci -q set "$_sec.deny_action=drop"
-    uci -q set "$_sec.filter_input=1"
-    uci -q set "$_sec.filter_forward=1"
-    uci -q del "$_sec.interface"
-    uci add_list "$_sec.interface=br-lan"
-    uci commit crowdsec
+    run uci -q set "$_sec.api_url=http://${CONTAINER_IP}:${LAPI_PORT}/"
+    run uci -q set "$_sec.enabled=1"
+    run uci -q set "$_sec.ipv4=1"
+    run uci -q set "$_sec.ipv6=0"
+    run uci -q set "$_sec.deny_action=drop"
+    run uci -q set "$_sec.filter_input=1"
+    run uci -q set "$_sec.filter_forward=1"
+    run uci -q del "$_sec.interface"
+    run uci add_list "$_sec.interface=br-lan"
+    run uci commit crowdsec
     return 0
 }
 
@@ -3292,10 +3340,10 @@ _bouncer_register_once() {
     _key=$(printf '%s\n' "$_raw" | sed -e 's/\r$//' \
            | grep -Eo '^[A-Za-z0-9+/=_-]{16,}$' | tail -n1)
     [ -n "$_key" ] || return 1
-    _sec=$(uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    _sec=$(run uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
     [ -n "$_sec" ] || return 1
-    uci set "$_sec.api_key=$_key"
-    uci commit crowdsec
+    run uci set "$_sec.api_key=$_key"
+    run uci commit crowdsec
     return 0
 }
 
@@ -4477,13 +4525,13 @@ _mount_systemd_cgroup() {
     # 直接 mount 会 EBUSY，必须先卸。卸不掉就如实判失败，别硬报成功。
     if grep -qE "[[:space:]]${_cg}[[:space:]]" /proc/mounts 2>/dev/null; then
         log "[cgroup] ${_cg} 上有挂载但不是 cgroup/name=systemd 层级，先卸载再重挂"
-        if ! umount "$_cg" 2>/dev/null; then
+        if ! run umount "$_cg" 2>/dev/null; then
             log "[cgroup] 卸载失败（多半被运行中的容器引用），无法纠正挂载形态"
             return 1
         fi
     fi
     mkdir -p "$_cg" 2>/dev/null
-    if mount -t cgroup -o rw,nosuid,nodev,noexec,relatime,none,name=systemd cgroup "$_cg" 2>/dev/null; then
+    if run mount -t cgroup -o rw,nosuid,nodev,noexec,relatime,none,name=systemd cgroup "$_cg" 2>/dev/null; then
         # mount 返回 0 不代表挂对了，回读确认形态（不只是「路径存在」）
         if _cg_host_ok; then
             log "[cgroup] 已挂载 systemd 命名层级（容器内 systemd 需要）"
@@ -4512,7 +4560,7 @@ _ct_revive() {
     log "[施救] 强停残留 → 重写容器 config → 重启"
     ct_force_stop || true
     write_cfg || true
-    lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
+    run lxc-start -P "$LXC_PATH" -n "$LXC_NAME" -d >/dev/null 2>&1 || true
     if _wait_ct_running; then
         log "[施救] 重写 config 后容器已拉起"
         return 0
@@ -5185,8 +5233,8 @@ if [ "$NET_ONLY" != "1" ] && [ ! -f "$TARBALL" ] && [ ! -f "$LEGACY_TARBALL" ] \
     _settle_dirty
 
     if [ -x /etc/init.d/crowdsec-lxc-probe ]; then
-        /etc/init.d/crowdsec-lxc-probe enable >/dev/null 2>&1 || true
-        /etc/init.d/crowdsec-lxc-probe start  >/dev/null 2>&1 || true
+        run /etc/init.d/crowdsec-lxc-probe enable >/dev/null 2>&1 || true
+        run /etc/init.d/crowdsec-lxc-probe start  >/dev/null 2>&1 || true
         log "[探针] 运行期 last_pull 探针已启用（crowdsec-lxc-probe）"
     fi
 
@@ -5224,7 +5272,7 @@ fi
 # 体检照样报绿 —— 而那条引用正是「这台机器还在按有 WAN 的世界生成规则」的证据。
 # 现在三项一起验：段、引用、内核接口。
 audit_wan_purged() {
-    uci show network >/dev/null 2>&1 || return 1
+    run uci show network >/dev/null 2>&1 || return 1
     # ① network 里不许有 wan / wan6 段（v.108.27 定死了整段不存在，不是 disabled）
     [ -z "$(_wan_sections)" ] || return 1
     # ② firewall 里不许再有指向这两个接口的 list network 引用（v.108.32）

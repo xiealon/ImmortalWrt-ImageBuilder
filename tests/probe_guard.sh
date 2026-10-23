@@ -200,6 +200,14 @@ ck "R13.45 guard 断言普遍走 cg" \
 ck "R13.46 cg 已定义" \
    "$(grep -c '^cg() {' "$0")" "1"
 
+echo "== 16 容器内命令一律 10s 上限（v.108.66） =="
+ck "R13.47 GUARD_CT_TIMEOUT 默认 10s" \
+   "$(grep -c '^GUARD_CT_TIMEOUT="${CS_GUARD_CT_TIMEOUT:-10}"$' "$G")" "1"
+ck "R13.48 _ct_run 走 timeout（挂住就杀，不让 guard 静默停摆）" \
+   "$(grep -c '^    timeout "\$GUARD_CT_TIMEOUT" lxc-attach' "$G")" "2"
+ck "R13.49 没有裸 lxc-attach（全部带超时）" \
+   "$(grep -c '^    lxc-attach' "$G")" "0"
+
 echo "------------------------------------------------------------------"
 echo "R13 RESULT: $R 项失败"
 # 临时目录在 repo/tests 下，跑完必须清掉，否则会被下次 git add -A 带进仓库

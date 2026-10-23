@@ -55,7 +55,7 @@ ck "R32.3b 调用在 main 之前" \
 ck "R32.3c --only-funcs 测试钩子仍在调用点之前（导函数时不该截真日志）" \
    "$(awk '/= "--only-funcs"/{o=NR} /^_boot_log_trim$/{t=NR} END{print (o && t && o < t) ? "yes" : "no"}' "$BS")" "yes"
 ck "R32.3d 版本号推进到 108.63" \
-   "$(grep -c 'SCRIPT_VER="2026-10-24.108.65-bp"' "$BS")" "1"
+   "$(grep -c 'SCRIPT_VER="2026-10-24.108.66-bp"' "$BS")" "1"
 
 echo "== 32.4 真跑：超限要截 =="
 TMPD=$(mktemp -d)

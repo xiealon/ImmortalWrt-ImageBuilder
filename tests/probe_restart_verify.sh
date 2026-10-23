@@ -218,6 +218,74 @@ ck "R11.14 置位为 GSET_PREP 时读得到（不误判未置位）" \
    "$(grep -c 'FULL_REINSTALL' "$TMPD/out4")" "0"
 ck "R11.15 组键读对后一路走到底" "$(grep -c '^REACHED_END' "$TMPD/out4")" "1"
 
+# 【v.108.66】外层 attach 超时：平时 10s，容器刚起来那段 60s
+ck "R11.16 CT_TIMEOUT 默认 10s（不再用 60s 兜所有命令）" \
+   "$(grep -c '^CT_TIMEOUT="${CT_TIMEOUT:-10}"$' "$BS_C")" "1"
+ck "R11.17 CT_TIMEOUT_BOOT 默认 60s（容器刚起来那一步保留宽限）" \
+   "$(grep -c '^CT_TIMEOUT_BOOT="${CT_TIMEOUT_BOOT:-60}"$' "$BS_C")" "1"
+ck "R11.18 ct() 按时间窗二选一，不是写死一个数" \
+   "$(awk '/^ct\(\) \{/,/^}/' "$BS_C" | grep -c 'CT_TIMEOUT_BOOT')" "1"
+ck "R11.19 容器启动成功处才开宽限窗口（build_ct_boot 里置 _CT_BOOT_UNTIL）" \
+   "$(awk '/^build_ct_boot\(\)/,/^}/' "$BS_C" | grep -c '_CT_BOOT_UNTIL=')" "1"
+# 行为：同一份定义，窗口外 10、窗口内 60。stub 掉 timeout 与 lxc-attach 只看参数。
+sed -n '/^CT_TIMEOUT="${CT_TIMEOUT:-10}"/,/^}/p' "$BS_C" > "$TMPD/ctdef.sh"
+cat > "$TMPD/ctrun.sh" <<'EOS'
+. "$TMPD/ctdef.sh"
+timeout() { printf 'TO=%s\n' "$1"; }
+lxc-attach() { :; }
+_CT_BOOT_UNTIL=0
+ct a
+_CT_BOOT_UNTIL=$(( $(date +%s) + 60 ))
+ct a
+EOS
+TMPD="$TMPD" sh "$TMPD/ctrun.sh" > "$TMPD/ctout" 2>&1
+ck "R11.20 窗口外 10s / 窗口内 60s" \
+   "$(tr '\n' ' ' < "$TMPD/ctout" | tr -s ' ')" "TO=10 TO=60 "
+
+# 【v.108.66】宿主侧外部命令分三档超时（A 方案：不一刀切）
+ck "R11.21 RUN_TIMEOUT 默认 10s" \
+   "$(grep -c '^RUN_TIMEOUT="${RUN_TIMEOUT:-10}"$' "$BS_C")" "1"
+ck "R11.22 SVC_TIMEOUT 默认 60s（重建类：firewall/network/dnsmasq/lxc-auto）" \
+   "$(grep -c '^SVC_TIMEOUT="${SVC_TIMEOUT:-60}"$' "$BS_C")" "1"
+ck "R11.23 TAR_TIMEOUT 默认 0（tar 不设上限）" \
+   "$(grep -c '^TAR_TIMEOUT="${TAR_TIMEOUT:-0}"$' "$BS_C")" "1"
+ck "R11.24 firewall reload 走 run_svc（不许降到 10s：砍断会留半张 nft 表）" \
+   "$(grep -c 'run_svc /etc/init.d/firewall reload' "$BS_C")" "2"
+ck "R11.25 network reload 走 run_svc（砍断等于网络停在半路）" \
+   "$(grep -c 'run_svc /etc/init.d/network reload' "$BS_C")" "2"
+ck "R11.26 dnsmasq restart / lxc-auto start 走 run_svc" \
+   "$(grep -c 'run_svc /etc/init.d/dnsmasq restart' "$BS_C")$(grep -c 'run_svc /etc/init.d/lxc-auto start' "$BS_C")" "11"
+ck "R11.27 bouncer 的 init.d 启停走 run_svc" \
+   "$(grep -c 'run_svc "$BOUNCER_INIT"' "$BS_C")" "1"
+ck "R11.28 tar 一律 run_tar，没有裸 tar 调用" \
+   "$(grep -c 'run_tar tar ' "$BS_C")$(grep -vc 'run_tar tar ' "$BS_C" | awk '{print ($1>0)?"ok":"bad"}')" "3ok"
+# 覆盖率：去掉双引号内容后，仍出现裸命令的行必须是 0（log 文本里的词不算）
+ck "R11.29 宿主外部命令无遗漏（uci/lxc/ip/mount/tar/wget/pgrep 全已包装）" \
+   "$(awk '
+/^[[:space:]]*#/ { next }
+{ line=$0; gsub(/"[^"]*"/,"",line) }
+line ~ /run |run_svc |run_tar |timeout |command -v/ { next }
+line ~ /(^|[^[:alnum:]_])(umount|mount|wget|pgrep) / { c++; next }
+line ~ /(^|[^[:alnum:]_])uci (-q )?(show|get|set|commit|del|delete|add)/ { c++; next }
+line ~ /(^|[^[:alnum:]_])lxc-(ls|info|start|stop) / { c++; next }
+line ~ /(^|[^[:alnum:]_])ip (link|addr) / { c++; next }
+line ~ /(^|[^[:alnum:]_])tar -/ { c++; next }
+END { print c+0 }' "$BS_C")" "0"
+# 行为：run 用 10、run_svc 用 60、run_tar 在 TAR_TIMEOUT=0 时直接执行
+awk '/^RUN_TIMEOUT=/,/^}$/' "$BS_C" > "$TMPD/hdef.sh"
+cat > "$TMPD/hrun.sh" <<'EOS'
+. "$TMPD/hdef.sh"
+timeout() { printf 'TO=%s\n' "$1"; }
+run echo a
+run_svc echo b
+run_tar echo c
+TAR_TIMEOUT=5
+run_tar echo d
+EOS
+TMPD="$TMPD" sh "$TMPD/hrun.sh" > "$TMPD/hout" 2>&1
+ck "R11.30 三档行为：run=10 / run_svc=60 / run_tar 0 直通、非 0 才包" \
+   "$(tr '\n' ' ' < "$TMPD/hout" | tr -s ' ')" "TO=10 TO=60 c TO=5 "
+
 rm -rf "$TMPD"
 echo "R11 FAIL=$R"
 [ "$R" = 0 ]

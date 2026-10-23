@@ -220,15 +220,19 @@ _glog() {
 OVL_FIX_MAX="${CS_GUARD_OVL_FIX_MAX:-20}"
 
 # 容器内执行：单条命令形式（cscli 之类），路径由调用方给全。
+# 【v.108.66】10s 上限。guard 每 60s 跑一轮，若容器卡住让 lxc-attach 挂住不退，
+# procd 不会 respawn（进程还在、没退出），整条保护链路就静默停摆 —— 正是
+# 「看起来在跑、其实什么都没做」的那种坏法。与 bootstrap 的 CT_TIMEOUT 同口径。
+GUARD_CT_TIMEOUT="${CS_GUARD_CT_TIMEOUT:-10}"
 _ct_run() {
-    lxc-attach -P "$GUARD_LXC_PATH" -n "$GUARD_LXC_NAME" -- "$@" 2>/dev/null
+    timeout "$GUARD_CT_TIMEOUT" lxc-attach -P "$GUARD_LXC_PATH" -n "$GUARD_LXC_NAME" -- "$@" 2>/dev/null
 }
 
 # 容器内执行：带一个参数的小脚本。
 # 用 sh -c '...' -- "$1" 而不是把参数拼进脚本文本 —— 时间串里有空格和冒号，
 # 拼进去就要处理引号，而引号在这里出错的后果是「判不了」，且只在某些时间值上出现。
 _ct_shell() {
-    lxc-attach -P "$GUARD_LXC_PATH" -n "$GUARD_LXC_NAME" -- /bin/sh -c "$1" -- "$2" 2>/dev/null
+    timeout "$GUARD_CT_TIMEOUT" lxc-attach -P "$GUARD_LXC_PATH" -n "$GUARD_LXC_NAME" -- /bin/sh -c "$1" -- "$2" 2>/dev/null
 }
 
 # 【v.108.57】last_pull 新鲜度：封禁到底有没有下发到防火墙，只有这一条能证明。

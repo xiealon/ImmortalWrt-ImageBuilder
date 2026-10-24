@@ -1,17 +1,17 @@
 #!/bin/sh /etc/rc.common
-# 【v.180.77】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.78】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-probe：运行期 last_pull 监视探针服务壳（v.82）
 # 本体 /usr/sbin/crowdsec-lxc-probe.sh：只验证 last_pull，停滞则持引导锁
 # 拉起 crowdsec-lxc-bootstrap.sh 复验/修复。开机自启（START=99，早于 rc.local
 # 收尾）：重启态直接进监视；首启时安装未完成则探针静默等待 installed 标记。
 
-# 【v.180.77】固件版本号。五个脚本统一用 SCRIPT_VER 一个名字，
+# 【v.180.78】固件版本号。五个脚本统一用 SCRIPT_VER 一个名字，
 # 一条命令就能全查出来：
 #   grep -H -m1 '^SCRIPT_VER=' /usr/sbin/crowdsec-*.sh /etc/rc.local \
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-24.180.77"
+SCRIPT_VER="2026-10-24.180.78"
 
 START=99
 USE_PROCD=1

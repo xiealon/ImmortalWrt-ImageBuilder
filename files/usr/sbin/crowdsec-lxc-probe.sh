@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.77】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.78】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-probe：运行期 last_pull 监视探针（v.106）
 # 职责边界（刻意收窄成一条）：
 #   只验证 last_pull。判停滞 → 告警 + 持引导锁重跑 crowdsec-lxc-bootstrap.sh。
@@ -73,13 +73,13 @@ PROBE_VERIFY_MAX="${CS_PROBE_VERIFY_MAX:-300}"
 PROBE_FIX_MAX="${CS_PROBE_FIX_MAX:-900}"
 # guard 自身有 3 次 attach × 10s，正常几百 ms；60s 是硬顶，不是预期耗时。
 PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
-# 【v.180.77】固件版本号。五个脚本统一用 SCRIPT_VER 一个名字，
+# 【v.180.78】固件版本号。五个脚本统一用 SCRIPT_VER 一个名字，
 # 一条命令就能全查出来：
 #   grep -H -m1 '^SCRIPT_VER=' /usr/sbin/crowdsec-*.sh /etc/rc.local \
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-24.180.77"
+SCRIPT_VER="2026-10-24.180.78"
 
 plog() { logger -t crowdsec-probe "$*"; }
 

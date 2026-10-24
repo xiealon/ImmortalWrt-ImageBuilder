@@ -87,7 +87,7 @@ if echo "$PACKAGES" | grep -q "clashoo"; then
     if [ -z "$_cl_apk" ] || [ -z "$_cl_luci" ]; then
         echo "::error::PACKAGES 里选了 clashoo，但 packages/ 下缺包（clashoo=$_cl_apk luci=$_cl_luci）—— apk 仓库的 run 没解出 apk"
         ls -la packages/ 2>/dev/null || true
-        echo "::error::预期来自 wukongdaily/apk 的 run/x86/clashoo/"
+        echo "::error::预期来自 CloudRunFilesBuilder 的 extra 标签：25-clashoo_x86_64.run"
         exit 1
     fi
     echo "✅ clashoo 就位: $_cl_apk + $_cl_luci（自带 mihomo 内核，不再单独下载）"

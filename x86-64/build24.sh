@@ -1,11 +1,8 @@
 #!/bin/bash
-# 【v.108.73】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
-BUILD24_VER="2026-10-24.108.73"
+# 【v.108.74】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+BUILD24_VER="2026-10-24.108.74"
 source shell/custom-packages.sh
 source shell/switch_repository.sh
-# 【v.108.73】构建日志第一行打版本：镜像出问题时回看 Actions 日志，
-# 能直接确认这次跑的是哪版构建脚本 + 哪版包列表（两者可能不同步）。
-echo "脚本版本: build24 v$BUILD24_VER / 包列表 v${PKGS_VER:-未声明}"
 echo "第三方软件包: $CUSTOM_PACKAGES"
 LOGFILE="/tmp/uci-defaults-log.txt"
 echo "Starting 99-custom.sh at $(date)" >> $LOGFILE

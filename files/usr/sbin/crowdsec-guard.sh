@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.108.73】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.108.74】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-guard：核心脚本防篡改，以 /rom（squashfs 只读分区）为不可变基准
 #
 # 为什么不用 chattr +i：/usr/sbin 下的文件在 overlayfs 的合并视图里。还没被写过时，
@@ -99,10 +99,10 @@
 ROM_DIR="${CS_GUARD_ROM:-/rom}"
 ROOT="${CS_GUARD_ROOT:-}"
 GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
-# 【v.108.73】本文件自己的版本号。刻意不叫 SCRIPT_VER —— 那个名字在 bootstrap 里
+# 【v.108.74】本文件自己的版本号。刻意不叫 SCRIPT_VER —— 那个名字在 bootstrap 里
 # 参与配置指纹判定（写进 CFG_SHA_FILE 的 ver= 行，版本变一次就重写一次受管配置），
 # 同名不同义会让人以为改这里也会触发指纹失效。这个纯粹是「读得出来是哪版」。
-GUARD_VER="2026-10-24.108.73"
+GUARD_VER="2026-10-24.108.74"
 GUARD_FILES="${CS_GUARD_FILES:-
 /usr/sbin/crowdsec-lxc-bootstrap.sh
 /usr/sbin/crowdsec-lxc-probe.sh
@@ -205,26 +205,6 @@ _glog() {
     echo "[$(date '+%F %T')] $*" >>"$GLOG" 2>/dev/null
     [ "$QUIET" = "1" ] || echo "crowdsec-guard: $*" >&2
 }
-
-# 【v.108.73】版本自报：只在本文件版本与上次记录不同时，往 GLOG 写一行。
-# guard 有三个调用点（rc.local 开机一次、init.d start_service 一次、probe 每轮 tick 一次），
-# 无条件打就等于每轮一行，会把 GLOG 那 64KB / 200 行的预算顶掉 —— 真出事时
-# 最有用的几行反而被挤走。所以用 /run 下的标记文件去重：
-#   · /run 是 tmpfs，不磨损 flash；重启后第一次调用会重新打一次（正好标记开机）
-#   · 想临时看当前跑的是哪版：cat ${CS_GUARD_VER_FILE:-/run/crowdsec-guard.ver}
-# 写入失败（只读 /run、空间满）时静默跳过，不能让自报本身变成故障源。
-GUARD_VER_FILE="${CS_GUARD_VER_FILE:-/run/crowdsec-guard.ver}"
-_guard_ver_once() {
-    [ "$(cat "$GUARD_VER_FILE" 2>/dev/null)" = "$GUARD_VER" ] && return 0
-    # 目录不存在（非 OpenWrt 的测试沙箱 / 只读根）直接跳过 —— 自报不能变成故障源。
-    [ -d "${GUARD_VER_FILE%/*}" ] || return 0
-    # 重定向顺序有讲究：写成 `echo ... >"$F" 2>/dev/null` 时，`>"$F"` 打开失败的报错
-    # 发生在 2>/dev/null 生效之前，照样会漏进 stderr（R13.16「quiet 不写 stderr」
-    # 就是这么抓到的）。把 2>/dev/null 包在整个块外面，才真的什么都漏不出来。
-    { echo "$GUARD_VER" >"$GUARD_VER_FILE"; } 2>/dev/null || return 0
-    _glog "guard v$GUARD_VER"
-}
-_guard_ver_once
 
 # 【v.108.70】单轮耗时自报。以前只有「超时」才有日志，于是「一直是 9s、但还没到
 # 10s」这种余量在收窄的状态完全看不见 —— 要么没事，出事就是一次硬超时。

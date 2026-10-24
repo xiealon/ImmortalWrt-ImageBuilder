@@ -191,7 +191,7 @@ jobs:
             echo "shellcheck 不在，跳过（bash -n 已过）"
           fi
 
-      - name: Download prebuilt Crowdsec LXC tarball (Crowdsec-LXC Release)
+      - name: Download prebuilt Crowdsec LXC tarball (CloudRunFilesBuilder lxc-* Release)
         id: lxc_prebuilt
         # 【v.108.59】唯一来源：Crowdsec-LXC 仓库出的 rootfs tarball。
         # 本仓原来还有一条「本地 apt 拉包 + 打包」的回退，已经删掉 —— 容器出包这件事
@@ -210,7 +210,7 @@ jobs:
           OUT="$OUT_DIR/lxc-crowdsec.tar.gz"
           mkdir -p "$OUT_DIR"
           SHORT="${GITHUB_SHA:0:7}"
-          BASE="https://github.com/xiealon/Crowdsec-LXC/releases/download"
+          BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download"
           L_SCRIPT="$(sha256sum shell/prepare-crowdsec-minimal.sh | awk '{print $1}')"
           L_SKEL="$(find rootfs-skel -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
           echo "[预构建] 本地指纹 script=$L_SCRIPT skel=$L_SKEL"
@@ -288,7 +288,7 @@ jobs:
               echo "- **取不到**：${REASON# }"
               echo "- 本仓不再本地构建容器镜像（v.108.59），没有基底就不产出固件"
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::未取得可用的 Crowdsec LXC 基底（原因：${REASON# }）—— 去 Crowdsec-LXC 手动 dispatch 一次，或确认 lxc-latest 的 MANIFEST 指纹与本次 commit 一致"
+            echo "::error::未取得可用的 Crowdsec LXC 基底（原因：${REASON# }）—— 去 CloudRunFilesBuilder 的 build-lxc-tarball.yml 手动 dispatch 一次，或确认 lxc-latest 的 MANIFEST 指纹与本次 commit 一致"
             exit 1
           fi
           # 失败那条已经在上面 exit 了，这里只剩命中一种情况，不再留死分支。

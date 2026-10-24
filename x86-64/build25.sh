@@ -1,6 +1,9 @@
 #!/bin/bash
-# 【v.108.72】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.108.73】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+BUILD25_VER="2026-10-24.108.73"
 source shell/apk-custom-packages.sh
+# 【v.108.73】同 24.10 线：构建日志第一行打版本。
+echo "脚本版本: build25 v$BUILD25_VER / 包列表 v${APK_PKGS_VER:-未声明}"
 echo "第三方apk软件包: $CUSTOM_PACKAGES"
 LOGFILE="/tmp/uci-defaults-log.txt"
 echo "Starting 99-custom.sh at $(date)" >> $LOGFILE

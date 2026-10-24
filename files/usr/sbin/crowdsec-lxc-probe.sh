@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.108.72】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.108.73】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-probe：运行期 last_pull 监视探针（v.106）
 # 职责边界（刻意收窄成一条）：
 #   只验证 last_pull。判停滞 → 告警 + 持引导锁重跑 crowdsec-lxc-bootstrap.sh。
@@ -73,6 +73,9 @@ PROBE_VERIFY_MAX="${CS_PROBE_VERIFY_MAX:-300}"
 PROBE_FIX_MAX="${CS_PROBE_FIX_MAX:-900}"
 # guard 自身有 3 次 attach × 10s，正常几百 ms；60s 是硬顶，不是预期耗时。
 PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
+# 【v.108.73】本文件自己的版本号（不叫 SCRIPT_VER，理由同 guard：那个名字在
+# bootstrap 里参与配置指纹判定，同名不同义容易误导）。
+PROBE_VER="2026-10-24.108.73"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -376,6 +379,12 @@ P_AUDIT_BAD=0
 P_HUMAN=0
 P_HUMAN_PULL=0
 _probe_load
+
+# 【v.108.73】常驻启动只打一次版本。probe 由 procd respawn 拉起（不是每轮新进程），
+# 所以这里一行不会刷屏；走 plog → logger，进 logread 环形缓冲，不占文件预算。
+# 想知道「现在跑的是哪版探针」，logread | grep crowdsec-probe 就能看到。
+plog "probe v$PROBE_VER 启动（pid $$，轮间隔 ${PROBE_INTERVAL}s）"
+
 while true; do
     P_LOCK_RECLAIMED=0
     _guard_run

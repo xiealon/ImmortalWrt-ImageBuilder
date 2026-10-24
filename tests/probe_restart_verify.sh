@@ -105,7 +105,7 @@ ck "R11.5aa 【v.108.21】build_lapi_fetch 先确保 8080 对外开放再等就�
 ck "R11.5ab 【v.108.23】listen_uri 写入归 LOGCONF，LAPI 侧留兜底，开机侧必须为 0" \
    "$(awk '/^build_logconf\(\)/,/^}/' "$BS_C" | grep -c 'ensure_listen_uri')$(awk '/^_ensure_lapi_exposed\(\)/,/^}/' "$BS_C" | grep -c 'ensure_listen_uri')$(awk '/^build_ct_boot\(\)/,/^}/' "$BS_C" | grep -c 'ensure_listen_uri')" "110"
 ck "R11.5ac SCRIPT_VER 格式合法（版本号是核对固件的唯一依据）" \
-   "$(grep -cE '^SCRIPT_VER="[0-9]{4}-[0-9]{2}-[0-9]{2}\.[0-9][0-9.]*-bp"$' "$BS_C")" "1"
+   "$(grep -cE '^SCRIPT_VER="[0-9]{4}-[0-9]{2}-[0-9]{2}\.[0-9][0-9.]*"$' "$BS_C")" "1"
 # 【v.108.21】bouncer_verify 只差「首次心跳还没到」，用它把整轮引导判死会导致
 # installed 永不写入 → 探针永远 wait-install。柔性节点机制必须两处都生效。
 ck "R11.5ad 【v.108.21】SOFT_NODES 默认含 bouncer_verify" \

@@ -1,4 +1,5 @@
 #!/bin/sh
+# 【v.108.72】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-guard：核心脚本防篡改，以 /rom（squashfs 只读分区）为不可变基准
 #
 # 为什么不用 chattr +i：/usr/sbin 下的文件在 overlayfs 的合并视图里。还没被写过时，

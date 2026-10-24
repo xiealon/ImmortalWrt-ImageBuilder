@@ -1,4 +1,5 @@
 #!/bin/sh
+# 【v.108.72】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-probe：运行期 last_pull 监视探针（v.106）
 # 职责边界（刻意收窄成一条）：
 #   只验证 last_pull。判停滞 → 告警 + 持引导锁重跑 crowdsec-lxc-bootstrap.sh。

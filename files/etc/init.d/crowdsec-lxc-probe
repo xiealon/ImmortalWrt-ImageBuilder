@@ -1,4 +1,5 @@
 #!/bin/sh /etc/rc.common
+# 【v.108.72】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-probe：运行期 last_pull 监视探针服务壳（v.82）
 # 本体 /usr/sbin/crowdsec-lxc-probe.sh：只验证 last_pull，停滞则持引导锁
 # 拉起 crowdsec-lxc-bootstrap.sh 复验/修复。开机自启（START=99，早于 rc.local

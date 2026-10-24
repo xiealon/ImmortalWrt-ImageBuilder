@@ -1,4 +1,5 @@
 #!/bin/sh
+# 【v.108.72】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # rc.local：开机引导入口（只做前置检查 + 持锁，不含任何修复/安装逻辑）
 LOG=/root/crowdsec-lxc-bootstrap.log
 BOOT=/usr/sbin/crowdsec-lxc-bootstrap.sh

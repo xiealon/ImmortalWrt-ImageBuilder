@@ -7,7 +7,6 @@ TARGET_DIR="packages"
 # 【v.181】run 包固定取自己仓库 CloudRunFilesBuilder 的 extra 标签（理由同 24.10 线的
 # prepare-packages.sh）：上游 25.12 workflow 每次构建完会把 apk 包以固定文件名覆盖到 extra。
 #   https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra/25-clashoo_x86_64.run
-#   https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra/25-mosdns_x86_64.run
 # 不再走 releases/latest + 正则筛选：latest 会被别的 release 抢占，
 # 且同一包存在新旧两份时 head -n1 可能拿到旧的。
 # 两个额外注意点：
@@ -15,7 +14,7 @@ TARGET_DIR="packages"
 #   ② apk 仓库里 clashoo 是 run/x86/clashoo/ 目录（三个 apk），不是 run 文件，
 #      所以连目录一起删，否则旧 apk 会被下面的 find 收进 packages/。
 RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra"
-for _pkg in clashoo mosdns; do
+for _pkg in clashoo; do
     rm -f "$BASE_DIR"/25-${_pkg}_*.run
     rm -rf "$BASE_DIR"/${_pkg}
     wget -q "$RUN_BASE/25-${_pkg}_x86_64.run" -P "$BASE_DIR"/ \

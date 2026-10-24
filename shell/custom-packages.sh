@@ -1,8 +1,8 @@
 #!/bin/bash
-# 【v.108.74】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
-# 【v.108.74】本文件的版本号，由 build24.sh 打进构建日志 —— 出镜像后能确认
+# 【v.180.75】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.75】本文件的版本号，由 build24.sh 打进构建日志 —— 出镜像后能确认
 # 这次构建用的到底是哪版包列表（包列表被改坏不会报错，只会少装/多装）。
-PKGS_VER="2026-10-24.108.74"
+PKGS_VER="2026-10-24.180.75"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-openvpn-server luci-i18n-openvpn-server-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES openvpn-openssl  luci-i18n-openvpn-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES easytier luci-app-easytier"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.108.74】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.75】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-guard：核心脚本防篡改，以 /rom（squashfs 只读分区）为不可变基准
 #
 # 为什么不用 chattr +i：/usr/sbin 下的文件在 overlayfs 的合并视图里。还没被写过时，
@@ -99,10 +99,10 @@
 ROM_DIR="${CS_GUARD_ROM:-/rom}"
 ROOT="${CS_GUARD_ROOT:-}"
 GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
-# 【v.108.74】本文件自己的版本号。刻意不叫 SCRIPT_VER —— 那个名字在 bootstrap 里
+# 【v.180.75】本文件自己的版本号。刻意不叫 SCRIPT_VER —— 那个名字在 bootstrap 里
 # 参与配置指纹判定（写进 CFG_SHA_FILE 的 ver= 行，版本变一次就重写一次受管配置），
 # 同名不同义会让人以为改这里也会触发指纹失效。这个纯粹是「读得出来是哪版」。
-GUARD_VER="2026-10-24.108.74"
+GUARD_VER="2026-10-24.180.75"
 GUARD_FILES="${CS_GUARD_FILES:-
 /usr/sbin/crowdsec-lxc-bootstrap.sh
 /usr/sbin/crowdsec-lxc-probe.sh

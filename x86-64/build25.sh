@@ -1,6 +1,6 @@
 #!/bin/bash
-# 【v.108.74】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
-BUILD25_VER="2026-10-24.108.74"
+# 【v.180.75】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+BUILD25_VER="2026-10-24.180.75"
 source shell/apk-custom-packages.sh
 echo "第三方apk软件包: $CUSTOM_PACKAGES"
 LOGFILE="/tmp/uci-defaults-log.txt"

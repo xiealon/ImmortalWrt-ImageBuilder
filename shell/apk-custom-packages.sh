@@ -5,7 +5,20 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES bandix luci-app-bandix luci-i18n-bandix-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-rtp2httpd luci-i18n-rtp2httpd-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-lucky lucky luci-i18n-lucky-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-daed-zh-cn"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box hysteria luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket xray-core naiveproxy bash curl lua unzip luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box hysteria luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket xray-core naiveproxy bash curl lua unzip"
+# 【v.108.71】代理面板 luci-app-ssr-plus → clashoo（上游 kenzok8/openwrt-clashoo）。
+# 25.12 用 apk 格式，包源是 wukongdaily/apk（build25.sh 里 clone 的就是它）——
+# 不是 store：store 里只有 ipk，而 apk-prepare-packages.sh 只捞 *.apk，两边不能混。
+# run/x86/clashoo/ 下三个文件，深度正好是 2，命中 apk-prepare-packages.sh 的
+# `find "$BASE_DIR" -mindepth 2 -maxdepth 2 -name '*.apk'`：
+#   clashoo-2026.05.27~38cb06d-r1.apk              17,584,594 B（自带 mihomo 内核）
+#   luci-app-clashoo-1.24.6-r1.apk                    380,759 B
+#   luci-i18n-clashoo-zh-cn-1.24.6-r1.apk               8,124 B
+# 依赖按 clashoo 的 control 补齐：yq / kmod-dummy / ca-bundle
+# （libc / firewall4 / ip-full / kmod-inet-diag / kmod-nft-socket / kmod-nft-tproxy /
+#   kmod-tun 上面这行本来就有）。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES yq kmod-dummy ca-bundle"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-taskplan luci-i18n-taskplan-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-mosdns luci-i18n-mosdns-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-openvpn-zh-cn"

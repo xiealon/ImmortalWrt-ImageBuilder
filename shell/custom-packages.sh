@@ -4,7 +4,25 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES openvpn-openssl  luci-i18n-openvpn-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES easytier luci-app-easytier"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box hysteria luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket xray-core naiveproxy bash curl lua unzip luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box hysteria luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket xray-core naiveproxy bash curl lua unzip"
+# 【v.108.71】代理面板 luci-app-ssr-plus → clashoo（上游 kenzok8/openwrt-clashoo）。
+# 三个包名逐字取自 wukongdaily/store 的 run/x86/clashoo_2026.05.15_x86_64.run 里实际打的 ipk：
+#   clashoo_2026.05.15.d2acf45-r3_x86_64.ipk        （自带 mihomo 内核，Provides: mihomo, clash-meta）
+#   luci-app-clashoo_1.23.12-r3_all.ipk
+#   luci-i18n-clashoo-zh-cn_1.23.12-r3_all.ipk
+# 依赖按其 control 的 Depends 逐条对齐：
+#   libc, ca-bundle, yq, firewall4, ip-full, kmod-inet-diag, kmod-nft-socket,
+#   kmod-nft-tproxy, kmod-tun, kmod-dummy
+#   其中 libc / firewall4 / ip-full / kmod-inet-diag / kmod-nft-socket / kmod-nft-tproxy /
+#   kmod-tun 上面这行已经有了；剩下三个在这里补齐：
+#   · yq         —— 24.10.6 packages feed 4.45.1-r1（镜像与官方 downloads 双向核实）
+#   · kmod-dummy —— clashoo 建透明代理用的 dummy 网卡
+#   · ca-bundle  —— base feed 20260601-r1
+# 为什么要显式写：ImageBuilder 虽然会解依赖，但它的解析只认 feeds 索引；一旦某个依赖只是
+# 「本固件里应该有」而索引对不上，报错会落在 make image 的 Unknown/Missing package 上，
+# 看不出缺的是哪一个。显式写在这里，缺哪个就是哪一行，一眼能定位。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES yq kmod-dummy ca-bundle"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES bandix luci-app-bandix luci-i18n-bandix-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-partexp luci-i18n-partexp-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-lucky lucky"

@@ -77,17 +77,21 @@ else
     echo "⚪️ 未选择 luci-app-openclash"
 fi
 
-if echo "$PACKAGES" | grep -q "luci-app-ssr-plus"; then
-    echo "✅ 已选择 luci-app-ssr-plus，添加 mihomo core"
-    mkdir -p files/usr/bin
-    MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/v1.19.24/mihomo-linux-amd64-compatible-v1.19.24.gz"
-    mkdir -p files/usr/bin
-    wget -qO- "$MIHOMO_URL" | gzip -dc > files/usr/bin/mihomo
-    chmod +x files/usr/bin/mihomo
-    echo "✅ 已下载 mihomo core"
-    ls -lah files/usr/bin
+# 【v.108.71】SSR Plus → Clashoo（与 build24.sh 同一个理由）。
+# clashoo 的 apk 自带 mihomo（Provides: mihomo, clash-meta），不再单独下内核；
+# 改成断言 wukongdaily/apk 的 run/x86/clashoo/ 里那三个 apk 真的进了 packages/。
+if echo "$PACKAGES" | grep -q "clashoo"; then
+    _cl_apk=$(ls packages/clashoo-*.apk 2>/dev/null | head -n1)
+    _cl_luci=$(ls packages/luci-app-clashoo-*.apk 2>/dev/null | head -n1)
+    if [ -z "$_cl_apk" ] || [ -z "$_cl_luci" ]; then
+        echo "::error::PACKAGES 里选了 clashoo，但 packages/ 下缺包（clashoo=$_cl_apk luci=$_cl_luci）—— apk 仓库的 run 没解出 apk"
+        ls -la packages/ 2>/dev/null || true
+        echo "::error::预期来自 wukongdaily/apk 的 run/x86/clashoo/"
+        exit 1
+    fi
+    echo "✅ clashoo 就位: $_cl_apk + $_cl_luci（自带 mihomo 内核，不再单独下载）"
 else
-    echo "⚪️ 未选择 luci-app-ssr-plus"
+    echo "⚪️ 未选择 clashoo"
 fi
 
 REPOS_CONF="/home/build/immortalwrt/repositories.conf"

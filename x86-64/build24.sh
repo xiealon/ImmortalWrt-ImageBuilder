@@ -79,17 +79,26 @@ else
     echo "⚪️ 未选择 luci-app-openclash"
 fi
 
-if echo "$PACKAGES" | grep -q "luci-app-ssr-plus"; then
-    echo "✅ 已选择 luci-app-ssr-plus，添加 mihomo core"
-    mkdir -p files/usr/bin
-    MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/v1.19.24/mihomo-linux-amd64-compatible-v1.19.24.gz"
-    mkdir -p files/usr/bin
-    wget -qO- "$MIHOMO_URL" | gzip -dc > files/usr/bin/mihomo
-    chmod +x files/usr/bin/mihomo
-    echo "✅ 已下载 mihomo core"
-    ls -lah files/usr/bin
+# 【v.108.71】SSR Plus → Clashoo。
+# 原来这段在 PACKAGES 里出现 luci-app-ssr-plus 时，把 mihomo 内核单独下到 files/usr/bin/mihomo。
+# clashoo 不需要这一步：它的主包已经把 mihomo 打进去了
+# （control: Provides: mihomo, clash-meta；Installed-Size 46,499,840 B）。
+# 再下一份就是同一台机器上两套内核、两条版本线，谁生效取决于 PATH 和谁先起 —— 删掉。
+# 换成一个现场断言：store 的 run 包必须真的解出了 clashoo 的 ipk。
+# 不这么做的话，失败会以 `make image` 的 Unknown package 'clashoo' 收场，
+# 看不出是「store 没给这个包」还是「包名写错了」。
+if echo "$PACKAGES" | grep -q "clashoo"; then
+    _cl_ipk=$(ls packages/clashoo_*.ipk 2>/dev/null | head -n1)
+    _cl_luci=$(ls packages/luci-app-clashoo_*.ipk 2>/dev/null | head -n1)
+    if [ -z "$_cl_ipk" ] || [ -z "$_cl_luci" ]; then
+        echo "::error::PACKAGES 里选了 clashoo，但 packages/ 下缺包（clashoo=$_cl_ipk luci=$_cl_luci）——store 的 run 没解出 ipk"
+        ls -la packages/ 2>/dev/null || true
+        echo "::error::预期来自 wukongdaily/store 的 run/x86/clashoo_2026.05.15_x86_64.run"
+        exit 1
+    fi
+    echo "✅ clashoo 就位: $_cl_ipk + $_cl_luci（自带 mihomo 内核，不再单独下载）"
 else
-    echo "⚪️ 未选择 luci-app-ssr-plus"
+    echo "⚪️ 未选择 clashoo"
 fi
 
 case " $PACKAGES " in

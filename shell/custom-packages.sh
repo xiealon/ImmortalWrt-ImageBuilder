@@ -4,35 +4,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES openvpn-openssl  luci-i18n-openvpn-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES easytier luci-app-easytier"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn"
-# 【v.108.72】清掉 ssr-plus 的遗留内核：hysteria / xray-core / naiveproxy。
-# 依据不是「看起来没人用」，是翻了 luci-app-clashoo 的界面代码（ucode + js 共 21 个文件）：
-#   · 内核路径只认 BINARY_PATHS[ mihomo / clash-meta / clash ] 与
-#     SINGBOX_BINARY_PATHS[ /usr/bin/sing-box, /usr/local/bin/sing-box ]
-#   · "xray"      命中 0 处
-#   · "naive"     命中 0 处
-#   · "hysteria"  命中 1 处，而且是 sing-box 配置里判断 `outbound/hysteria` 的类型串，
-#                 不调用系统 hysteria 二进制
-# 这三个包原本只为 luci-app-ssr-plus 提供备用内核，ssr-plus 已换成 clashoo，
-# 留着就是几百 MB 分区里的一段死重量 + 三个永远不会被执行的 init 脚本。
-# 保留：sing-box（clashoo 的第二内核，/usr/bin/sing-box 是它的首选路径）、
-#       geoview（独立的 geo 数据工具，不属 ssr-plus 依赖链）。
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket bash curl lua unzip"
-# 【v.108.71】代理面板 luci-app-ssr-plus → clashoo（上游 kenzok8/openwrt-clashoo）。
-# 三个包名逐字取自 wukongdaily/store 的 run/x86/clashoo_2026.05.15_x86_64.run 里实际打的 ipk：
-#   clashoo_2026.05.15.d2acf45-r3_x86_64.ipk        （自带 mihomo 内核，Provides: mihomo, clash-meta）
-#   luci-app-clashoo_1.23.12-r3_all.ipk
-#   luci-i18n-clashoo-zh-cn_1.23.12-r3_all.ipk
-# 依赖按其 control 的 Depends 逐条对齐：
-#   libc, ca-bundle, yq, firewall4, ip-full, kmod-inet-diag, kmod-nft-socket,
-#   kmod-nft-tproxy, kmod-tun, kmod-dummy
-#   其中 libc / firewall4 / ip-full / kmod-inet-diag / kmod-nft-socket / kmod-nft-tproxy /
-#   kmod-tun 上面这行已经有了；剩下三个在这里补齐：
-#   · yq         —— 24.10.6 packages feed 4.45.1-r1（镜像与官方 downloads 双向核实）
-#   · kmod-dummy —— clashoo 建透明代理用的 dummy 网卡
-#   · ca-bundle  —— base feed 20260601-r1
-# 为什么要显式写：ImageBuilder 虽然会解依赖，但它的解析只认 feeds 索引；一旦某个依赖只是
-# 「本固件里应该有」而索引对不上，报错会落在 make image 的 Unknown/Missing package 上，
-# 看不出缺的是哪一个。显式写在这里，缺哪个就是哪一行，一眼能定位。
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES yq kmod-dummy ca-bundle"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES bandix luci-app-bandix luci-i18n-bandix-zh-cn"
@@ -40,7 +11,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-partexp luci-i18n-partexp-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-lucky lucky"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-taskplan luci-i18n-taskplan-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-rtp2httpd luci-i18n-rtp2httpd-zh-cn"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES openssh-sftp-server udp2raw"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-3ginfo-lite-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES usb-modeswitch usbutils"

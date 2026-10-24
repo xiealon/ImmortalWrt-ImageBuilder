@@ -1,6 +1,5 @@
 #!/bin/bash
-# 【v.180.75】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
-BUILD24_VER="2026-10-24.180.75"
+# 【v.180.77】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 source shell/custom-packages.sh
 source shell/switch_repository.sh
 echo "第三方软件包: $CUSTOM_PACKAGES"

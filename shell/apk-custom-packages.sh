@@ -5,7 +5,12 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES bandix luci-app-bandix luci-i18n-bandix-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-rtp2httpd luci-i18n-rtp2httpd-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-lucky lucky luci-i18n-lucky-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-daed-zh-cn"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box hysteria luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket xray-core naiveproxy bash curl lua unzip"
+# 【v.108.72】清掉 ssr-plus 的遗留内核：hysteria / xray-core / naiveproxy（与 24.10 线同一依据）。
+# 核实方式：拆 luci-app-clashoo 的 ipk 扫界面代码 —— 内核只认 mihomo/clash-meta/clash
+# 与 /usr/bin/sing-box；"xray" 与 "naive" 各 0 处命中，"hysteria" 那 1 处是 sing-box
+# 配置里的 outbound 类型串，不调用系统二进制。
+# 保留 sing-box（clashoo 双内核之一）与 geoview（独立工具）。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket bash curl lua unzip"
 # 【v.108.71】代理面板 luci-app-ssr-plus → clashoo（上游 kenzok8/openwrt-clashoo）。
 # 25.12 用 apk 格式，包源是 wukongdaily/apk（build25.sh 里 clone 的就是它）——
 # 不是 store：store 里只有 ipk，而 apk-prepare-packages.sh 只捞 *.apk，两边不能混。

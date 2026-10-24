@@ -4,7 +4,19 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES openvpn-openssl  luci-i18n-openvpn-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES easytier luci-app-easytier"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box hysteria luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket xray-core naiveproxy bash curl lua unzip"
+# 【v.108.72】清掉 ssr-plus 的遗留内核：hysteria / xray-core / naiveproxy。
+# 依据不是「看起来没人用」，是翻了 luci-app-clashoo 的界面代码（ucode + js 共 21 个文件）：
+#   · 内核路径只认 BINARY_PATHS[ mihomo / clash-meta / clash ] 与
+#     SINGBOX_BINARY_PATHS[ /usr/bin/sing-box, /usr/local/bin/sing-box ]
+#   · "xray"      命中 0 处
+#   · "naive"     命中 0 处
+#   · "hysteria"  命中 1 处，而且是 sing-box 配置里判断 `outbound/hysteria` 的类型串，
+#                 不调用系统 hysteria 二进制
+# 这三个包原本只为 luci-app-ssr-plus 提供备用内核，ssr-plus 已换成 clashoo，
+# 留着就是几百 MB 分区里的一段死重量 + 三个永远不会被执行的 init 脚本。
+# 保留：sing-box（clashoo 的第二内核，/usr/bin/sing-box 是它的首选路径）、
+#       geoview（独立的 geo 数据工具，不属 ssr-plus 依赖链）。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket bash curl lua unzip"
 # 【v.108.71】代理面板 luci-app-ssr-plus → clashoo（上游 kenzok8/openwrt-clashoo）。
 # 三个包名逐字取自 wukongdaily/store 的 run/x86/clashoo_2026.05.15_x86_64.run 里实际打的 ipk：
 #   clashoo_2026.05.15.d2acf45-r3_x86_64.ipk        （自带 mihomo 内核，Provides: mihomo, clash-meta）

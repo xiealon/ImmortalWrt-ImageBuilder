@@ -42,36 +42,11 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-usb-printer-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-p910nd-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-wechatpush-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-xfrpc-zh-cn"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES xz tar liblzma gnupg getopt"
-# v.108.42：**不再装 cgroupfs-mount**。
-# 它的 boot() 第一件事就是把 procd 已经挂好的 cgroup2 卸掉（官方脚本原文注释：
-#   "Procd mounts non-hierarchical cgroupfs so unmount first before cgroupfs-mount"），
-# 然后按 /proc/cgroups 逐条挂 cgroup v1。而本固件内核是
-#   # CONFIG_CGROUP_DEVICE is not set
-# 实测 /proc/cgroups 只有 8 个控制器（cpuset cpu cpuacct blkio memory net_cls
-# pids rdma），没有 devices；`mount -t cgroup -o devices none ...` 直接回
-#   cgroup: Unknown subsys name 'devices'.   (rc=32)
-# 于是 dockerd 用 statfs("/sys/fs/cgroup") 判到 tmpfs → 走 v1 → 找 devices
-# 控制器 → 必然 `failed to start daemon: Devices cgroup isn't mounted` 退出，
-# docker0 永远不建，LuCI「Docker → 网络」页因此全空。
-# 删包后 procd 的 cgroup2 保住，dockerd 判到 cgroup2fs → 走 v2，设备控制改由
-# BPF 负责（CONFIG_CGROUP_BPF=y），不再需要那个控制器。
-# cgroup-tools 保留：libcgroup 2.x 在 v2 下仍可用，且无副作用。
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES cgroup-tools"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES ip-full"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-ikconfig kmod-veth"
-# docker 的桥接过滤（v.99-bp.3）：dockerd 的官方 DEPENDS 里**没有**它
-# （只有 containerd/runc/tini/iptables/iptables-mod-extra/kmod-ipt-nat/kmod-ipt-physdev/kmod-nf-ipvs/kmod-veth/
-#  ca-certificates/uci-firewall），但 docker 自己的 Makefile 会装 /etc/sysctl.d/12-br-netfilter-ip.conf，
-# 注释写明「Must be after 11-br-netfilter.conf from kmod-br-netfilter」——没有这个 kmod，
-# 那条 sysctl 落不到任何东西上，容器端口映射/桥接过滤就是残的。
-# 另外：imm.config 里写着 kmod-br-netfilter=m，但 ImageBuilder 只认 PACKAGES，.config 里的 =m 不进固件。
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-br-netfilter"
-# Docker 常驻（v.99-bp.2）：纯 X86 平台，不再提供「要不要 docker」的开关。
-# 原来 Include Docker 只往 PACKAGES 里加了一个中文语言包（luci-i18n-dockerman-zh-cn），
-# dockerd 本身从来没进过固件（imm.config 里 CONFIG_PACKAGE_dockerd 是 not set），
-# 也就是说「带 docker 编译」这个开关一直是空转的。
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES dockerd luci-app-dockerman luci-i18n-dockerman-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES liblxc lxc lxc-common lxc-templates"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES lxc-attach lxc-auto lxc-autostart lxc-cgroup lxc-checkconfig"

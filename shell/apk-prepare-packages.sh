@@ -33,6 +33,31 @@ done
 
 find "$TEMP_DIR" -type f -name "*.apk" -exec cp -v {} "$TARGET_DIR"/ \;
 
+# 【v.182】apk 文件名必须严格等于 <pkgname>-<pkgver>.apk。
+# 上游 kenzok8/openwrt-clashoo 为区分架构，把 PKGINFO 里 pkgver 的 "~" 改写成 "."，
+# 并在文件名尾部追加 -<arch>：
+#   磁盘上的名字  clashoo-2026.10.24.91e85ee-r1-x86_64.apk
+#   索引里的真名  clashoo-2026.10.24~91e85ee-r1   （apk index 从 PKGINFO 读）
+# imagebuilder 的 package_install 阶段按索引里的 pkgname-pkgver 拼文件名去
+# packages/ 找包，拼出来的东西不存在，于是报 3 条：
+#   ERROR: clashoo-2026.10.24~91e85ee-r1: package mentioned in index not found
+#   ERROR: luci-app-clashoo-1.31.0-r6: package mentioned in index not found
+#   ERROR: luci-i18n-clashoo-zh-cn-1.31.0-r6: package mentioned in index not found
+# 这里把名字还原成索引期望的形式：去掉架构后缀，再把 YYYY.MM.DD. 的最后一个点换回 "~"。
+# 已经规范的名字不会被改动（幂等）。
+for f in "$TARGET_DIR"/*.apk; do
+    [ -e "$f" ] || continue
+    b=$(basename "$f" .apk)
+    nb=$(printf '%s' "$b" \
+        | sed -E 's/-(x86_64|aarch64_[a-z0-9_]+|arm_[a-z0-9_-]+|i386_pentium4|mips[a-z0-9_]*)$//' \
+        | sed -E 's/([0-9]{4}\.[0-9]{2}\.[0-9]{2})\./\1~/')
+    if [ "$nb" != "$b" ]; then
+        mv -f "$f" "$TARGET_DIR/$nb.apk"
+        echo "🔧 apk 名规范化: $b.apk -> $nb.apk"
+    fi
+done
+
+
 
 find "$BASE_DIR" -mindepth 2 -maxdepth 2 -type f -name "*.apk" ! -path "$TEMP_DIR/*" \
   -exec echo "📜 Found:" {} \; \

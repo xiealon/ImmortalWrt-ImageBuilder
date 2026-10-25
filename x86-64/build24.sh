@@ -36,7 +36,7 @@ else
   # 拆成一个个包的好处：哪个包坏了只影响它自己，不再一个整体包全挂。
   echo "🔄 取 extras（按应用逐个下载，不 clone 上游仓库）..."
   mkdir -p /home/build/immortalwrt/extra-packages
-  RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra"
+  RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra-ipk"
   for _x in lucky partexp taskplan rtp2httpd tailscale-community easytier luci-app-store; do
     wget -q "$RUN_BASE/${_x}_x86_64.run" -P /home/build/immortalwrt/extra-packages/ \
         || { echo "::error::下载 ${_x} 失败: $RUN_BASE/${_x}_x86_64.run"; exit 1; }

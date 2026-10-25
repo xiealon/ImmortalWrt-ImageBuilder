@@ -6,7 +6,7 @@ TARGET_DIR="packages"
 
 # 【v.186】25.12 的包统一从 extra25 标签取（24.10 在 extra），
 # 两个标签里的文件名完全一致，不再带 25- 前缀。
-RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra25"
+RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra-apk"
 for _pkg in clashoo mosdns; do
     rm -f "$BASE_DIR"/${_pkg}_*.run "$BASE_DIR"/25-${_pkg}_*.run
     rm -rf "$BASE_DIR"/${_pkg}

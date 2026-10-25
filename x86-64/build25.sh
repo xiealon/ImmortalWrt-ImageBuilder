@@ -29,13 +29,13 @@ done
 if [ -z "$CUSTOM_PACKAGES" ]; then
   echo "⚪️ 未选择 任何第三方软件包"
 else
-  echo "🔄 正在同步第三方软件仓库 Cloning run file repo..."
-  git clone --depth=1 https://github.com/xiealon/apk.git /tmp/store-apk-repo
-
+  # 【v.183】同 build24.sh：不 clone xiealon/apk（696 MB），改取 extras25。
+  echo "🔄 取 extras（按需打包，不 clone 上游仓库）..."
   mkdir -p /home/build/immortalwrt/extra-packages
-  cp -r /tmp/store-apk-repo/run/x86/* /home/build/immortalwrt/extra-packages/
-
-  echo "✅ Run files copied to extra-packages:"
+  RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra"
+  wget -q "$RUN_BASE/extras25_x86_64.run" -P /home/build/immortalwrt/extra-packages/ \
+      || { echo "::error::下载 extras25 失败: $RUN_BASE/extras25_x86_64.run"; exit 1; }
+  echo "✅ extras25 已取: $(stat -c%s /home/build/immortalwrt/extra-packages/extras25_x86_64.run) bytes"
   sh shell/apk-prepare-packages.sh
   ls -lah /home/build/immortalwrt/packages/
 fi

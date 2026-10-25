@@ -12,7 +12,7 @@ TARGET_DIR="packages"
 # 必须先后旧 run：下面会把 $BASE_DIR/*.run 全解一遍，两份并存就是两个版本的 ipk
 # 同时进 packages/，最后谁赢取决于文件名排序 —— 看着更新了、其实没更新。
 RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra"
-for _pkg in clashoo; do
+for _pkg in clashoo mosdns; do
     rm -f "$BASE_DIR"/${_pkg}_*.run
     wget -q "$RUN_BASE/${_pkg}_x86_64.run" -P "$BASE_DIR"/ \
         || { echo "::error::下载 ${_pkg} 失败: $RUN_BASE/${_pkg}_x86_64.run"; exit 1; }

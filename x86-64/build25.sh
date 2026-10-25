@@ -29,13 +29,16 @@ done
 if [ -z "$CUSTOM_PACKAGES" ]; then
   echo "⚪️ 未选择 任何第三方软件包"
 else
-  # 【v.183】同 build24.sh：不 clone xiealon/apk（696 MB），改取 extras25。
-  echo "🔄 取 extras（按需打包，不 clone 上游仓库）..."
+  # 【v.186】同 build24.sh：不 clone xiealon/apk（696 MB）。
+  # 25.12 的产物统一发到 extra25 标签（24.10 在 extra），按应用逐个下载。
+  echo "🔄 取 extras25（按应用逐个下载，不 clone 上游仓库）..."
   mkdir -p /home/build/immortalwrt/extra-packages
-  RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra"
-  wget -q "$RUN_BASE/extras25_x86_64.run" -P /home/build/immortalwrt/extra-packages/ \
-      || { echo "::error::下载 extras25 失败: $RUN_BASE/extras25_x86_64.run"; exit 1; }
-  echo "✅ extras25 已取: $(stat -c%s /home/build/immortalwrt/extra-packages/extras25_x86_64.run) bytes"
+  RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra25"
+  for _x in lucky partexp taskplan rtp2httpd luci-app-store; do
+    wget -q "$RUN_BASE/${_x}_x86_64.run" -P /home/build/immortalwrt/extra-packages/ \
+        || { echo "::error::下载 ${_x} 失败: $RUN_BASE/${_x}_x86_64.run"; exit 1; }
+    echo "✅ ${_x} 已取: $(stat -c%s "/home/build/immortalwrt/extra-packages/${_x}_x86_64.run") bytes"
+  done
   sh shell/apk-prepare-packages.sh
   ls -lah /home/build/immortalwrt/packages/
 fi

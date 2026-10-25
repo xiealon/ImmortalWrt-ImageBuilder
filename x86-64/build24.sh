@@ -30,16 +30,18 @@ done
 if [ -z "$CUSTOM_PACKAGES" ]; then
   echo "⚪️ 未选择 任何第三方软件包"
 else
-  # 【v.183】不 clone xiealon/store（仓库 2.0 GB、run/x86 257 MB），也不把 .run
-  # 搬进本仓库 git（二进制会永久留在历史里）。改由 CloudRunFilesBuilder 的
-  # extras.yml 按需打包：只取 CUSTOM_PACKAGES 真正用到的 6 个目录，约 22 MB，
-  # 固定名发到 extra 标签，这里直链拉取。
-  echo "🔄 取 extras（按需打包，不 clone 上游仓库）..."
+  # 【v.186】不 clone xiealon/store（仓库 2.0 GB、run/x86 257 MB），也不把 .run
+  # 搬进本仓库 git。改由 CloudRunFilesBuilder 的 extras.yml 按应用逐个打 .run，
+  # 24.10 的产物统一发到 extra 标签，这里直链拉取。
+  # 拆成一个个包的好处：哪个包坏了只影响它自己，不再一个整体包全挂。
+  echo "🔄 取 extras（按应用逐个下载，不 clone 上游仓库）..."
   mkdir -p /home/build/immortalwrt/extra-packages
   RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra"
-  wget -q "$RUN_BASE/extras24_x86_64.run" -P /home/build/immortalwrt/extra-packages/ \
-      || { echo "::error::下载 extras24 失败: $RUN_BASE/extras24_x86_64.run"; exit 1; }
-  echo "✅ extras24 已取: $(stat -c%s /home/build/immortalwrt/extra-packages/extras24_x86_64.run) bytes"
+  for _x in lucky partexp taskplan rtp2httpd tailscale-community easytier luci-app-store; do
+    wget -q "$RUN_BASE/${_x}_x86_64.run" -P /home/build/immortalwrt/extra-packages/ \
+        || { echo "::error::下载 ${_x} 失败: $RUN_BASE/${_x}_x86_64.run"; exit 1; }
+    echo "✅ ${_x} 已取: $(stat -c%s "/home/build/immortalwrt/extra-packages/${_x}_x86_64.run") bytes"
+  done
   sh shell/prepare-packages.sh
   ls -lah /home/build/immortalwrt/packages/
 fi

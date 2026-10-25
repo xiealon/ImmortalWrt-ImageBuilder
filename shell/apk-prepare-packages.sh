@@ -14,7 +14,7 @@ TARGET_DIR="packages"
 #   ② apk 仓库里 clashoo 是 run/x86/clashoo/ 目录（三个 apk），不是 run 文件，
 #      所以连目录一起删，否则旧 apk 会被下面的 find 收进 packages/。
 RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra"
-for _pkg in clashoo; do
+for _pkg in clashoo mosdns; do
     rm -f "$BASE_DIR"/25-${_pkg}_*.run
     rm -rf "$BASE_DIR"/${_pkg}
     wget -q "$RUN_BASE/25-${_pkg}_x86_64.run" -P "$BASE_DIR"/ \

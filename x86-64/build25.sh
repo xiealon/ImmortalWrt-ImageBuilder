@@ -30,7 +30,7 @@ if [ -z "$CUSTOM_PACKAGES" ]; then
   echo "⚪️ 未选择 任何第三方软件包"
 else
   echo "🔄 正在同步第三方软件仓库 Cloning run file repo..."
-  git clone --depth=1 https://github.com/wukongdaily/apk.git /tmp/store-apk-repo
+  git clone --depth=1 https://github.com/xiealon/apk.git /tmp/store-apk-repo
 
   mkdir -p /home/build/immortalwrt/extra-packages
   cp -r /tmp/store-apk-repo/run/x86/* /home/build/immortalwrt/extra-packages/
@@ -80,7 +80,7 @@ fi
 
 # 【v.108.71】SSR Plus → Clashoo（与 build24.sh 同一个理由）。
 # clashoo 的 apk 自带 mihomo（Provides: mihomo, clash-meta），不再单独下内核；
-# 改成断言 wukongdaily/apk 的 run/x86/clashoo/ 里那三个 apk 真的进了 packages/。
+# 改成断言 xiealon/apk 的 run/x86/clashoo/ 里那三个 apk 真的进了 packages/。
 if echo "$PACKAGES" | grep -q "clashoo"; then
     _cl_apk=$(ls packages/clashoo-*.apk 2>/dev/null | head -n1)
     _cl_luci=$(ls packages/luci-app-clashoo-*.apk 2>/dev/null | head -n1)

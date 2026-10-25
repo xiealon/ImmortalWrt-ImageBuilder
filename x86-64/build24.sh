@@ -30,14 +30,16 @@ done
 if [ -z "$CUSTOM_PACKAGES" ]; then
   echo "⚪️ 未选择 任何第三方软件包"
 else
-  echo "🔄 正在同步第三方软件仓库 Cloning run file repo..."
-  git clone --depth=1 https://github.com/xiealon/store.git /tmp/store-run-repo
-
+  # 【v.183】不 clone xiealon/store（仓库 2.0 GB、run/x86 257 MB），也不把 .run
+  # 搬进本仓库 git（二进制会永久留在历史里）。改由 CloudRunFilesBuilder 的
+  # extras.yml 按需打包：只取 CUSTOM_PACKAGES 真正用到的 6 个目录，约 22 MB，
+  # 固定名发到 extra 标签，这里直链拉取。
+  echo "🔄 取 extras（按需打包，不 clone 上游仓库）..."
   mkdir -p /home/build/immortalwrt/extra-packages
-  cp -r /tmp/store-run-repo/run/x86/* /home/build/immortalwrt/extra-packages/
-
-  echo "✅ Run files copied to extra-packages:"
-  ls -lh /home/build/immortalwrt/extra-packages/*.run
+  RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra"
+  wget -q "$RUN_BASE/extras24_x86_64.run" -P /home/build/immortalwrt/extra-packages/ \
+      || { echo "::error::下载 extras24 失败: $RUN_BASE/extras24_x86_64.run"; exit 1; }
+  echo "✅ extras24 已取: $(stat -c%s /home/build/immortalwrt/extra-packages/extras24_x86_64.run) bytes"
   sh shell/prepare-packages.sh
   ls -lah /home/build/immortalwrt/packages/
 fi

@@ -30,10 +30,10 @@ if [ -z "$CUSTOM_PACKAGES" ]; then
   echo "⚪️ 未选择 任何第三方软件包"
 else
   # 【v.186】同 build24.sh：不 clone xiealon/apk（696 MB）。
-  # 25.12 的产物统一发到 extra25 标签（24.10 在 extra），按应用逐个下载。
+  # 25.12 的产物统一发到 extra-apk 标签（24.10 在 extra-ipk），按应用逐个下载。
   echo "🔄 取 extras25（按应用逐个下载，不 clone 上游仓库）..."
   mkdir -p /home/build/immortalwrt/extra-packages
-  RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra25"
+  RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra-apk"
   for _x in lucky partexp taskplan rtp2httpd luci-app-store; do
     wget -q "$RUN_BASE/${_x}_x86_64.run" -P /home/build/immortalwrt/extra-packages/ \
         || { echo "::error::下载 ${_x} 失败: $RUN_BASE/${_x}_x86_64.run"; exit 1; }

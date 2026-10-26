@@ -79,7 +79,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-25.180.79"
+SCRIPT_VER="2026-10-26.180.80"
 
 plog() { logger -t crowdsec-probe "$*"; }
 

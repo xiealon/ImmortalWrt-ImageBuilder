@@ -84,6 +84,19 @@ else
     echo "⚪️ 未选择 luci-app-openclash"
 fi
 
+if echo "$PACKAGES" | grep -q "luci-app-ssr-plus"; then
+    echo "✅ 已选择 luci-app-ssr-plus，添加 mihomo core"
+    mkdir -p files/usr/bin
+    MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/v1.19.24/mihomo-linux-amd64-compatible-v1.19.24.gz"
+    wget -qO- "$MIHOMO_URL" | gzip -dc > files/usr/bin/mihomo
+    [ -s files/usr/bin/mihomo ] || { echo "::error::mihomo 内核下载失败: $MIHOMO_URL"; exit 1; }
+    chmod +x files/usr/bin/mihomo
+    echo "✅ 已下载 mihomo core: $(stat -c%s files/usr/bin/mihomo) bytes"
+    ls -lah files/usr/bin
+else
+    echo "⚠️ 未选择 luci-app-ssr-plus"
+fi
+
 # 【v.108.71】SSR Plus → Clashoo。
 # 原来这段在 PACKAGES 里出现 luci-app-ssr-plus 时，把 mihomo 内核单独下到 files/usr/bin/mihomo。
 # clashoo 不需要这一步：它的主包已经把 mihomo 打进去了

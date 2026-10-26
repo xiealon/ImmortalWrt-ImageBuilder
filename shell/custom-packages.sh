@@ -23,7 +23,7 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-rtp2httpd luci-i18n-rtp2httpd-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES udp2raw"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-3ginfo-lite luci-i18n-3ginfo-lite-zh-cn usb-modeswitch usbutils"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES usb-modeswitch usbutils"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-acl luci-i18n-acl-zh-cn"
 

@@ -1,7 +1,6 @@
 #!/bin/bash
 # 【v.180.79】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES openvpn-openssl luci-app-openvpn luci-i18n-openvpn-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard kmod-wireguard wireguard-tools"

@@ -27,8 +27,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES usb-modeswitch usbutils"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-acl luci-i18n-acl-zh-cn"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES banip luci-app-banip luci-i18n-banip-zh-cn"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES aria2 luci-app-aria2 luci-i18n-aria2-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-fs-cifs cifsmount luci-app-cifs-mount luci-i18n-cifs-mount-zh-cn"

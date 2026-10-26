@@ -51,8 +51,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES nps luci-app-nps luci-i18n-nps-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES p910nd kmod-usb-printer luci-app-p910nd luci-i18n-p910nd-zh-cn"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES sqm-scripts luci-app-sqm luci-i18n-sqm-zh-cn"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES etherwake luci-app-timewol luci-i18n-timewol-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES uhttpd luci-app-uhttpd luci-i18n-uhttpd-zh-cn"

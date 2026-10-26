@@ -544,9 +544,9 @@ reset_all; restore_real; : > "$UCI_STATE"
 chk "C7.1 docker_fw build 成功" ok "$?"
 ( verify_docker_fw ) >/dev/null 2>&1
 chk "C7.2 docker_fw build 之后 verify 通过" ok "$?"
-eq  "C7.3 三条 forwarding 齐全" \
+eq  "C7.3 两条 forwarding 齐全（wan zone 已删，docker2wan 不再存在）" \
    "$(awk -F'|' '$1=="firewall" && $3=="__type__" && $4=="rule"{print $2}' "$UCI_STATE" | sort | tr '\n' ' ')" \
-   "docker2lan docker2wan lan2docker "
+   "docker2lan lan2docker "
 # 未装 dockerd：verify 直接放行（可选功能，不该把整条引导卡死）
 rm -f /tmp/cons_mockbin/dockerd
 ( verify_docker_fw ) >/dev/null 2>&1

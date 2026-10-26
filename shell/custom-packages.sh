@@ -31,9 +31,7 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-eoip-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-hd-idle-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-ksmbd-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-keepalived-zh-cn"
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES mosdns luci-app-mosdns luci-i18n-mosdns-zh-cn v2ray-geoip v2ray-geosite"
-# daed：内核 daed + 面板 luci-app-daed，来自 store 的 24-luci-app-dead.run
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES daed luci-app-daed luci-i18n-daed-zh-cn"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES v2ray-geoip v2ray-geosite"
 # ssr-plus：界面 ipk 与 mihomo.gz 同在 ssrp_mihomo_x86_64-196_r2.run 里，
 # 内核由 shell/prepare-packages.sh 解到 files/usr/bin/mihomo
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn"

@@ -45,6 +45,13 @@ else
   # 解压并拷贝ipk到packages目录
   sh shell/prepare-packages.sh
   ls -lah /home/build/immortalwrt/packages/
+  # 解压完核验包名，报告直接进日志；只报告不拦构，真会拦的是 opkg 的 Unknown package
+  if command -v python3 >/dev/null 2>&1; then
+    python3 shell/audit-package-names.py --dir /home/build/immortalwrt/packages \
+      --list %s || true
+  else
+    echo "⚠️ 环境无 python3，跳过包名核验"
+  fi
 fi
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - 开始构建固件..."

@@ -28,20 +28,21 @@ for _cf in /home/build/immortalwrt/custom/*; do
 done
 
 if [ -z "$CUSTOM_PACKAGES" ]; then
-  echo "⚪️ 未选择 任何第三方软件包"
+  echo "⚠️ 未选择 任何第三方软件包"
 else
-  # 【v.186】不 clone xiealon/store（仓库 2.0 GB、run/x86 257 MB），也不把 .run
-  # 搬进本仓库 git。改由 CloudRunFilesBuilder 的 extras.yml 按应用逐个打 .run，
-  # 24.10 的产物统一发到 extra 标签，这里直链拉取。
-  # 拆成一个个包的好处：哪个包坏了只影响它自己，不再一个整体包全挂。
-  echo "🔄 取 extras（按应用逐个下载，不 clone 上游仓库）..."
+  # ============= 同步第三方插件库 =============
+  # 同步第三方软件包仓库 run/ipk（fork 自 wukongdaily/store）
+  echo "🔄 正在同步第三方软件包仓库 Cloning run file repo..."
+  git clone --depth=1 https://github.com/xiealon/store.git /tmp/store-run-repo \
+      || { echo "::error::clone xiealon/store 失败，检查 GitHub 可达性"; exit 1; }
+
+  # 拷贝 run/x86 下所有 run 文件和 ipk 文件 到 extra-packages 目录
   mkdir -p /home/build/immortalwrt/extra-packages
-  RUN_BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download/extra-ipk"
-  for _x in lucky partexp taskplan rtp2httpd tailscale-community easytier luci-app-store; do
-    wget -q "$RUN_BASE/${_x}_x86_64.run" -P /home/build/immortalwrt/extra-packages/ \
-        || { echo "::error::下载 ${_x} 失败: $RUN_BASE/${_x}_x86_64.run"; exit 1; }
-    echo "✅ ${_x} 已取: $(stat -c%s "/home/build/immortalwrt/extra-packages/${_x}_x86_64.run") bytes"
-  done
+  cp -r /tmp/store-run-repo/run/x86/* /home/build/immortalwrt/extra-packages/
+
+  echo "✅ Run files copied to extra-packages:"
+  ls -lh /home/build/immortalwrt/extra-packages/*.run
+  # 解压并拷贝ipk到packages目录
   sh shell/prepare-packages.sh
   ls -lah /home/build/immortalwrt/packages/
 fi

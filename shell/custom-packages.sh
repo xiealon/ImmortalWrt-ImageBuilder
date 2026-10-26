@@ -35,8 +35,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES cloudflared luci-app-cloudflared luci-i18n-clo
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES ddns-go luci-app-ddns-go luci-i18n-ddns-go-zh-cn"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES eoip luci-app-eoip luci-i18n-eoip-zh-cn"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES hd-idle luci-app-hd-idle luci-i18n-hd-idle-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES ksmbd-server kmod-fs-ksmbd kmod-fs-smbfs-common luci-app-ksmbd luci-i18n-ksmbd-zh-cn"

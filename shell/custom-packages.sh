@@ -41,8 +41,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES hd-idle luci-app-hd-idle luci-i18n-hd-idle-zh-
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES ksmbd-server kmod-fs-ksmbd kmod-fs-smbfs-common luci-app-ksmbd luci-i18n-ksmbd-zh-cn"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES keepalived luci-app-keepalived luci-i18n-keepalived-zh-cn"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES nfs-kernel-server nfs-utils kmod-fs-nfs kmod-fs-nfsd luci-app-nfs luci-i18n-nfs-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES ngrokc luci-app-ngrokc luci-i18n-ngrokc-zh-cn"

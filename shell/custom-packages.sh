@@ -21,8 +21,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-taskplan luci-i18n-taskplan-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-rtp2httpd luci-i18n-rtp2httpd-zh-cn"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES udp2raw"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES usb-modeswitch usbutils"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-acl luci-i18n-acl-zh-cn"

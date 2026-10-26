@@ -51,7 +51,7 @@ else
   # 解压完核验包名，报告直接进日志；只报告不拦构，真会拦的是 opkg 的 Unknown package
   if command -v python3 >/dev/null 2>&1; then
     python3 shell/audit-package-names.py --dir /home/build/immortalwrt/packages \
-      --list %s || true
+      --list /home/build/immortalwrt/shell/apk-custom-packages.sh || true
   else
     echo "⚠️ 环境无 python3，跳过包名核验"
   fi

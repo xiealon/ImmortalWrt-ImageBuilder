@@ -7,8 +7,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES clashoo luci-app-clashoo luci-i18n-clashoo-zh-
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES geoview sing-box luci-compat kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket bash curl ip-full lua unzip"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-openvpn luci-i18n-openvpn-zh-cn openvpn-openssl"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-zerotier luci-i18n-zerotier-zh-cn zerotier"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard kmod-wireguard wireguard-tools"
@@ -39,8 +37,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-cifs-mount luci-i18n-cifs-mount-zh-cn
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-cloudflared luci-i18n-cloudflared-zh-cn cloudflared"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-email luci-i18n-email-zh-cn msmtp"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-eoip luci-i18n-eoip-zh-cn eoip"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-hd-idle luci-i18n-hd-idle-zh-cn hd-idle"
@@ -67,12 +63,10 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-upnp luci-i18n-upnp-zh-cn miniupnpd-n
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-usb-printer luci-i18n-usb-printer-zh-cn kmod-usb-printer"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-wechatpush luci-i18n-wechatpush-zh-cn"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-crowdsec-firewall-bouncer luci-i18n-crowdsec-firewall-bouncer-zh-cn crowdsec-firewall-bouncer"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-dockerman luci-i18n-dockerman-zh-cn dockerd cgroup-tools kmod-veth"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES liblxc lxc lxc-common lxc-configs lxc-auto lxc-init lxc-create lxc-start lxc-stop lxc-destroy lxc-freeze lxc-unfreeze lxc-autostart lxc-ls lxc-info lxc-monitor lxc-top lxc-snapshot lxc-checkconfig lxc-config lxc-attach lxc-console lxc-execute lxc-device lxc-copy lxc-cgroup lxc-unshare lxc-usernsexec lxc-wait luci-app-lxc rpcd-mod-lxc luci-i18n-lxc-zh-cn"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES xz tar ip-full kmod-veth kmod-ikconfig kmod-br-netfilter glib2 crconf davici swanmon kmod-crypto-chacha20poly1305"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES xz tar ip-full kmod-veth kmod-ikconfig kmod-br-netfilter glib2 kmod-crypto-chacha20poly1305"

@@ -39,8 +39,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-cifs-mount luci-i18n-cifs-mount-zh-cn
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-cloudflared luci-i18n-cloudflared-zh-cn cloudflared"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-daed-zh-cn"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-email luci-i18n-email-zh-cn msmtp"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-eoip luci-i18n-eoip-zh-cn eoip"

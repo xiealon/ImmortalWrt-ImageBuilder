@@ -88,6 +88,19 @@ else
     echo "⚪️ 未选择 luci-app-openclash"
 fi
 
+if echo "$PACKAGES" | grep -q "luci-app-ssr-plus"; then
+    echo "✅ 已选择 luci-app-ssr-plus，添加 mihomo core"
+    mkdir -p files/usr/bin
+    MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/v1.19.24/mihomo-linux-amd64-compatible-v1.19.24.gz"
+    wget -qO- "$MIHOMO_URL" | gzip -dc > files/usr/bin/mihomo
+    [ -s files/usr/bin/mihomo ] || { echo "::error::mihomo 内核下载失败: $MIHOMO_URL"; exit 1; }
+    chmod +x files/usr/bin/mihomo
+    echo "✅ 已下载 mihomo core: $(stat -c%s files/usr/bin/mihomo) bytes"
+    ls -lah files/usr/bin
+else
+    echo "⚠️ 未选择 luci-app-ssr-plus"
+fi
+
 # 【v.108.71】SSR Plus → Clashoo（与 build24.sh 同一个理由）。
 # clashoo 的 apk 自带 mihomo（Provides: mihomo, clash-meta），不再单独下内核；
 # 改成断言 xiealon/apk 的 run/x86/clashoo/ 里那三个 apk 真的进了 packages/。

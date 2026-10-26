@@ -1,8 +1,6 @@
 #!/bin/bash
 # 【v.180.79】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-daed-zh-cn"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn naiveproxy v2ray-geoip v2ray-geosite shadowsocksr-libev-ssr-check shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-nat shadowsocksr-libev-ssr-redir shadowsocksr-libev-ssr-server dns2tcp ipt2socks lua-neturl kmod-nft-tproxy kmod-nft-socket"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn geoview kmod-tun kmod-inet-diag kmod-nft-tproxy kmod-nft-socket luci-compat bash curl ip-full unzip"
@@ -40,6 +38,8 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-banip luci-i18n-banip-zh-cn banip"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-cifs-mount luci-i18n-cifs-mount-zh-cn kmod-fs-cifs cifsmount"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-cloudflared luci-i18n-cloudflared-zh-cn cloudflared"
+
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-daed-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-email luci-i18n-email-zh-cn msmtp"
 

@@ -39,6 +39,10 @@ else
   mkdir -p /home/build/immortalwrt/extra-packages
   cp -r /tmp/store-apk-repo/run/x86/* /home/build/immortalwrt/extra-packages/
 
+  # daed 与 openwrt-daede 是两套互斥实现，包名 daed / vmlinux-btf 会互相覆盖，
+  # 只保留 daed 那套（与 24.10 的 24-luci-app-dead.run 同源）
+  rm -rf /home/build/immortalwrt/extra-packages/openwrt-daede
+
   echo "✅ Run files copied to extra-packages:"
   ls -lh /home/build/immortalwrt/extra-packages/*.run
   # 解压并拷贝apk到packages目录

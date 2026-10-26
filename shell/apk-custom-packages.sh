@@ -35,8 +35,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-cifs-mount luci-i18n-cifs-mount-zh-cn
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-cloudflared luci-i18n-cloudflared-zh-cn cloudflared"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-eoip luci-i18n-eoip-zh-cn eoip"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-hd-idle luci-i18n-hd-idle-zh-cn hd-idle"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-ksmbd luci-i18n-ksmbd-zh-cn ksmbd-server kmod-fs-ksmbd kmod-fs-smbfs-common"

@@ -1165,7 +1165,8 @@ DEP_enroll="capi_release"
 # INSTALL 排第一：rootfs 解压是 ct_net / ct_bootlink / ct_resolv（写容器内文件）
 # 以及 capi_block / ct_boot 的硬前置。放在 PREP 之后时，PREP 里那些节点拿不到
 # rootfs → 失败 → hard 终止 → INSTALL 永不执行 → rootfs 永不解压（自锁）。
-GROUP_SEQ="INSTALL PREP CAPIBLOCK BOOT LOGCONF LAPI BOUNCERVERIFY ENROLL"
+GROUP_SEQ="NETBASE INSTALL PREP CAPIBLOCK BOOT LOGCONF LAPI BOUNCERVERIFY ENROLL"
+GROUP_TITLE_NETBASE="网络基线（br-lan / lxcbr0 双网桥 + 防火墙 zone 与转发规则），最优先执行，不依赖 rootfs"
 GROUP_TITLE_INSTALL="安装容器（迁移校验镜像 / 解压 rootfs / 写 config）"
 GROUP_TITLE_PREP="容器启动前的全部静态准备（路由器网桥 / 容器网络 / cgroup）"
 GROUP_TITLE_CAPIBLOCK="屏蔽 CAPI（容器内 online_client 停用）"
@@ -1177,9 +1178,10 @@ GROUP_TITLE_ENROLL="Console Enroll"
 # 组间强依赖只有一条主线：容器启动前必须先备好网桥/容器网络/cgroup，
 # 启动后才有运行态可言。其余组按功能细分，依赖如实声明（不强加线性）。
 GROUP_DEP_INSTALL=""
-GROUP_DEP_PREP=""
+GROUP_DEP_NETBASE=""
+GROUP_DEP_PREP="NETBASE"
 GROUP_DEP_CAPIBLOCK="INSTALL PREP"
-GROUP_DEP_BOOT="PREP INSTALL CAPIBLOCK"
+GROUP_DEP_BOOT="NETBASE PREP INSTALL CAPIBLOCK"
 GROUP_DEP_LOGCONF="BOOT"
 GROUP_DEP_LAPI="BOOT"
 GROUP_DEP_BOUNCERVERIFY="LOGCONF LAPI"
@@ -1187,22 +1189,22 @@ GROUP_DEP_ENROLL="BOUNCERVERIFY"
 NODE_GROUP_img_migrate=INSTALL
 NODE_GROUP_rootfs=INSTALL
 NODE_GROUP_ct_config=INSTALL
-NODE_GROUP_br_lan_ports=PREP
-NODE_GROUP_lan_static=PREP
-NODE_GROUP_dhcp_ignore=PREP
-NODE_GROUP_bridge=PREP
+NODE_GROUP_br_lan_ports=NETBASE
+NODE_GROUP_lan_static=NETBASE
+NODE_GROUP_dhcp_ignore=NETBASE
+NODE_GROUP_bridge=NETBASE
 NODE_GROUP_ct_net=PREP
 NODE_GROUP_cgroup_mount=PREP
 NODE_GROUP_ct_bootlink=PREP
-NODE_GROUP_lxc_auto=PREP
+NODE_GROUP_lxc_auto=NETBASE
 NODE_GROUP_ct_resolv=PREP
-NODE_GROUP_lxc_zone=PREP
-NODE_GROUP_fwd_rules=PREP
-NODE_GROUP_lan_input=PREP
-NODE_GROUP_snat=PREP
-NODE_GROUP_ip_forward=PREP
-NODE_GROUP_svc_bind=PREP
-NODE_GROUP_docker_fw=PREP
+NODE_GROUP_lxc_zone=NETBASE
+NODE_GROUP_fwd_rules=NETBASE
+NODE_GROUP_lan_input=NETBASE
+NODE_GROUP_snat=NETBASE
+NODE_GROUP_ip_forward=NETBASE
+NODE_GROUP_svc_bind=NETBASE
+NODE_GROUP_docker_fw=NETBASE
 NODE_GROUP_capi_block=CAPIBLOCK
 NODE_GROUP_ct_boot=BOOT
 NODE_GROUP_logconf=LOGCONF
@@ -4737,7 +4739,8 @@ _sc_wait_pull() {
 
 
 # 各组节点清单（由 NODE_GROUP_* 派生，供组级 verify/build 遍历；顺序即组内声明序）
-PREP_NODES="br_lan_ports lan_static dhcp_ignore bridge ct_net cgroup_mount ct_bootlink lxc_auto ct_resolv lxc_zone fwd_rules lan_input snat ip_forward svc_bind docker_fw"
+NETBASE_NODES="br_lan_ports lan_static dhcp_ignore bridge lxc_auto lxc_zone fwd_rules lan_input snat ip_forward svc_bind docker_fw"
+PREP_NODES="ct_net cgroup_mount ct_bootlink ct_resolv"
 INSTALL_NODES="img_migrate rootfs ct_config"
 CAPIBLOCK_NODES="capi_block"
 BOOT_NODES="ct_boot"
@@ -4749,7 +4752,24 @@ ENROLL_NODES="enroll"
 # 组级 verify = 组内节点全部内容一致；组级 build = 组内节点逐个 ensure（各自两次闭环）。
 # 组与组之间只保留一条真实存在的硬顺序：静态准备/安装/屏蔽 CAPI → 启动容器 → 其余。
 
-# PREP：容器启动前必须在位的全部静态准备（路由器网桥 / 容器网络 / cgroup / 防火墙）
+# NETBASE：路由器侧网络基线 —— 两块网桥（br-lan / lxcbr0）与防火墙 zone、转发规则。
+# 全部只碰 uci 与内核网络栈，不读不写容器 rootfs，因此可以排在 INSTALL 解压之前，
+# 保证「rootfs 还在解压时，LAN 已经能进 LuCI」。
+verify_NETBASE() {
+    for _n in $NETBASE_NODES; do
+        "verify_$_n" 2>/dev/null || return 1
+    done
+    return 0
+}
+build_NETBASE() {
+    for _n in $NETBASE_NODES; do
+        ensure "$_n" || return 1
+    done
+    flush_uci
+    return 0
+}
+
+# PREP：容器启动前必须在位的静态准备（容器网络 / cgroup），依赖 NETBASE 与 INSTALL
 verify_PREP() {
     for _n in $PREP_NODES; do
         "verify_$_n" 2>/dev/null || return 1
@@ -5020,10 +5040,10 @@ main() {
     # 组不在 GROUP_SEQ 里就直接终止（「归属的组 INSTALL 不在 GROUP_SEQ 中」）。
     # 所以必须同时把 DAG_NODES 裁成「PREP 组里与容器无关的节点」。
     if [ "$NET_ONLY" = "1" ]; then
-        GROUP_SEQ="PREP"
+        GROUP_SEQ="NETBASE"
         _no_dag=""
         for _no_n in $DAG_NODES; do
-            [ "$(eval "echo \$NODE_GROUP_$_no_n")" = "PREP" ] || continue
+            [ "$(eval "echo \$NODE_GROUP_$_no_n")" = "NETBASE" ] || continue
             case " $NET_ONLY_SKIP " in
                 *" $_no_n "*) continue ;;
             esac
@@ -5035,14 +5055,14 @@ main() {
         # PREP 组照样把 bridge / ct_net / ct_bootlink / ct_resolv / lxc_zone /
         # fwd_rules / snat 全跑一遍 ——「--net-only 不碰容器」就成了一句空话，
         # 没有 rootfs 时还会在 ct_net 上失败、把整个网络基线搭进去。
-        _no_prep=""
-        for _no_n in $PREP_NODES; do
+        _no_base=""
+        for _no_n in $NETBASE_NODES; do
             case " $NET_ONLY_SKIP " in
                 *" $_no_n "*) continue ;;
             esac
-            _no_prep="$_no_prep $_no_n"
+            _no_base="$_no_base $_no_n"
         done
-        PREP_NODES="$_no_prep"
+        NETBASE_NODES="$_no_base"
         log "===== 网络基线模式（--net-only）：只校准路由器网络，不碰容器 ====="
         log "[网络基线] 跳过容器相关节点：$NET_ONLY_SKIP"
     fi

@@ -31,8 +31,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-acme luci-i18n-acme-zh-cn ca-certific
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-aria2 luci-i18n-aria2-zh-cn aria2"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-banip luci-i18n-banip-zh-cn banip"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-cifs-mount luci-i18n-cifs-mount-zh-cn kmod-fs-cifs cifsmount"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-cloudflared luci-i18n-cloudflared-zh-cn cloudflared"

@@ -32,9 +32,17 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-hd-idle-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-ksmbd-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-keepalived-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES v2ray-geoip v2ray-geosite"
-# ssr-plus：界面 ipk 与 mihomo.gz 同在 ssrp_mihomo_x86_64-196_r2.run 里，
-# 内核由 shell/prepare-packages.sh 解到 files/usr/bin/mihomo
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn"
+
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES xray-core xray-plugin v2ray-plugin"
+
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES shadowsocks-rust-sslocal shadowsocks-rust-ssserver"
+
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES shadowsocksr-libev-ssr-redir shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-server"
+
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES trojan-plus tuic-client shadow-tls naiveproxy simple-obfs-client"
+
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES microsocks dns2socks ipt2socks chinadns-ng tcping libopenssl3"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-nfs-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-ngrokc-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-nps-zh-cn"

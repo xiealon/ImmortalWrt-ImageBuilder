@@ -799,7 +799,9 @@ verify_svc_bind() {
     return 0
 }
 
-# docker 防火墙验证：zone（ACCEPT + 172.16.0.0/12）+ docker↔lan/wan 三向 forwarding
+# docker 防火墙验证：zone（ACCEPT + 172.16.0.0/12）+ docker↔lan 双向 forwarding
+# 【v.180.81】wan zone 已从固件 /etc/config/firewall 整段删除，docker2wan 随之移除：
+#   规则 dest 指向不存在的 zone 会让 fw4 整表加载失败（firewall/network reload 卡死）
 # 无 dockerd → 不涉及，跳过
 verify_docker_fw() {
     command -v dockerd >/dev/null 2>&1 || { log "[docker] 未安装 dockerd，本轮不校验 docker 防火墙"; return 0; }
@@ -816,10 +818,6 @@ verify_docker_fw() {
     [ "$(run uci -q get firewall.docker2lan.dest 2>/dev/null)" = "lan" ] || return 1
     [ "$(run uci -q get firewall.docker2lan.target 2>/dev/null)" = "ACCEPT" ] || return 1
     [ "$(run uci -q get firewall.docker2lan.proto 2>/dev/null)" = "all" ] || return 1
-    [ "$(run uci -q get firewall.docker2wan.src 2>/dev/null)" = "docker" ] || return 1
-    [ "$(run uci -q get firewall.docker2wan.dest 2>/dev/null)" = "wan" ] || return 1
-    [ "$(run uci -q get firewall.docker2wan.target 2>/dev/null)" = "ACCEPT" ] || return 1
-    [ "$(run uci -q get firewall.docker2wan.proto 2>/dev/null)" = "all" ] || return 1
     [ "$(run uci -q get firewall.lan2docker.src 2>/dev/null)" = "lan" ] || return 1
     [ "$(run uci -q get firewall.lan2docker.dest 2>/dev/null)" = "docker" ] || return 1
     # 【v.108.48】target / proto 原来没验：build 会写 ACCEPT，但被改成 REJECT
@@ -842,7 +840,7 @@ build_svc_bind() {
 }
 
 # docker 防火墙 builder（v.95）：没装 dockerd 就什么都不做；
-# 装了则补 docker zone（ACCEPT + 172.16.0.0/12）与三条 forwarding。
+# 装了则补 docker zone（ACCEPT + 172.16.0.0/12）与两条 forwarding（wan zone 已删）。
 build_docker_fw() {
     command -v dockerd >/dev/null 2>&1 || { log "[docker] 未安装 dockerd，跳过"; return 0; }
     if ! run uci -q get firewall.docker >/dev/null 2>&1; then
@@ -864,9 +862,11 @@ build_docker_fw() {
         run uci -q set "firewall.$_frd.proto=all"
     }
     _fw_rule_d docker2lan docker lan
-    _fw_rule_d docker2wan docker wan
     _fw_rule_d lan2docker lan    docker
-    log "[docker] 已写入 docker zone 与 3 条 forwarding"
+    # 【v.180.81】wan zone 已整段删除，docker2wan 不能再写：dest 指向不存在的 zone
+    # 会让 fw4 整表加载失败（firewall/network reload 卡住）。残留的一并清掉。
+    run uci -q delete firewall.docker2wan 2>/dev/null
+    log "[docker] 已写入 docker zone 与 2 条 forwarding（docker2wan 已清除）"
     return 0
 }
 

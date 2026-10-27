@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-28.180.119"
+SCRIPT_VER="2026-10-28.180.120"
 GUARD_FILES="${CS_GUARD_FILES:-
 /usr/sbin/crowdsec-lxc-bootstrap.sh
 /usr/sbin/crowdsec-lxc-probe.sh
@@ -114,6 +114,17 @@ GUARD_FILES="${CS_GUARD_FILES:-
 /etc/init.d/crowdsec-lxc-probe
 /etc/init.d/lxc-auto
 }"
+# 【v.180.120】目录级保护：固件自带的自检脚本。
+# repo/tests/ 在构建期被铺到 /usr/share/crowdsec-tests/（build24/25.sh 负责），
+# 刷机后 /rom 里就有同一份，于是这里能拿它当基准。
+#
+# 为什么不把这 29 个文件逐条列进 GUARD_FILES：
+#   · 新增一个测试就得回来补一条，早晚漏；
+#   · 逐文件那一套会为每个文件留一份 .user-<时间戳> 备份，29 份备份在 flash 上太浪费。
+# 整目录做一次清单比对，不一致就整目录换回，一处逻辑管到底。
+#
+# 旧固件 /rom 里没有这个目录 —— 下面循环第一行判 -d 就跳过，零动作、零日志。
+GUARD_DIRS="${CS_GUARD_DIRS:-/usr/share/crowdsec-tests}"
 
 # 【v.108.45】容器内脚本也纳入保护，但单独一组：它们的目标在容器 rootfs 里，
 # 恢复动作必须多两道门（见 _ct_gate），不能和宿主侧混在一个循环里无条件执行。
@@ -591,6 +602,17 @@ _ct_gate && _CT_OK=1
 # 两个后果都是静默的，所以从 v.108.45 到 v.108.46 一直没被发现：
 #   · 容器里的 rcS 被改坏 → 不复原、不报警（用户实测确认）；
 #   · 宿主被改 → 复原一次后 cmp 就相等了，从此安静，日志只留一条看不出规模。
+# 【v.180.120】目录签名：相对路径 + 校验和，排序拼成一串。
+# 只比内容，**不比 mtime** —— 刷机后 /rom 与运行副本的时间戳必然不同，
+# 比时间会变成「每轮都判定不一致、每轮重写整目录」，正是 v.108.44 踩过的坑。
+# 文件名也进签名：少一个、多一个都算不一致。
+_dir_sig() {
+    ( cd "$1" 2>/dev/null || exit 1
+      find . -type f 2>/dev/null | sort | while read -r _ds_f; do
+          printf '%s %s\n' "$_ds_f" "$(cksum <"$_ds_f" 2>/dev/null)"
+      done ) 2>/dev/null
+}
+
 _CT_LIST=""
 if [ "$_CT_OK" = "1" ]; then
     for _rel in $GUARD_CT_FILES; do
@@ -690,6 +712,48 @@ done
 # 只在容器组通过前置门（rootfs 已就位）时审计，否则 upper 内容没有参照意义。
 # 顺序：先修主配置（能不能被路由器连上全看它），再做整层审计 —— 主配置修好之后，
 # 审计段看到的 online_client 两行才是「这一轮的真实形态」，不会被误判成不一致。
+# ---- 【v.180.120】目录级保护：固件自带自检脚本 ----
+# 逐文件那套走完再走这里。顺序无关，但放在后面便于日志连着看。
+for _gd in $GUARD_DIRS; do
+    # 护栏：只认绝对路径，且不许是根。下面有 rm -rf，路径校验不能省。
+    case "$_gd" in
+    /*) ;;
+    *)
+        _glog "【完整性】GUARD_DIRS 里 '$_gd' 不是绝对路径，已跳过（不执行 rm -rf）"
+        continue
+        ;;
+    esac
+    [ "$_gd" = "/" ] && continue
+    # 只读基座里没有 = 这台固件没带这批脚本，跳过。旧固件永远走这条。
+    [ -d "$ROM_DIR$_gd" ] || continue
+    _gd_run="$ROOT$_gd"
+    # 内容完全一致 → 零动作（刷机后的常态）
+    if [ -d "$_gd_run" ] && [ "$(_dir_sig "$ROM_DIR$_gd")" = "$(_dir_sig "$_gd_run")" ]; then
+        continue
+    fi
+    _gd_had=0
+    [ -d "$_gd_run" ] && _gd_had=1
+    # 留一份跑偏现场再覆盖；只留最近一份，否则每轮一次能堆满 flash
+    if [ "$_gd_had" = "1" ]; then
+        rm -rf "$_gd_run".user-* 2>/dev/null
+        mv -f "$_gd_run" "$_gd_run.user-$(date '+%Y%m%d%H%M%S')" 2>/dev/null
+    fi
+    if cp -a "$ROM_DIR$_gd" "$_gd_run" 2>/dev/null; then
+        _gd_n=$(find "$_gd_run" -type f 2>/dev/null | wc -l)
+        if [ "$_gd_had" = "1" ]; then
+            _glog "【完整性】$_gd 与只读基座不一致，已整目录复原（$_gd_n 个文件；原内容另存 ${_gd_run}.user-*）"
+        else
+            _glog "【完整性】$_gd 整个目录不见了，已从只读基座复原（$_gd_n 个文件）"
+        fi
+        # 复读完回读一次：cp -a 返回成功不等于真的在了（overlay 白out 之类的老问题）
+        if [ "$(_dir_sig "$ROM_DIR$_gd")" != "$(_dir_sig "$_gd_run")" ]; then
+            _glog "【完整性】$_gd 已执行整目录复原，但回读仍与基准不一致 —— 需人工介入"
+        fi
+    else
+        _glog "【完整性】$_gd 复原失败：只读基座不可读或目标不可写"
+    fi
+done
+
 [ "$_CT_OK" = "1" ] && _cs_cfg_audit
 [ "$_CT_OK" = "1" ] && _ovl_audit
 

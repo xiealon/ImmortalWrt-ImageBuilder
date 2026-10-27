@@ -63,6 +63,10 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-lxc rpcd-mod-lxc luci-i18n-lxc-zh-cn"
 # smartdns：crowdsec-lxc-bootstrap 的 DNS 前置（脚本只从 /rom 恢复，构建期必须装进来）
 # 少了它：pkg_base 报「固件未内置 smartdns」，53 让出去却没人应答，全家 DNS 直接断。
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES smartdns"
+# 界面：只是给人看的，脚本一行都不依赖它。但固件里带上，pkg_base 才能在它被
+# 卸掉后从 /rom 补回（_luci_smartdns_ok 判 menu.d + smartdns-call）。
+# 不加 smartdns-ui：那是 Rust 独立前端（25.12 才有），体积大，脚本用不着。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-smartdns"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-strongswan-swanctl"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-swanctl strongswan-mod-vici strongswan-charon"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES strongswan-mod-aes strongswan-mod-attr strongswan-mod-connmark strongswan-mod-constraints strongswan-mod-des strongswan-mod-dnskey"

@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1564" viewBox="0 0 1500 1564">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="36" y="46" font-size="30" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">crowdsec-lxc-bootstrap.sh · 11 组 · 31 节点</text>
+<text x="36" y="76" font-size="17" fill="#666666" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">v.180.113 · 组内每个节点都是「先验证现场，达标就零写入；不达标才构建」</text>
+<rect x="36" y="88" width="24" height="16" fit="" fill="#2f6fd0"/>
+<text x="66" y="102" font-size="15" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅰ 网络</text>
+<rect x="156" y="88" width="24" height="16" fit="" fill="#7b4fd0"/>
+<text x="186" y="102" font-size="15" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅱ 容器</text>
+<rect x="276" y="88" width="24" height="16" fit="" fill="#0e8a8a"/>
+<text x="306" y="102" font-size="15" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅲ smartdns</text>
+<rect x="492" y="88" width="24" height="16" fit="" fill="#e67e22"/>
+<text x="522" y="102" font-size="15" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅳ crowdsec</text>
+<rect x="708" y="88" width="24" height="16" fit="" fill="#2e7d32"/>
+<text x="738" y="102" font-size="15" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅴ 检测+注册</text>
+<rect x="36" y="118" width="1428" height="136" rx="10" fill="#fbfcff" stroke="#2f6fd0" stroke-width="2"/>
+<text x="54" y="148" font-size="18" font-weight="700" fill="#2f6fd0" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">01</text>
+<text x="88" y="148" font-size="20" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">NETBASE</text>
+<rect x="1312" y="130" width="132" height="26" rx="6" fill="#2f6fd0"/>
+<text x="1378" y="149" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅰ Ⅱ Ⅲ</text>
+<text x="88" y="174" font-size="16" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">网络基线 → 从 /rom 补包 → smartdns 配置</text>
+<text x="88" y="198" font-size="15" fill="#2f6fd0" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">br_lan_ports · lan_static · dhcp_ignore · bridge · lxc_zone · fwd_rules</text>
+<text x="88" y="219" font-size="15" fill="#2f6fd0" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">lan_input · snat · ip_forward · svc_bind · docker_fw</text>
+<text x="88" y="240" font-size="15" fill="#2f6fd0" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">（Ⅱ）pkg_base · lxc_auto · smartdns</text>
+<text x="1444" y="198" text-anchor="end" font-size="14" fill="#555555" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">补包 · 写 13 条上游 · dnsmasq 让出 53</text>
+<rect x="36" y="268" width="1428" height="106" rx="10" fill="#fbfcff" stroke="#7b4fd0" stroke-width="2"/>
+<text x="54" y="298" font-size="18" font-weight="700" fill="#7b4fd0" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">02</text>
+<text x="88" y="298" font-size="20" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">INSTALL</text>
+<rect x="1312" y="280" width="132" height="26" rx="6" fill="#7b4fd0"/>
+<text x="1378" y="299" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅱ</text>
+<text x="88" y="324" font-size="16" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">安装容器：迁移校验镜像 / 解压 rootfs / 写 config</text>
+<text x="88" y="348" font-size="15" fill="#7b4fd0" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">img_migrate · rootfs · ct_config</text>
+<text x="1444" y="348" text-anchor="end" font-size="14" fill="#555555" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">rootfs 解压到 LXC_PATH</text>
+<rect x="36" y="388" width="1428" height="106" rx="10" fill="#fbfcff" stroke="#7b4fd0" stroke-width="2"/>
+<text x="54" y="418" font-size="18" font-weight="700" fill="#7b4fd0" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">03</text>
+<text x="88" y="418" font-size="20" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">PREP</text>
+<rect x="1312" y="400" width="132" height="26" rx="6" fill="#7b4fd0"/>
+<text x="1378" y="419" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅱ</text>
+<text x="88" y="444" font-size="16" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">容器启动前的静态准备</text>
+<text x="88" y="468" font-size="15" fill="#7b4fd0" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">ct_net · cgroup_mount · ct_bootlink · ct_resolv</text>
+<text x="1444" y="444" text-anchor="end" font-size="14" fill="#888888" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">前置：NETBASE INSTALL</text>
+<text x="1444" y="468" text-anchor="end" font-size="14" fill="#555555" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">网卡 / cgroup / 开机链 / DNS</text>
+<rect x="36" y="508" width="1428" height="106" rx="10" fill="#fbfcff" stroke="#e67e22" stroke-width="2"/>
+<text x="54" y="538" font-size="18" font-weight="700" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">04</text>
+<text x="88" y="538" font-size="20" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">CAPIBLOCK</text>
+<rect x="1312" y="520" width="132" height="26" rx="6" fill="#e67e22"/>
+<text x="1378" y="539" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅳ</text>
+<text x="88" y="564" font-size="16" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">屏蔽 CAPI（容器内 online_client 停用）</text>
+<text x="88" y="588" font-size="15" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">capi_block</text>
+<text x="1444" y="564" text-anchor="end" font-size="14" fill="#888888" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">前置：INSTALL PREP</text>
+<text x="1444" y="588" text-anchor="end" font-size="14" fill="#555555" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">config.yaml 只在启动时读一次</text>
+<rect x="36" y="628" width="1428" height="106" rx="10" fill="#fbfcff" stroke="#e67e22" stroke-width="2"/>
+<text x="54" y="658" font-size="18" font-weight="700" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">05</text>
+<text x="88" y="658" font-size="20" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">BOOT</text>
+<rect x="1312" y="640" width="132" height="26" rx="6" fill="#e67e22"/>
+<text x="1378" y="659" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅳ</text>
+<text x="88" y="684" font-size="16" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">启动容器（全程唯一一次开机）</text>
+<text x="88" y="708" font-size="15" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">ct_boot</text>
+<text x="1444" y="684" text-anchor="end" font-size="14" fill="#888888" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">前置：NETBASE PREP INSTALL CAPIBLOCK</text>
+<text x="1444" y="708" text-anchor="end" font-size="14" fill="#555555" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">没有 SNAT 不启动</text>
+<rect x="36" y="748" width="1428" height="106" rx="10" fill="#fbfcff" stroke="#e67e22" stroke-width="2"/>
+<text x="54" y="778" font-size="18" font-weight="700" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">06</text>
+<text x="88" y="778" font-size="20" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">LOGCONF</text>
+<rect x="1312" y="760" width="132" height="26" rx="6" fill="#e67e22"/>
+<text x="1378" y="779" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅳ</text>
+<text x="88" y="804" font-size="16" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">日志链路与对外监听</text>
+<text x="88" y="828" font-size="15" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">logconf</text>
+<text x="1444" y="804" text-anchor="end" font-size="14" fill="#888888" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">前置：BOOT</text>
+<text x="1444" y="828" text-anchor="end" font-size="14" fill="#555555" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">宿主机推送 + 容器采集</text>
+<rect x="36" y="868" width="1428" height="106" rx="10" fill="#fbfcff" stroke="#e67e22" stroke-width="2"/>
+<text x="54" y="898" font-size="18" font-weight="700" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">07</text>
+<text x="88" y="898" font-size="20" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">LAPI</text>
+<rect x="1312" y="880" width="132" height="26" rx="6" fill="#e67e22"/>
+<text x="1378" y="899" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅳ</text>
+<text x="88" y="924" font-size="16" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">取 LAPI 并填入路由器 bouncer</text>
+<text x="88" y="948" font-size="15" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">lapi_fetch · bouncer_fill</text>
+<text x="1444" y="924" text-anchor="end" font-size="14" fill="#888888" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">前置：BOOT</text>
+<text x="1444" y="948" text-anchor="end" font-size="14" fill="#555555" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">填完 api_url/key 重启 bouncer</text>
+<rect x="36" y="988" width="1428" height="106" rx="10" fill="#fbfcff" stroke="#e67e22" stroke-width="2"/>
+<text x="54" y="1018" font-size="18" font-weight="700" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">08</text>
+<text x="88" y="1018" font-size="20" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">BOUNCERVERIFY</text>
+<rect x="1312" y="1000" width="132" height="26" rx="6" fill="#e67e22"/>
+<text x="1378" y="1019" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅳ</text>
+<text x="88" y="1044" font-size="16" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">验证 bouncer 真在拉，再解开 CAPI</text>
+<text x="88" y="1068" font-size="15" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">bouncer_verify · capi_release</text>
+<text x="1444" y="1044" text-anchor="end" font-size="14" fill="#888888" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">前置：LOGCONF LAPI</text>
+<text x="1444" y="1068" text-anchor="end" font-size="14" fill="#555555" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">看 last_pull 新鲜度</text>
+<rect x="36" y="1108" width="1428" height="106" rx="10" fill="#fbfcff" stroke="#e67e22" stroke-width="2"/>
+<text x="54" y="1138" font-size="18" font-weight="700" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">09</text>
+<text x="88" y="1138" font-size="20" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">DEPS</text>
+<rect x="1312" y="1120" width="132" height="26" rx="6" fill="#e67e22"/>
+<text x="1378" y="1139" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅳ</text>
+<text x="88" y="1164" font-size="16" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">只验不装：网络通不通 / 组件就位没</text>
+<text x="88" y="1188" font-size="15" fill="#e67e22" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">deps</text>
+<text x="1444" y="1164" text-anchor="end" font-size="14" fill="#888888" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">前置：BOUNCERVERIFY</text>
+<text x="1444" y="1188" text-anchor="end" font-size="14" fill="#555555" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">未就绪则 enroll 跳过</text>
+<rect x="36" y="1228" width="1428" height="106" rx="10" fill="#fbfcff" stroke="#2e7d32" stroke-width="2"/>
+<text x="54" y="1258" font-size="18" font-weight="700" fill="#2e7d32" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">10</text>
+<text x="88" y="1258" font-size="20" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">SMARTCHK</text>
+<rect x="1312" y="1240" width="132" height="26" rx="6" fill="#2e7d32"/>
+<text x="1378" y="1259" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅴ</text>
+<text x="88" y="1284" font-size="16" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">smartdns 运行态验证</text>
+<text x="88" y="1308" font-size="15" fill="#2e7d32" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">sd_serve</text>
+<text x="1444" y="1284" text-anchor="end" font-size="14" fill="#888888" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">前置：DEPS</text>
+<text x="1444" y="1308" text-anchor="end" font-size="14" fill="#555555" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">进程 / 53 监听 / 容器内解析</text>
+<rect x="36" y="1348" width="1428" height="106" rx="10" fill="#fbfcff" stroke="#2e7d32" stroke-width="2"/>
+<text x="54" y="1378" font-size="18" font-weight="700" fill="#2e7d32" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">11</text>
+<text x="88" y="1378" font-size="20" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">ENROLL</text>
+<rect x="1312" y="1360" width="132" height="26" rx="6" fill="#2e7d32"/>
+<text x="1378" y="1379" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅴ</text>
+<text x="88" y="1404" font-size="16" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Console Enroll —— 全程唯一联网点</text>
+<text x="88" y="1428" font-size="15" fill="#2e7d32" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">enroll</text>
+<text x="1444" y="1404" text-anchor="end" font-size="14" fill="#888888" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">前置：SMARTCHK</text>
+<text x="1444" y="1428" text-anchor="end" font-size="14" fill="#555555" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">主码缺失用本地保险柜</text>
+<line x1="36" y1="1476" x2="1464" y2="1476" stroke="#dddddd" stroke-width="1"/>
+<text x="36" y="1504" font-size="15" fill="#444444" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">组顺序由 GROUP_SEQ 决定，不看书写顺序；组内节点由 DEP_* 拓扑排序。</text>
+<text x="36" y="1528" font-size="15" fill="#444444" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">联网只出现在 ENROLL 一处；其余全部走 /rom 本地自愈。</text>
+</svg>

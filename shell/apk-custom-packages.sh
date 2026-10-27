@@ -41,8 +41,6 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-rtp2httpd luci-i18n-rtp2httpd-zh-cn r
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn naiveproxy v2ray-geoip v2ray-geosite shadowsocksr-libev-ssr-check shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-nat shadowsocksr-libev-ssr-redir shadowsocksr-libev-ssr-server dns2tcp ipt2socks lua-neturl kmod-nft-tproxy kmod-nft-socket"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-strongswan-swanctl strongswan-swanctl strongswan-mod-vici strongswan-charon strongswan-mod-aes strongswan-mod-attr strongswan-mod-connmark strongswan-mod-constraints strongswan-mod-des strongswan-mod-dnskey strongswan-mod-fips-prf strongswan-mod-gmp strongswan-mod-hmac strongswan-mod-openssl strongswan-mod-kernel-netlink strongswan-mod-md5 strongswan-mod-mgf1 strongswan-mod-pem strongswan-mod-pgp strongswan-mod-pkcs1 strongswan-mod-pubkey strongswan-mod-random strongswan-mod-rc2 strongswan-mod-resolve strongswan-mod-revocation strongswan-mod-sha1 strongswan-mod-sha2 strongswan-mod-socket-default strongswan-mod-sshkey strongswan-mod-updown strongswan-mod-x509 strongswan-mod-xauth-generic strongswan-mod-xcbc swanmon davici crconf libjson-c5 glib2 kmod-ipsec kmod-ipsec4 kmod-ipsec6 kmod-crypto-manager kmod-crypto-aead kmod-crypto-authenc kmod-crypto-cbc kmod-crypto-des kmod-crypto-echainiv kmod-crypto-hmac kmod-crypto-md5 kmod-crypto-sha1 kmod-lib-zlib-inflate kmod-lib-zlib-deflate"
-
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-taskplan luci-i18n-taskplan-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-timewol luci-i18n-timewol-zh-cn etherwake"
@@ -67,4 +65,4 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES smartdns luci-app-smartdns luci-i18n-smartdns-
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES tailscale luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn kmod-tun"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES xz tar ip-full kmod-veth kmod-ikconfig kmod-br-netfilter kmod-crypto-chacha20poly1305"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES xz tar ip-full kmod-veth kmod-ikconfig kmod-br-netfilter"

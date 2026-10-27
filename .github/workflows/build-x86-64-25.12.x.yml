@@ -14,14 +14,14 @@ on:
       Router IP:
         description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
         required: true
-        default: "192.168.3.201"
+        default: "10.0.0.201"
       Router Netmask:
         description: "子网掩码，留空默认 255.255.255.0。非 /24 时必须在下面显式填网关"
         required: false
       Router Gateway:
         description: "网关地址，留空则自动取管理地址同网段的首个地址(如 192.168.100.1)。非 /24 网段请务必手填"
         required: false
-        default: "192.168.3.1"
+        default: "10.0.0.10"
       Router DNS:
         description: "DNS 地址，留空则跟随网关"
         required: false

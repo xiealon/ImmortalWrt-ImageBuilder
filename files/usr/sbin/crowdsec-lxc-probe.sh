@@ -26,7 +26,11 @@
 #   「引导进行中」就算完事，看日志一切正常，实际再也不会修复任何东西。
 #   现在锁里落 pid + ts，遇锁先判陈旧（进程已死 / 超时 / 旧格式且无进程）再回收。
 
-BOOT=/usr/sbin/crowdsec-lxc-bootstrap.sh
+# 【v.180.118】两个路径都可被环境覆盖：生产环境走默认值（判真实 /rom 与 /usr/sbin），
+# 只有 tests/probe_boot_heal.sh 会替换成临时目录 —— 否则「脚本被删」这种情形
+# 没法在不动真机的前提下复现。
+BOOT="${CS_PROBE_BOOT:-/usr/sbin/crowdsec-lxc-bootstrap.sh}"
+ROMDIR="${CS_PROBE_ROM:-/rom}"
 GUARD=/usr/sbin/crowdsec-guard.sh
 LOCK=/tmp/.crowdsec-lxc-bootstrap.lock
 # 【v.108.70】与 bootstrap 同源。bootstrap 自己认 CS_BOOTSTRAP_LOG（第 171 行），
@@ -79,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-28.180.117"
+SCRIPT_VER="2026-10-28.180.118"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -141,6 +145,35 @@ _lock_stale() {
     return 0
 }
 
+# ---- bootstrap 本体在位性（v.180.118）----
+# 探针能跑到这里，说明它自己还在；但 bootstrap 可能已经不在了 ——
+# 它不属于任何 opkg/apk 包（是 files/ 直接铺进固件的），所以 opkg remove 碰不到它，
+# 只有手动 rm、或某个写错的脚本把它删了才会消失。
+# 一旦它没了，三条修复通道（补印 / 停滞 / DNS）全部以 127 空转，
+# 日志只会一路「bootstrap 退出 127」，最后停在「需人工介入」—— 而 /rom 里其实有一份。
+#
+# 绝不能照抄上面 _guard_run 的「与 /rom 不一致就复原」：那个模式对 guard 成立，
+# 对 bootstrap 是灾难 —— /rom 里那份是**构建固件那一刻**的版本（例如 286834 B / 2026-04-22），
+# 运行副本才是迭代过的（343046 B）。照抄就是每轮把新版静默打回旧版，
+# 日志还只会说「已复原」，看不出逻辑退回了几个月。
+# 所以这里只判「在不在、能不能执行」：缺失才补，存在一律不碰。
+_ensure_boot() {
+    [ -x "$BOOT" ] && return 0
+    # 源路径默认就是「只读基座 + 同一路径」（生产环境 /rom/usr/sbin/...）。
+    # BOOT_SRC 单独留一个口子只为测试：Windows 上没有 /rom，拼不出来。
+    _eb_src="${BOOT_SRC:-$ROMDIR$BOOT}"
+    if [ -f "$_eb_src" ]; then
+        cp -f "$_eb_src" "$BOOT" 2>/dev/null
+        chmod 755 "$BOOT" 2>/dev/null
+        if [ -x "$BOOT" ]; then
+            plog "【脚本】$BOOT 缺失，已从只读基座恢复（$_eb_src）—— 恢复的是固件内置版本，可能落后于当前仓库，请尽快重刷固件"
+            return 0
+        fi
+    fi
+    plog "【脚本】$BOOT 缺失，且只读基座里也没有（$_eb_src）：自动修复通道已全部失效，请人工重刷固件或从仓库取回"
+    return 1
+}
+
 # ---- smartdns 53 体检（v.180.117）----
 # 补的是一整类白屏：DNS 挂了但 last_pull 照样新鲜，于是 stalled 判定永远不触发。
 # last_pull 走的是 IP 直连 LAPI（http://10.1.0.10:8080/），不查 DNS ——
@@ -171,6 +204,9 @@ _dns_ok() {
 # 各写一遍的话，「pid 写进锁」这类容易写错的细节迟早会分叉 ——
 # 陈旧锁判定依据的是持有者 pid，不是探针自己，写错了会让锁被误判成陈旧。
 _run_fix() {
+    # 先保证要跑的东西在：不在就什么都别谈。返回 78 与抢锁失败的 77 区分开 ——
+    # 两者的日志和处置完全不同（一个是「等下一轮」，一个是「要重刷固件」）。
+    _ensure_boot || return 78
     if ! mkdir "$LOCK" 2>/dev/null; then
         plog "【持锁失败】并发占用，本轮放弃"
         return 77
@@ -225,6 +261,10 @@ _dns_watch() {
     plog "【DNS】smartdns 连续 ${PROBE_STALL_ROUNDS} 轮不可用（$DNS_WHY），持锁重跑 $BOOT 复验/修复"
     _run_fix
     _dw_rc=$?
+    if [ "$_dw_rc" = 78 ]; then
+        P_ACTION="dns-boot-missing"
+        return 0
+    fi
     if [ "$_dw_rc" = 77 ]; then
         P_ACTION="dns-lock-fail"
         return 0
@@ -303,6 +343,10 @@ probe_tick() {
         plog "【补印】installed 缺失但容器 rootfs 已就绪（$ROOTFS），持锁重跑引导补印"
                 _run_fix
         _rs_rc=$?
+        if [ "$_rs_rc" = 78 ]; then
+            P_ACTION="boot-missing"
+            return 0
+        fi
         if [ "$_rs_rc" = 77 ]; then
             P_ACTION="lock-fail"
             return 0
@@ -398,6 +442,10 @@ probe_tick() {
     plog "【触发】last_pull 连续停滞 $PROBE_STALL_ROUNDS 轮，持锁重跑 $BOOT 复验/修复"
     _run_fix
     _rc=$?
+    if [ "$_rc" = 78 ]; then
+        P_ACTION="boot-missing"
+        return 0
+    fi
     if [ "$_rc" = 77 ]; then
         P_ACTION="lock-fail"
         return 0

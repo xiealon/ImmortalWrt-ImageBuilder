@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.107"
+SCRIPT_VER="2026-10-27.180.108"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -2954,13 +2954,68 @@ build_bouncer_fill() {
 # 文件读取一律先守卫：nft 不在 / 表不存在 / 日志不存在或不可读，全部静默跳过。
 _BC_SANE=0
 _BC_LOG="${BC_LOG:-/var/log/crowdsec-firewall-bouncer.log}"
+
+# ---- 探针依赖自愈（v.180.108）----
+# 为什么探针自己也需要保护：探针 A 写的是
+#     nft list chain ip crowdsec crowdsec-chain-input 2>/dev/null | grep -c 'drop'
+# `nft` 被 opkg remove 之后，这条命令 stderr 被吞、stdout 为空，grep -c 得 0 ——
+# 探针会把「工具没了」误报成「规则没落地」。误诊比不报更糟，所以依赖必须先验在位。
+# 归属已经真机核实（2026-10-27）：/usr/sbin/nft 属于 nftables-json 包，
+# 不是名字更像的 nftables（该包在 /rom 的 opkg info 里根本不存在）。
+# 内核模块 kmod-nft-* 只做「可用性检测」不做文件级恢复：把 .ko 拷回来还得 insmod，
+# 而 insmod 失败会把内核状态搞乱，风险高于收益 —— 缺了就明确报出来交给人。
+_BOUNCER_MISSING=""
+_bouncer_missing_deps() {
+    _BOUNCER_MISSING=""
+    [ -x /usr/bin/cs-firewall-bouncer ] || _BOUNCER_MISSING="$_BOUNCER_MISSING cs-firewall-bouncer"
+    [ -x /etc/init.d/crowdsec-firewall-bouncer ] || _BOUNCER_MISSING="$_BOUNCER_MISSING init.d/crowdsec-firewall-bouncer"
+    [ -x /usr/sbin/nft ] || _BOUNCER_MISSING="$_BOUNCER_MISSING nft"
+    # 命令在 ≠ 能用：kmod-nft-core 被删时 nft 照样存在，执行才报错。
+    # 只有「明确跑不起来」才判内核不可用，其余一律放过（与两处冒烟同一取向）。
+    if [ -z "$_BOUNCER_MISSING" ]; then
+        case "$(nft list ruleset 2>&1)" in
+            *"No such file"*|*"not found"*|*"Operation not permitted"*|*"Protocol not supported"*)
+                _BOUNCER_MISSING="$_BOUNCER_MISSING nft(内核)" ;;
+        esac
+    fi
+    [ -z "$_BOUNCER_MISSING" ]
+}
+
+# 从只读基座恢复 bouncer 依赖。与 _rom_restore_pkg 的唯一差别是配置那一项：
+# .list 里含 /etc/config/crowdsec，而通用逻辑对 /etc/config/* 与 conffiles 一律跳过 ——
+# 那对「用户改过配置」是对的，但对「整个文件都没了」等于不修。
+# 所以这里特判：文件不存在才拷回，存在则一个字节不动（哪怕内容被改过）。
+_rom_restore_bouncer() {
+    _rom_restore_tree crowdsec-firewall-bouncer
+    # nft 走递归：libnftables.so* 与 libnftnl11 在 Depends 里，一并补
+    _rom_restore_tree nftables-json
+    _rbc_cfg=/etc/config/crowdsec
+    if [ ! -e "$_rbc_cfg" ] && [ -f "$ROMDIR$_rbc_cfg" ]; then
+        mkdir -p "${_rbc_cfg%/*}" 2>/dev/null
+        cp -a "$ROMDIR$_rbc_cfg" "$_rbc_cfg" 2>/dev/null \
+            && log "[bouncer] 配置缺失，已从只读基座恢复 $_rbc_cfg"
+    fi
+    return 0
+}
 _bouncer_rule_sane() {
     # verify 在阶段 A / 阶段 3 / build 循环里会被反复调用，这里保证一轮只查一次
     [ "$_BC_SANE" = "1" ] && return 0
     _BC_SANE=1
+    # 先保依赖：nft / bouncer / 配置缺任何一项，下面的结论都不可信
+    if ! _bouncer_missing_deps; then
+        log "[bouncer] ** 探针依赖不全：$_BOUNCER_MISSING —— 先试只读基座 $ROMDIR"
+        _rom_restore_bouncer
+        hash -r 2>/dev/null || true
+        if ! _bouncer_missing_deps; then
+            log "[bouncer] ** 自愈后仍缺：$_BOUNCER_MISSING（固件未内置，查 shell/custom-packages.sh）"
+            log "[bouncer] ** 探针跳过：依赖不全时「没有 drop 规则」的结论不可信"
+            return 0
+        fi
+        log "[bouncer] 依赖已从只读基座恢复，继续探针"
+    fi
     # ① 结构探针：表不存在说明 bouncer 压根没建起来，那是 bouncer_exists 的职责，
     #    这里不重复报，直接跳过，避免同一件事刷两条日志。
-    if command -v nft >/dev/null 2>&1 && nft list table ip crowdsec >/dev/null 2>&1; then
+    if nft list table ip crowdsec >/dev/null 2>&1; then
         _bs_drop="$(nft list chain ip crowdsec crowdsec-chain-input 2>/dev/null | grep -c 'drop')"
         case "$_bs_drop" in
             ''|*[!0-9]*) _bs_drop=0 ;;

@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.113"
+SCRIPT_VER="2026-10-27.180.114"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -460,7 +460,7 @@ _zone_lan_network() {
 
 verify_lxc_zone() {
     # 【v.108.24】按 name 定位段，不赌段名。
-    # build_lxc_zone_fwd 用 _zone_sec lxc 找段（LuCI 删了重建会变成 @zone[3]/cfg0xxxx），
+    # build_lxc_zone / build_fwd_rules 用 _zone_sec lxc 找段（LuCI 删了重建会变成 @zone[3]/cfg0xxxx），
     # 而这里原来写死 firewall.lxczone —— 用户在界面上明明配好了 lxc zone，
     # verify 却说没有，于是每次开机都重建一遍。判据必须和 builder 用同一个定位方式。
     _vz=$(_zone_sec lxc) || return 1
@@ -1546,8 +1546,12 @@ build_sd_serve() {
     return 0
 }
 
-# lxc zone + 四条转发规则（lxc2lan / lxc2docker / lxc2vpn / lan2lxc）
-build_lxc_zone_fwd() {
+# ---- lxc_zone：只写 zone 段 ----
+# 【v.180.114】拆开：原来 zone 与 4 条转发规则共用 build_lxc_zone_fwd，任一处不符就
+# 整体重写一遍。行为等价（都幂等），但日志分不出是 zone 坏了还是规则坏了，出问题只能
+# 整段排查。现在两个节点各自 build，各自打日志，失败也各自停在那一小步。
+# 顺序由 DEP_fwd_rules="lxc_zone" 保证，不靠函数里"顺手先建 zone"。
+build_lxc_zone() {
     if [ -z "$(_zone_sec lxc)" ]; then
         run uci -q add firewall zone >/dev/null 2>&1
         _lzs=$(run uci show firewall 2>/dev/null | grep -E '=zone$' | cut -d. -f2 | cut -d= -f1 | tail -n1)
@@ -1561,7 +1565,12 @@ build_lxc_zone_fwd() {
     run uci -q set "firewall.$_lzs.input=ACCEPT"
     run uci -q set "firewall.$_lzs.output=ACCEPT"
     run uci -q set "firewall.$_lzs.forward=ACCEPT"
+    log "[FW] 已写入 lxc zone"
+    return 0
+}
 
+# ---- fwd_rules：只写四条转发规则（lxc2lan / lxc2docker / lxc2vpn / lan2lxc）----
+build_fwd_rules() {
     _fw_rule() {
         _fr_sec="$1"; _fr_src="$2"; _fr_dst="$3"
         if ! run uci -q get "firewall.$_fr_sec" >/dev/null 2>&1; then
@@ -1585,14 +1594,9 @@ build_lxc_zone_fwd() {
     _fw_rule lxc2docker lxc docker
     _fw_rule lxc2vpn    lxc vpn
     _fw_rule lan2lxc    lan lxc
-    log "[FW] 已写入 lxc zone 与 4 条转发规则"
+    log "[FW] 已写入 4 条转发规则"
     return 0
 }
-
-# 两个节点共用上面的实现：verify 是分开的（分区域判、分规则判），
-# 但构建是同一个动作，拆开写会重复一大段 uci。任一处不符都整体写一遍，幂等。
-build_lxc_zone() { build_lxc_zone_fwd; }
-build_fwd_rules() { build_lxc_zone_fwd; }
 
 # SNAT builder：从容器网段到 LAN 地址的源地址改写（容器出网生命线）
 build_snat() {
@@ -2998,7 +3002,7 @@ _bouncer_missing_deps() {
     [ -z "$_BOUNCER_MISSING" ]
 }
 
-# 【v.180.113】原名 _rom_restore_bouncer 已不符实：v.180.111 之后它除了从 /rom 补回
+# 【v.180.114】原名 _rom_restore_bouncer 已不符实：v.180.111 之后它除了从 /rom 补回
 # 二进制，还会重建配置（_bouncer_uci_apply）、给空 api_key 重签（_bouncer_register_once）。
 # 名字改成 _bouncer_heal —— 它做的是"把这层修到能用"，而不是"拷贝文件"。
 # 从只读基座恢复 bouncer 依赖。与 _rom_restore_pkg 的唯一差别是配置那一项：

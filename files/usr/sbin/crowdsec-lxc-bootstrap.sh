@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.89】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.90】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-bootstrap（旁路由版）
 # 适用拓扑：单臂旁路由——所有物理网口桥进 br-lan，WAN/WAN6 一律禁用，
 #   出口走上游网关，本机不拨号、不跑 DHCP 服务（lan.ignore=1）。
@@ -20,7 +20,7 @@
 #     · 必备组件            lxc / smartdns：NETBASE 里只配不装；缺的收在末尾 DEPS 节点，
 #                             先探网络（网关/公网/DNS），通了才 apk/opkg 安装，装完立刻把
 #                             smartdns 配好；不通只记日志，下次引导重试（柔性，不中止）
-#     · /etc/config/smartdns  主段 enabled/port=53/cache_size；13 个上游
+#     · /etc/config/smartdns  主段 enabled/port=53/cache_size/serve_expired/prefetch_domain；13 个上游
 #                             （国内 9 UDP 走 Cn 组、境外 4 DoT 走 Out 组）
 #     · /etc/config/firewall  lxc zone + 3 条 forwarding / wan·lan input / SNAT /
 #                             docker zone + 3 条 rule（仅装了 dockerd 时）
@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.89"
+SCRIPT_VER="2026-10-27.180.90"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -744,6 +744,11 @@ verify_smartdns() {
     [ "$(run uci -q get "smartdns.$_vsd_seg.enabled" 2>/dev/null)" = "1" ] || return 1
     [ "$(run uci -q get "smartdns.$_vsd_seg.port" 2>/dev/null)" = "53" ] || return 1
     [ "$(run uci -q get "smartdns.$_vsd_seg.cache_size" 2>/dev/null)" = "32768" ] || return 1
+    # serve_expired / prefetch_domain 决定「过期照样秒回 + 后台预取」。
+    # 不校验的话：设备上是 0 时 verify 仍判就绪、不会进 build，开关永远纠正不过来
+    # （build 里是写死的 1，所以只有「校验 + 重建」才能把旧机器拉齐）。
+    [ "$(run uci -q get "smartdns.$_vsd_seg.serve_expired" 2>/dev/null)" = "1" ] || return 1
+    [ "$(run uci -q get "smartdns.$_vsd_seg.prefetch_domain" 2>/dev/null)" = "1" ] || return 1
     _vsd_have=""
     _vsd_cnt=0
     for _vsd_s in $(run uci -q show smartdns 2>/dev/null | grep -E '=server$' | cut -d. -f2 | cut -d= -f1); do

@@ -1,5 +1,5 @@
 #!/bin/bash
-# 【v.180.79】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.78】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 source shell/custom-packages.sh
 source shell/switch_repository.sh
 echo "第三方软件包: $CUSTOM_PACKAGES"
@@ -28,36 +28,25 @@ for _cf in /home/build/immortalwrt/custom/*; do
 done
 
 if [ -z "$CUSTOM_PACKAGES" ]; then
-  echo "⚠️ 未选择 任何第三方软件包"
+  echo "⚪️ 未选择 任何第三方软件包"
 else
-  # ============= 同步第三方插件库 =============
-  # 同步第三方软件包仓库 run/ipk（fork 自 wukongdaily/store）
-  echo "🔄 正在同步第三方软件包仓库 Cloning run file repo..."
-  git clone --depth=1 https://github.com/xiealon/store.git /tmp/store-run-repo \
-      || { echo "::error::clone xiealon/store 失败，检查 GitHub 可达性"; exit 1; }
+  echo "🔄 正在同步第三方软件仓库 Cloning run file repo..."
+  git clone --depth=1 https://github.com/wukongdaily/store.git /tmp/store-run-repo
 
-  # 拷贝 run/x86 下所有 run 文件和 ipk 文件 到 extra-packages 目录
   mkdir -p /home/build/immortalwrt/extra-packages
   cp -r /tmp/store-run-repo/run/x86/* /home/build/immortalwrt/extra-packages/
 
   echo "✅ Run files copied to extra-packages:"
   ls -lh /home/build/immortalwrt/extra-packages/*.run
-  # 解压并拷贝ipk到packages目录
   sh shell/prepare-packages.sh
   ls -lah /home/build/immortalwrt/packages/
-  # 解压完核验包名，报告直接进日志；只报告不拦构，真会拦的是 opkg 的 Unknown package
-  if command -v python3 >/dev/null 2>&1; then
-    python3 shell/audit-package-names.py --dir /home/build/immortalwrt/packages \
-      --list /home/build/immortalwrt/shell/custom-packages.sh || true
-  else
-    echo "⚠️ 环境无 python3，跳过包名核验"
-  fi
 fi
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - 开始构建固件..."
 
 PACKAGES=""
 PACKAGES="$PACKAGES curl"
+PACKAGES="$PACKAGES -dnsmasq dnsmasq-full"
 PACKAGES="$PACKAGES luci-i18n-diskman-zh-cn"
 PACKAGES="$PACKAGES luci-i18n-firewall-zh-cn"
 PACKAGES="$PACKAGES luci-theme-argon"
@@ -91,19 +80,6 @@ else
     echo "⚪️ 未选择 luci-app-openclash"
 fi
 
-if echo "$PACKAGES" | grep -q "luci-app-ssr-plus"; then
-    echo "✅ 已选择 luci-app-ssr-plus，添加 mihomo core"
-    mkdir -p files/usr/bin
-    MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/v1.19.24/mihomo-linux-amd64-compatible-v1.19.24.gz"
-    wget -qO- "$MIHOMO_URL" | gzip -dc > files/usr/bin/mihomo
-    [ -s files/usr/bin/mihomo ] || { echo "::error::mihomo 内核下载失败: $MIHOMO_URL"; exit 1; }
-    chmod +x files/usr/bin/mihomo
-    echo "✅ 已下载 mihomo core: $(stat -c%s files/usr/bin/mihomo) bytes"
-    ls -lah files/usr/bin
-else
-    echo "⚠️ 未选择 luci-app-ssr-plus"
-fi
-
 # 【v.108.71】SSR Plus → Clashoo。
 # 原来这段在 PACKAGES 里出现 luci-app-ssr-plus 时，把 mihomo 内核单独下到 files/usr/bin/mihomo。
 # clashoo 不需要这一步：它的主包已经把 mihomo 打进去了
@@ -118,7 +94,7 @@ if echo "$PACKAGES" | grep -q "clashoo"; then
     if [ -z "$_cl_ipk" ] || [ -z "$_cl_luci" ]; then
         echo "::error::PACKAGES 里选了 clashoo，但 packages/ 下缺包（clashoo=$_cl_ipk luci=$_cl_luci）——store 的 run 没解出 ipk"
         ls -la packages/ 2>/dev/null || true
-        echo "::error::预期来自 CloudRunFilesBuilder 的 extra 标签：clashoo_x86_64.run"
+        echo "::error::预期来自 wukongdaily/store 的 run/x86/clashoo_2026.05.15_x86_64.run"
         exit 1
     fi
     echo "✅ clashoo 就位: $_cl_ipk + $_cl_luci（自带 mihomo 内核，不再单独下载）"
@@ -247,6 +223,35 @@ echo "==> 已确保 CrowdSec 引导脚本可执行"
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Building image with the following packages:"
 echo "$PACKAGES"
+
+# 【v.180.120】把仓库里的自检脚本铺进固件。
+# 刷机后 /rom 里就有这批文件的只读基准，guard 的目录级保护才比得出、也才补得回。
+# 放 /usr/share（只读数据位）而不是 /usr/sbin，免得和真正的可执行命令混在一起。
+#
+# 分两组：
+#   crowdsec-tests/       只读断言类，跑起来不改现场
+#   crowdsec-tests/danger 会写 uci 或注入损坏的那几个，动之前先看 README
+mkdir -p files/usr/share/crowdsec-tests/danger
+_t_n=0
+_t_d=0
+for _t in tests/*; do
+    [ -f "$_t" ] || continue
+    case "${_t##*/}" in
+    probe_netsafe.sh|probe_v10832.sh|test_bp_*)
+        cp -a "$_t" files/usr/share/crowdsec-tests/danger/ || exit 1
+        _t_d=$((_t_d + 1))
+        ;;
+    *)
+        cp -a "$_t" files/usr/share/crowdsec-tests/ || exit 1
+        _t_n=$((_t_n + 1))
+        ;;
+    esac
+done
+chmod 755 files/usr/share/crowdsec-tests/*.sh files/usr/share/crowdsec-tests/danger/*.sh 2>/dev/null || true
+chmod 644 files/usr/share/crowdsec-tests/*.py 2>/dev/null || true
+# 空目录会被 make image 静默丢掉，铺不出东西就别往下走
+[ "$_t_n" -gt 0 ] || { echo "::error::自检脚本一个都没铺进去（tests/* 为空？）"; exit 1; }
+echo "==> 自检脚本已铺进固件：只读 $_t_n 个，danger $_t_d 个"
 
 make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE
 

@@ -64,6 +64,9 @@ _v() { sed -n 's/^SCRIPT_VER="\(.*\)"$/\1/p' "$1" | head -n1; }
 ck "R35.1l 探针版本号与 bootstrap 一致（同批构建同版本）" \
    "$(_v "$PR")" \
    "$(_v "$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh")"
+ck "R35.1n rc.local 与 init.d 也是同一个号（五文件口径）" \
+   "$(_v "$REPO/files/etc/rc.local")|$(_v "$REPO/files/etc/init.d/crowdsec-lxc-probe")" \
+   "$(_v "$PR")|$(_v "$PR")"
 ck "R35.1m 探针版本号格式合法" \
    "$(sed -n 's/^SCRIPT_VER="\([0-9][0-9.-]*\)"$/ok/p' "$PR")" "ok"
 

@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.103"
+SCRIPT_VER="2026-10-27.180.104"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -5667,37 +5667,24 @@ main() {
     fi
 
     # 【v.180.85】lxc 缺失不做硬失败：容器相关的每个节点都要 lxc-* 命令，硬跑只会
-    # 第一个节点就 exit 1，把整轮引导带走 —— 连末尾「网络好了再装 lxc」都到不了。
-    # 这种机器只跑 NETBASE + DEPS：网络基线照常校准，组件在末尾按需安装。
+    # 第一个节点就 exit 1，把整轮引导带走。
+    # 【v.180.104】缺 lxc 时这一轮跑「Ⅰ 网络 11 节点 + Ⅱ pkg_base」，两条出路：
+    #   · pkg_base 从 /rom 补齐 → 末段看到 lxc-start 在，恢复完整组链接着跑；
+    #   · /rom 里也没有   → 只留网络基线落盘，本轮到此刻收工，下次开机再试。
+    # 判据仍是 verify-first：pkg_base 先 _pkg_missing_all，缺了才逐个文件拷，
+    # 已就位时零写入、零扫描。
     # 裁剪方式与 --net-only 同源：只改 GROUP_SEQ 不够，dag_order 会遍历整个 DAG_NODES
     # 并校验归属组是否在 GROUP_SEQ 里，所以 DAG_NODES 必须同步收窄。
-    #
-    # 【v.180.103】裁剪之前先试一次只读基座恢复 —— 否则 Ⅱ 阶段形同虚设：
-    #   lxc 缺了就被裁掉，而 pkg_base 正是被裁的那个节点，它永远没机会执行 /rom 恢复。
-    #   这里跑的是纯文件拷贝（幂等、不写 uci、不碰 /etc/config、不联网），
-    #   所以提前到组链之前做，不会破坏「Ⅰ 先配网络、Ⅱ 再查组件」的配置语义。
-    #   两级判据：先恢复 → 再看命令在不在；/rom 里也没有才降级为「只跑网络基线」。
-    if [ "$NET_ONLY" != "1" ]; then
-        if ! command -v lxc-start >/dev/null 2>&1; then
-            log "[PKG] lxc 不在位（Ⅱ 阶段前置自检），先试只读基座 $ROMDIR"
-            _rom_restore_lxc \
-                || log "[PKG] 只读基座里没有 lxc 的安装清单（$ROMDIR/usr/lib/opkg/info/lxc-*.list）"
-            hash -r 2>/dev/null || true
-        fi
-        if ! _smartdns_installed; then
-            log "[PKG] smartdns 不在位（Ⅱ 阶段前置自检），先试只读基座 $ROMDIR"
-            _rom_restore_smartdns \
-                || log "[PKG] 只读基座里没有 smartdns 的安装清单（$ROMDIR/usr/lib/opkg/info/smartdns.list）"
-            hash -r 2>/dev/null || true
-        fi
-    fi
     _LXC_READY=1
     _FULL_DAG=""
     _FULL_SEQ=""
     _FULL_NETBASE=""
     if [ "$NET_ONLY" != "1" ] && ! command -v lxc-start >/dev/null 2>&1; then
         _LXC_READY=0
-        # 完整组链留底：万一运行期 lxc 被手工补上，末段还能恢复它接着跑容器流程。
+        # pkg_base 在本轮降为柔性：它只负责「尽力从 /rom 装回」，
+        # 装不回来属于固件不合规，但网络基线已经配好，不该把整轮带走。
+        SOFT_NODES="$SOFT_NODES pkg_base"
+        # 完整组链留底：恢复成功后末段用它把容器流程接着跑完。
         _FULL_DAG="$DAG_NODES"
         _FULL_SEQ="$GROUP_SEQ"
         _FULL_NETBASE="$NETBASE_NODES"
@@ -5705,12 +5692,11 @@ main() {
         for _lx_n in $DAG_NODES; do
             case "$(eval "echo \$NODE_GROUP_$_lx_n")" in
                 NETBASE)
-                    # lxc_auto 与 pkg_base 必须摘掉：
-                    #   · lxc_auto 验的是 lxc-auto 包带来的服务脚本，包不在时必然 return 1；
-                    #   · pkg_base 是必备组件在位验证，lxc 不在时必然 hard exit 1。
-                    # 留着任一个，「缺 lxc 不硬失败」就等于没做。
+                    # lxc_auto / smartdns 必须摘掉：它们要 lxc-auto 的服务脚本和
+                    # smartdns 二进制，Ⅱ 恢复成功之前跑必然失败（成功后由末段重跑完整链补上）。
+                    # pkg_base 必须保留 —— 它正是 Ⅱ「从 /rom 装回」的执行者，剔掉它 Ⅱ 永远没机会跑。
                     case "$_lx_n" in
-                        lxc_auto|pkg_base) continue ;;
+                        lxc_auto|smartdns) continue ;;
                     esac
                     _lx_dag="$_lx_dag $_lx_n"
                     ;;
@@ -5721,7 +5707,7 @@ main() {
         _lx_base=""
         for _lx_n in $NETBASE_NODES; do
             case "$_lx_n" in
-                lxc_auto|pkg_base) continue ;;
+                lxc_auto|smartdns) continue ;;
             esac
             _lx_base="$_lx_base $_lx_n"
         done

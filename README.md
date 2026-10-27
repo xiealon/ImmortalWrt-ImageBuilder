@@ -54,23 +54,23 @@ Docker、LXC、CrowdSec 容器都已锁定为内置（纯 X86 平台，没有「
 **⑧ 抢引导锁**
 `mkdir` 原子锁。残留锁（mtime 超 30 分钟，被 kill -9 或断电留下）会被强夺后继续，避免"一次异常永久不再引导"。锁在，说明上一次还在跑，本次跳过。
 
-**⑨ bootstrap 八组链式置位**
-按 `PREP → INSTALL → CAPIBLOCK → BOOT → LOGCONF → LAPI → BOUNCERVERIFY → ENROLL` 顺序，每组执行前校验所有前置组已置位。组内每个小步骤都是**先验证、缺了才构建、构建后复核一次**，复核不过即 hard 终止。全组通过才置位。
+**⑨ bootstrap 十一组链式置位**
+按 `NETBASE → INSTALL → PREP → CAPIBLOCK → BOOT → LOGCONF → LAPI → BOUNCERVERIFY → DEPS → SMARTCHK → ENROLL`（`GROUP_SEQ` 定序）执行，每组开跑前校验所有前置组已置位。组内每个节点都是**先验证现场、达标就零写入、不达标才构建**。构建失败分两种处置：结构性节点（`_structurally_broken`）失败直接整机重装，软节点（`bouncer_verify` / `enroll` / `deps`）失败只记 failed 继续跑。复核统一放在 flush 之后与开机后，**不在 build 后即时复核**。
 
-**⑩ PREP / INSTALL**
-容器启动前的全部静态准备（路由器网桥、容器网络、cgroup 挂载、防火墙规则，共 18 个小步骤）、解压 rootfs、迁移镜像、校验容器 config。
+**⑩ NETBASE（14 节点）**
+网络基线 11 项：`br_lan_ports` `lan_static` `dhcp_ignore` `bridge` `lxc_zone` `fwd_rules` `lan_input` `snat` `ip_forward` `svc_bind` `docker_fw`；`pkg_base` / `lxc_auto` 负责缺包时从 `/rom` 本地装回（不联网）；`smartdns` 写 13 条上游并让 dnsmasq 交还 53。
 
-**⑪ CAPIBLOCK / BOOT**
-容器启动前把 `online_client` 停用（`config.yaml` 只在 crowdsec 启动时读一次，启动后再改等于没改），然后唯一一次开机。
+**⑪ INSTALL / PREP / CAPIBLOCK / BOOT**
+`INSTALL` 三节点：迁移校验镜像、解压 rootfs、写容器 config；`PREP` 四节点：容器网络、cgroup 挂载、开机链、resolv.conf；`CAPIBLOCK` 在开机前停用 `online_client`（`config.yaml` 只在 crowdsec 启动时读一次，启动后再改等于没改）；`BOOT` 依赖 `snat`，没 SNAT 不启动，全程唯一一次开机。
 
-**⑫ LOGCONF / LAPI / BOUNCERVERIFY / ENROLL**
-宿主机日志推送 + 容器内采集解析（用标记日志验入库）、从容器内 `cscli` 取 LAPI 填入路由器 bouncer、验证 bouncer 列表真生效后才放开 CAPI、最后做 Console 账号绑定。
+**⑫ LOGCONF / LAPI / BOUNCERVERIFY / DEPS / SMARTCHK / ENROLL**
+宿主机日志推送 + 容器内采集解析（用标记日志验入库）、从容器内 `cscli` 取 LAPI 填入路由器 bouncer、验证 bouncer 真在拉（看 `last_pull` 新鲜度）才放开 CAPI、`DEPS` 只验不装（网络是否通 / lxc 与 smartdns 是否就位）、`SMARTCHK` 验 smartdns 运行态（进程 / 53 监听 / 容器内解析）、最后 `ENROLL` 做 Console 账号绑定 —— **全程唯一联网点**。
 
 > **为什么 CAPIBLOCK 一定要在 BOOT 之前**：`config.yaml` / `acquis` / `resolv.conf` / 网络文件
 > 都是 crowdsec 与 systemd 启动时读一次。启动后再改，不重启就不生效——流程里所有
 > 「改静态配置」的步骤必须排在启动之前。
 
-> **组间只保留真实存在的硬顺序**：`PREP+INSTALL+CAPIBLOCK → BOOT → LOGCONF/LAPI → BOUNCERVERIFY → ENROLL`。
+> **组间只保留真实存在的硬顺序**：`NETBASE → INSTALL → PREP → CAPIBLOCK → BOOT → LOGCONF/LAPI → BOUNCERVERIFY → DEPS → SMARTCHK → ENROLL`。
 > `LOGCONF` 与 `LAPI` 之间没有依赖，谁先谁后都行；把它们串成一条直线只是为了日志好读。
 
 ### 核心脚本防篡改（`crowdsec-guard.sh`）
@@ -111,9 +111,9 @@ uci 配置。bootstrap 的 `_drop_enroll_key` 在绑定成功后会删 enroll ke
 
 ---
 
-# 八组链式置位（旁路由锁定版）
+# 十一组链式置位（旁路由锁定版）
 
-![八组链式置位](docs/bp-eight-group-flow.png)
+![十一组链式置位](docs/bp-eleven-group-flow.png)
 
 ## LAPI 组细部：取 LAPI → 填入 bouncer → 重启宿主机服务
 
@@ -2266,6 +2266,71 @@ v.108.53 的「永不自动重试」有个无法接受的副作用：**网页上
 
 * 恢复方式从「删文件」变成「重启设备」，不需要 SSH。
 * 时间戳文件只用于排查，删不删都不影响判定。
+
+## v.180.111 ~ v.180.113：bouncer 配置判据升级、从 `/rom` 恢复退场、命名清理
+
+### 先说被撤回的方案（写在文档里，防止复活）
+
+v.180.110 的做法是：`/etc/config/crowdsec` 缺失时从 `/rom` 拷出厂版，再打一行醒目告警
+「这是出厂版，请核对」。看着像"保证能启动"，实际更糟 —— 出厂版是：
+
+```
+enabled '0'              ← bouncer 根本不跑
+api_key ''               ← key 空，拉不到决策
+api_url 'http://localhost:8080/'
+list interface 'eth1'    ← 实机是 br-lan
+```
+
+拷过去之后进程不启动，`last_pull` 不动，探针只看到"停滞"却看不到原因，比文件缺失更隐蔽。
+**方案整体撤回。**
+
+### v.180.111：判据从「文件在不在」改成「配置对不对」
+
+- 新增 `_bouncer_cfg_ok`，四项同时成立才算达标：有 `config crowdsec` 段 / `enabled '1'` /
+  `api_url` 为 `http://10.1.0.10:8080/` / `api_key` 非空。
+- `_bouncer_missing_deps` 的判据由 `[ -f /etc/config/crowdsec ]` 换成 `_bouncer_cfg_ok`。
+- `_bouncer_heal` 里文件不存在就先 `: > /etc/config/crowdsec` 占位，再走 `_bouncer_uci_apply`
+  按标准字段重建；`api_key` 仍为空则 `_bouncer_register_once` + `_bouncer_service_restart`。
+- **删掉 `cp -a "$ROMDIR$_rbc_cfg"`** —— 不再有任何路径把出厂版配置搬到运行时。
+
+真机验收（2026-10-27，24.10.6 / r33869）：
+
+| 项 | 结果 |
+|---|---|
+| 脚本体积 | 338363 B |
+| `cfg_ok` | YES |
+| `missing`（正常态） | 空 |
+| `missing`（注入出厂版后） | ` crowdsec配置` |
+| 重建日志 | `[bouncer] 配置已按标准字段重建（api_url=10.1.0.10:8080 / enabled=1 / interface=br-lan）` |
+| 重注册日志 | `[bouncer] api_key 为空，已重新注册并写入` |
+| 连跑两遍 | 幂等，第二遍零写入 |
+| `last_pull` | `14:40:02Z → 14:41:41Z` 持续推进 |
+| 进程 | `pidof cs-firewall-bouncer` = 10256 |
+
+### v.180.112：`_sd_missing_deps` 名不符实
+
+那个函数只查 lxc 相关包，却挂着 `sd`（smartdns）前缀。改名 `_lxc_missing_deps`，
+标志位 `_SD_MISSING` → `_LXC_MISSING`。纯改名，零逻辑改动。
+
+### v.180.113：四项命名清理
+
+| 旧名 | 新名 | 处数 | 理由 |
+|---|---|---|---|
+| `_rom_restore_bouncer` | `_bouncer_heal` | 4 | 已经不只"从 /rom 恢复"，含配置重建与重签 |
+| `_bs_drop` / `_bs_err` | `_brs_drop` / `_brs_err` | 4 + 5 | 与全局标志 `_bs_flag_*` 撞前缀 |
+| `_bsu_` | `_sdu_` | 48 | 视觉上像 `_bs_` + `u_`，容易读错 |
+| `_md_c` | `_lx_c` | 3 | 旧 sd 命名残留 |
+
+同样零逻辑改动：`if/fi`、`case/esac`、`do/done` 计数与改名前完全一致。
+
+### 一个容易误解的点：`/rom` 恢复 ≠ 脚本负责装回
+
+`firstboot` 只清 `/overlay`，`/rom`（squashfs 只读）不动。所以刷机或 `firstboot` 之后，
+**所有软件包和旧脚本自己就回来了**，不需要脚本"装回"。真正需要 `_rom_restore_pkg` 的只有
+一种情况：运行时被 `opkg remove` 打上了 whiteout。
+
+配套风险：`/rom/usr/sbin/crowdsec-lxc-bootstrap.sh` 是构建镜像那一刻的版本（当前 286834 B，
+Apr 22 2026），比运行副本旧。要根治只能重新构建镜像，脚本侧改不动它。
 
 # crowdsec 引导流程图
 

@@ -254,8 +254,17 @@ ck "R34.50 enroll 前先等 DNS 就绪（5s 够用的前提，不能被删）" \
    "$(grep -c '_wait_capi_net 30' "$BS")" "1"
 
 echo "===== R34k. 版本号 ====="
-ck "R34.51 版本推进到 180.78" \
-   "$(grep -c 'SCRIPT_VER="2026-10-24.180.78"' "$BS")" "1"
+# 不再钉死具体版本号（钉死就成负资产，每次升级都要改测试），
+# 改为「三个脚本完全一致」—— 这才是真要求：同一次构建出来的三个脚本必须同版本，
+# 真机上 grep 一眼就能确认刷的是哪批。
+_v() { sed -n 's/^SCRIPT_VER="\(.*\)"$/\1/p' "$1" | head -n1; }
+_VER_BP=$(_v "$BS")
+_VER_PR=$(_v "$REPO/files/usr/sbin/crowdsec-lxc-probe.sh")
+_VER_GD=$(_v "$REPO/files/usr/sbin/crowdsec-guard.sh")
+ck "R34.51 三个脚本版本号一致（bootstrap / probe / guard）" \
+   "$_VER_BP|$_VER_PR|$_VER_GD" "$_VER_BP|$_VER_BP|$_VER_BP"
+ck "R34.51b 版本号已填且格式合法" \
+   "$(sed -n 's/^SCRIPT_VER="\([0-9][0-9.-]*\)"$/ok/p' "$BS")" "ok"
 
 echo "------------------------------------------------------------------"
 echo "R34 RESULT: $R 项失败"

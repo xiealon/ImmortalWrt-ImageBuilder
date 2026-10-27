@@ -2493,6 +2493,68 @@ rootfs 资产（`/etc`、`crowdsec` 二进制等），不看 DNS。
 `tests/probe_boot_heal.sh`（13 项）覆盖：缺失补回含可执行位、**在位内容零改动**、
 两边都没有时明说要重刷、无执行位视同缺失。
 
+## v.180.120：把 tests/ 铺进固件，由 guard 整目录保护
+
+### 为什么要做这件事
+
+`tests/` 里 29 个脚本一直是**开发期工具**——构建只打包 `files/`，它们进不了固件，
+所以刷机后在路由器上没法跑任何一条验收。想核对「这台机器到底正常不正常」，
+只能把仓库拷过去。
+
+现在构建期把它们铺到 `/usr/share/crowdsec-tests/`，刷机后本机就能自检。
+
+### 谁保护它们
+
+`guard` 新增 `GUARD_DIRS`（默认 `/usr/share/crowdsec-tests`），做**整目录**保护：
+
+```sh
+_dir_sig() {   # 相对路径 + cksum，排序成一串
+    ( cd "$1" && find . -type f | sort | while read -r f; do
+        printf '%s %s\n' "$f" "$(cksum <"$f")"
+      done )
+}
+```
+
+一致 → 零动作；不一致 → 整目录按 `/rom` 换回，旧内容留一份 `.user-<时间戳>`。
+
+| 判据 | 说明 |
+|---|---|
+| 比路径 + 校验和 | 少一个、多一个、改一个字节，全都算不一致 |
+| **不比 mtime** | 刷机后 `/rom` 与运行副本时间戳必然不同；比时间会退化成「每轮重写整目录」——v.108.44 踩过这个坑（每分钟 6 个文件全重写） |
+| 只留最近一份备份 | 每轮堆一份，377 KB × N 轮能填满 flash |
+| 回读复核 | `cp -a` 返回成功 ≠ 真的在了（overlay 白out 的老问题），复完再算一次签名 |
+
+为什么不像其他文件那样逐条列进 `GUARD_FILES`：29 条要手工维护，新增一个测试就得回来补一条，早晚漏。
+
+### 为什么分两个目录
+
+| 位置 | 内容 | 数量 |
+|---|---|---|
+| `usr/share/crowdsec-tests/` | 只读断言类，跑起来不改现场 | 23 |
+| `usr/share/crowdsec-tests/danger/` | 会写 uci 或注入损坏，动之前先看 README | 6 |
+
+`danger/` 里是：`probe_netsafe.sh`、`probe_v10832.sh`、`test_bp_consistency.sh`、
+`test_bp_dag.sh`、`test_bp_net.sh`、`test_bp_reset.sh`。
+**它们在真机上跑会改 `/etc/config`、注入人为损坏**——这是设计用途（验证自愈），
+但别在生产时段手滑跑一遍。
+
+### 旧固件不受影响
+
+`/rom/usr/share/crowdsec-tests` 不存在时，循环第一行 `[ -d ... ] || continue` 就跳过，
+零动作、零日志。所以这套机制只在**刷过 v.180.120 固件之后**才生效。
+
+### 新增的机械检查
+
+| 检查 | 内容 |
+|---|---|
+| `S130` | `GUARD_FILES` 必须覆盖探针自身 + 它的启动链（`rc.local`、`init.d`） |
+| `S131` | `GUARD_FILES` 里每个文件，`files/` 里必须真的存在（否则保护空跑） |
+| `S132` | `GUARD_DIRS` 的路径 == 构建线铺的路径；且铺不进去时构建必须失败 |
+| `R36.1~R36.5` | `tests/guard_tests_dir.sh`，36 项：签名正确性、改/删/多文件的判定、旧固件跳过 |
+
+`tests/guard_tests_dir.sh` 里最该盯的一条是 **R36.3d：只改 mtime 时签名不变**——
+这条一旦挂了，就说明有人把判据改成了比时间，会立刻退化成每轮重写。
+
 ## v.180.119：bootstrap 改回覆盖式复原，并按需补齐构建包
 
 ### 为什么可以照抄 `_guard_run` 了

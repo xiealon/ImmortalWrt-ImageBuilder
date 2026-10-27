@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.108"
+SCRIPT_VER="2026-10-27.180.109"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -2978,6 +2978,13 @@ _bouncer_missing_deps() {
                 _BOUNCER_MISSING="$_BOUNCER_MISSING nft(内核)" ;;
         esac
     fi
+    # 配置文件：init 脚本靠它生成 /var/etc 下的 yaml，缺了 bouncer 重启即起不来。
+    # 【v.180.109】v.180.108 只查了三个可执行文件，漏了这一项 —— 结果配置被删时
+    # 判「依赖齐全」，整个恢复块被跳过，_rom_restore_bouncer 里那段特判永远跑不到。
+    # 真机实测：rm /etc/config/crowdsec 后 _bouncer_rule_sane 静默无输出、文件不回来。
+    # 它必须单独判，不能指望 _rom_restore_pkg：那个函数对 /etc/config/* 与 conffiles
+    # 一律跳过（不覆盖用户改动），配置恢复只由 _rom_restore_bouncer 的特判负责。
+    [ -f /etc/config/crowdsec ] || _BOUNCER_MISSING="$_BOUNCER_MISSING /etc/config/crowdsec"
     [ -z "$_BOUNCER_MISSING" ]
 }
 

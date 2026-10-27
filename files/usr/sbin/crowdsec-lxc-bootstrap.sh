@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.88】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.89】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-bootstrap（旁路由版）
 # 适用拓扑：单臂旁路由——所有物理网口桥进 br-lan，WAN/WAN6 一律禁用，
 #   出口走上游网关，本机不拨号、不跑 DHCP 服务（lan.ignore=1）。
@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.88"
+SCRIPT_VER="2026-10-27.180.89"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -1208,6 +1208,8 @@ build_deps() {
         if _sd_install_missing "$_bd_c"; then
             log "[DEPS] $_bd_c 安装完成"
             _bd_new="$_bd_new $_bd_c"
+            # 本轮刚把 lxc 补上的标记：main 据此恢复完整组链，当场把容器装起来。
+            [ "$_bd_c" = "lxc" ] && _LXC_INSTALLED_NOW=1
         else
             log "[DEPS] $_bd_c 安装失败（下次引导重试）"
         fi
@@ -1218,17 +1220,26 @@ build_deps() {
             if _smartdns_installed; then
                 if build_smartdns; then
                     _bs_flag_set "_dirty_smartdns" B
-                    log "[DEPS] smartdns 已按 9 国内 + 4 境外上游配好，随本轮 flush 接管 53"
+                    log "[DEPS] smartdns 已按 9 国内 + 4 境外上游配好，立即提交并接管 53"
+                    # 流程图 Ⅲ②：安装 smartdns 并配置 → 检查配置。
+                    # flush 内部会 commit + 重启 dnsmasq/smartdns 并等待 SD_RELEASE/SD_SETTLE，
+                    # 所以这里 flush 完直接复查，读到的就是生效后的现场。
+                    flush_uci || log "[DEPS] smartdns 提交/重载有失败项，见上方 [flush] 行"
+                    if verify_smartdns; then
+                        log "[DEPS] smartdns 配置检查通过（主段 port=53 / 13 上游 / dnsmasq 已让出 53）"
+                    else
+                        log "[DEPS] smartdns 配置检查未通过，下一轮引导会再修一次"
+                    fi
                 else
                     log "[DEPS] smartdns 配置写入失败，保留 dnsmasq 原样，下次引导重试"
                 fi
             fi
             ;;
     esac
-    # 装了 lxc 也不在本轮接着跑容器：容器类节点已因 lxc 缺失整体裁掉（见 main），
-    # 包管理器已铺好自启软链，下次引导从 INSTALL 组一路接管。
+    # 装了 lxc：本轮就地继续，不留给下次开机 —— main 看到 _LXC_INSTALLED_NOW 会恢复
+    # 完整组链（INSTALL → … → BOOT → … → ENROLL）再跑一遍。
     case " $_bd_new " in
-        *" lxc "*) log "[DEPS] lxc 已安装，容器流程留给下次引导（本轮跳过容器相关组）" ;;
+        *" lxc "*) log "[DEPS] lxc 已安装：稍后恢复完整组链，当场继续容器安装配置与 enroll" ;;
     esac
     # 装完再核一次：还有缺的就不让 enroll 往下走（半截环境注册必然失败，
     # 还会在中央端留下一个半死的实例）。仍然只是「本组未完成」，不中止引导。
@@ -5390,8 +5401,16 @@ main() {
     # 裁剪方式与 --net-only 同源：只改 GROUP_SEQ 不够，dag_order 会遍历整个 DAG_NODES
     # 并校验归属组是否在 GROUP_SEQ 里，所以 DAG_NODES 必须同步收窄。
     _LXC_READY=1
+    _LXC_INSTALLED_NOW=0
+    _FULL_DAG=""
+    _FULL_SEQ=""
+    _FULL_NETBASE=""
     if [ "$NET_ONLY" != "1" ] && ! command -v lxc-start >/dev/null 2>&1; then
         _LXC_READY=0
+        # 完整组链留底：DEPS 现场把 lxc 装上之后要立刻恢复它，接着跑容器流程。
+        _FULL_DAG="$DAG_NODES"
+        _FULL_SEQ="$GROUP_SEQ"
+        _FULL_NETBASE="$NETBASE_NODES"
         _lx_dag=""
         for _lx_n in $DAG_NODES; do
             case "$(eval "echo \$NODE_GROUP_$_lx_n")" in
@@ -5474,15 +5493,20 @@ if [ "$NET_ONLY" != "1" ] && [ ! -f "$TARBALL" ] && [ ! -f "$LEGACY_TARBALL" ] \
         exit 1
     fi
 
-    # ---- 阶段 1+2：8 个组链式调度（每组置位 GSET_<组>，后组执行前校验前置全部置位）----
-    _group_failed=""
-    # 清零要走 _bs_flag_clear：v.99 起置位值是 V:<ts>，写 0 是非空值、会被判成"已置位"
-    for _g in $GROUP_SEQ; do _bs_flag_clear "GSET_$_g"; done
-    for _g in $GROUP_SEQ; do
-        ensure_group "$_g"
-    done
+    # ---- 阶段 1+2：组链式调度（每组置位 GSET_<组>，后组执行前校验前置全部置位）----
+    # 抽成函数是因为 v.180.89 起这条链可能跑两遍：lxc 原先缺失时，DEPS 现场补装成功后
+    # 立刻回头把容器流程（含 enroll / last pull）走完，而不是留到下次开机。
+    _run_chain() {
+        _group_failed=""
+        # 清零要走 _bs_flag_clear：v.99 起置位值是 V:<ts>，写 0 是非空值、会被判成"已置位"
+        for _g in $GROUP_SEQ; do _bs_flag_clear "GSET_$_g"; done
+        for _g in $GROUP_SEQ; do
+            ensure_group "$_g"
+        done
+        flush_uci || _flush_rc=1
+    }
     _flush_rc=0
-    flush_uci || _flush_rc=1
+    _run_chain
 
     # ---- net-only 到此收工：PREP 跑完网络基线就结束，不进容器服务链 ----
     # 这一步必须放在 flush_uci 之后：commit / reload 在 flush_uci 里做，提前退出
@@ -5507,11 +5531,29 @@ if [ "$NET_ONLY" != "1" ] && [ ! -f "$TARBALL" ] && [ ! -f "$LEGACY_TARBALL" ] \
     # 去判失败（那会把「组件已补装成功」的机器记成失败，探针还会反复重跑）。
     # 网络基线与组件安装都已落盘（上面 flush 过），下次引导从 INSTALL 组正常接管。
     if [ "$_LXC_READY" = 0 ]; then
-        # 网络基线跑通了：ip_forward=1 是期望稳态，不能因为「这轮没装完容器」被
-        # 退出钩子还原成 0（那会把刚配好的旁路由转发关掉，整机不能上网）。
-        _bs_flag_on "GSET_NETBASE" && _NET_ONLY_OK=1
-        log "[DEPS] 本轮容器流程已跳过（lxc 原先不在位）：网络基线与组件安装已完成，下次引导继续"
-        exit 0
+        if [ "${_LXC_INSTALLED_NOW:-0}" = 1 ] || command -v lxc-start >/dev/null 2>&1; then
+            # 流程图 Ⅲ①：网络正常 → 不存在 lxc → 安装 lxc → 进行配置（含 enroll）→ last pull。
+            # 这里恢复完整组链当场再跑一遍：NETBASE 各节点 verify 直接通过（无写入），
+            # 真正干活的是 INSTALL → PREP → CAPIBLOCK → BOOT → … → ENROLL。
+            GROUP_SEQ="$_FULL_SEQ"
+            DAG_NODES="$_FULL_DAG"
+            NETBASE_NODES="$_FULL_NETBASE"
+            # deps 上一轮记的失败要抹掉，否则 enroll 会被「依赖 deps 失败」拦住；
+            # 它自己的置位也要清，重跑时重新判定。
+            _failed=""
+            _bs_flag_clear "_done_deps"
+            _bs_flag_clear "_dirty_deps"
+            _LXC_READY=1
+            dag_order
+            log "[DEPS] lxc 已就位：恢复完整组链，继续容器安装配置与 enroll"
+            _run_chain
+        else
+            # 网络异常/装不上：按流程图「跳过结束」。网络基线跑通了，ip_forward=1 是
+            # 期望稳态，不能因为「这轮没装完容器」被退出钩子还原成 0。
+            _bs_flag_on "GSET_NETBASE" && _NET_ONLY_OK=1
+            log "[DEPS] 本轮容器流程已跳过（lxc 仍不在位）：网络基线与组件安装已完成，下次引导继续"
+            exit 0
+        fi
     fi
 
     # 前置组（INSTALL / PREP / CAPIBLOCK / BOOT）任一未置位 → 容器内服务链无从谈起

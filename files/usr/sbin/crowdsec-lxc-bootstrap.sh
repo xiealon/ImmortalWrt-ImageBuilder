@@ -16,7 +16,7 @@
 #   脚本会写的东西（按配置面分）：
 #     · /etc/config/network   桥端口 / lan 静态地址 / 删 wan+wan6 段 / lxcbr0 段与地址
 #     · /etc/config/dhcp      lan.ignore（关 DHCP / RA / authoritative）
-#                             + 所有 dnsmasq 段 port=0（DNS 让给 smartdns）
+#                             + 所有 dnsmasq 段 port=0（DNS 让给 smartdns）+ bind_device=0（全接口监听）
 #     · 必备组件            lxc / smartdns：NETBASE 里只配不装；缺的收在末尾 DEPS 节点，
 #                             先探网络（网关/公网/DNS），通了才 apk/opkg 安装，装完立刻把
 #                             smartdns 配好；不通只记日志，下次引导重试（柔性，不中止）
@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.92"
+SCRIPT_VER="2026-10-27.180.93"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -748,6 +748,15 @@ verify_smartdns_main() {
     # 否则设备上若是 0，verify 直接判就绪、不进 build，开关永远纠正不过来。
     [ "$(run uci -q get "smartdns.$_vsm_seg.serve_expired" 2>/dev/null)" = "1" ] || return 1
     [ "$(run uci -q get "smartdns.$_vsm_seg.prefetch_domain" 2>/dev/null)" = "1" ] || return 1
+    # bind_device 只认「空」或「0」：空 = init 的默认 0，等价全接口；写成 1 时 init 会生成
+    # `bind [::]:53@br-lan` + `@lo`（SO_BINDTODEVICE 只收这两张网卡），容器拿 lxcbr0 的地址
+    # 来查就被丢掉 —— 端口看着是 53，实际一半来源不可达。
+    _vsm_bd=$(run uci -q get "smartdns.$_vsm_seg.bind_device" 2>/dev/null)
+    case "$_vsm_bd" in
+        ""|0) ;;
+        *) log "[SMARTDNS] bind_device=$_vsm_bd：监听被绑到具体网卡，容器/其他网段收不到"
+           return 1 ;;
+    esac
     return 0
 }
 
@@ -803,6 +812,22 @@ verify_smartdns() {
     for _vsd_dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
         [ "$(run uci -q get "dhcp.$_vsd_dm.port" 2>/dev/null)" = "0" ] || return 1
     done
+    # 运行态复核：uci 说 port=53 不等于真在 53 上听。init 把 uci 翻译成
+    #   /var/etc/smartdns/smartdns.conf，bind 行才是最终监听参数：
+    #       全接口 → bind [::]:53 / bind-tcp [::]:53
+    #       绑网卡 → bind [::]:53@br-lan / @lo
+    # 所以这里直接看生成物。conf 还没生成（从没启动过）时放行，交给 build 走一轮。
+    _vsd_conf=/var/etc/smartdns/smartdns.conf
+    if [ -f "$_vsd_conf" ]; then
+        run grep -qE '^bind(-tcp|-tls|-https)? ' "$_vsd_conf" 2>/dev/null || {
+            log "[SMARTDNS] 生成的 conf 里没有任何 bind 行"
+            return 1
+        }
+        if run grep -E '^bind(-tcp|-tls|-https)? ' "$_vsd_conf" 2>/dev/null | grep -q '@'; then
+            log "[SMARTDNS] conf 里 bind 带 @device（只绑具体网卡），容器/其他网段收不到"
+            return 1
+        fi
+    fi
     return 0
 }
 
@@ -1143,6 +1168,10 @@ build_smartdns_main() {
     # bind 不是 UCI 选项：init 脚本只读 port / bind_device，历史残留的 bind 不生效，
     # 只会让人误以为在控制监听地址，顺手清掉。
     run uci -q delete "smartdns.$_bsm_seg.bind" 2>/dev/null
+    # 监听全部接口：init 只在 bind_device=1 时才把 bind_device_name（默认 br-lan）拼进
+    # bind 行，还额外追加 lo。设 0 后 devices 为空 → 只生成 `bind [::]:53` /
+    # `bind-tcp [::]:53`，br-lan / lxcbr0 / docker0 一律可达。
+    run uci -q set "smartdns.$_bsm_seg.bind_device=0"
     run uci -q set "smartdns.$_bsm_seg.cache_size=32768"
     run uci -q set "smartdns.$_bsm_seg.serve_expired=1"
     run uci -q set "smartdns.$_bsm_seg.prefetch_domain=1"

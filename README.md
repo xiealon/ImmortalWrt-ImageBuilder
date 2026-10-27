@@ -2392,6 +2392,61 @@ _luci_smartdns_ok() {
 > 待办：真实设备上跑一次 `sh tests/luci_restore.sh` 复核；`tests/test_bp_reset.sh` 等结构测试
 > 依赖 `dash` 与 `mktemp -d`，在 Windows busybox 下跑不起来，只能在路由器上验。
 
+## v.180.117：探针补上 smartdns / 53 体检
+
+### 补的是一个一直存在的盲区
+
+探针原来只盯容器 `last_pull`。而 `last_pull` 取的是 LAPI 的时间戳，`api_url` 是
+**IP 直连**（`http://10.1.0.10:8080/`），**不查 DNS**。于是「53 没人应答」这类故障，
+探针完全看不见 —— 日志一路 `ok`，`SMARTCHK` 不跑，一直要等人发现网页打不开、去翻
+`/etc/resolv.conf` 才知道。典型成因就是上一条说的：在 LuCI 里把 smartdns 配置改坏。
+
+### 判据：只认本地故障
+
+| 现场 | 判定 | 动作 |
+|---|---|---|
+| `pidof smartdns` 为空 | 进程没了 | 计数 → 触发 |
+| `netstat -lnu` 无 `:53` | 端口没起 / `bind_device` 绑错网卡 | 计数 → 触发 |
+| 进程在、53 在听 | **算好** | 不动手 |
+
+第三行是刻意的：上游全挂、外网不通时，重跑引导**修不好**它，每轮触发只会刷日志、
+白撞冷却。所以判据里不写 `nslookup`、不比对上游表。
+
+### 与 last_pull 通道的关系
+
+- **共用** `_run_fix`（持锁 → 跑 bootstrap → 回收锁）。原来补印、全量体检、停滞三处
+  各写了一遍这段，`pid` 写进锁这个细节迟早会分叉，现在统一。
+- **不共用**计数与锁存：`P_DNS_BAD` / `P_DNS_FIX` / `P_DNS_TRIG` / `P_HUMAN_DNS` 全是
+  独立的。共用的话，修 DNS 会把「容器拉不动」的累计清零，反之亦然 —— 这正是
+  v.108.58 在 `P_HUMAN` / `P_HUMAN_PULL` 上踩过的坑。
+- **复验看现场不看退出码**：引导可能 `exit 0`（`sd_serve` 失败是 hard 终止在最后一步）
+  也可能 `exit 1` 而 DNS 其实已恢复，唯一可信的是再问一次 `_dns_ok`。
+
+### 状态键为什么叫 `dnsfix` / `dnshold`
+
+`_probe_load` 用 `sed -n 's/.*fail=\([0-9]*\).*/\1/p'` 这类**贪婪**表达式取值。
+新键只要含有旧键的字面量就会被顶掉：叫 `dns_fail` 含 `fail=`，叫 `dns_human` 含 `human=`
+—— 结果是「DNS 修复失败 2 次」把 last_pull 的失败计数改成 2。
+所以叫 `dnsfix` / `dnshold`。`tests/probe_dns_watch.sh` 里 R34.3e~g 用真实的一行状态
+和真实的表达式跑了一遍，确认各取各的。
+
+### 时间账（别按 3 分钟算）
+
+| 阶段 | 耗时 |
+|---|---|
+| 连续 3 轮不通过 | 120–180 s |
+| 跑一轮 bootstrap | 60–180 s |
+| smartdns restart 到 53 应答 | 2–3 s |
+| **真正恢复** | **约 3–6 分钟** |
+
+`PROBE_COOLDOWN=600`：首次自愈不成，10 分钟内不再试；`PROBE_FAIL_ALERT=5` 连续失败
+才写「需人工介入」并锁存停手（解除：修好重启探针，或删 `/tmp/crowdsec-probe.state`）。
+
+### 安全性
+
+`sd_serve` 失败走 `exit 1`，**不会**触发整机重装 —— `_structurally_broken` 只看
+rootfs 资产（`/etc`、`crowdsec` 二进制等），不看 DNS。
+
 # crowdsec 引导流程图
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)

@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.101"
+SCRIPT_VER="2026-10-27.180.103"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -690,11 +690,23 @@ SD_DNS_IPS="$SD_DNS_IP_CN $SD_DNS_IP_OUT"
 # 必然失败，一失败就 hard 终止，后面的容器流程一步都跑不到，连「等网络好了再装」都没机会。
 # 【v.180.99】脚本不再联网装包：
 #   · lxc / smartdns 由固件内置（构建期 PACKAGES 装进 /rom），装包这件事整个交给构建期；
-#   · pkg_base 退化为「必备组件在位验证」，并提到整条链第一个节点 ——
-#     缺包在第一步就停，不让后面十几步白跑；
+#   · pkg_base 退化为「必备组件在位验证」；
 #   · NETBASE.smartdns 照旧：已装就配对配置，缺包就放行（此时 pkg_base 已拦在前）。
 # docker 不再必选：路由上跑不跑 docker 是用户的选择，缺 dockerd 时 docker_fw 自己豁免。
+# 【v.180.103】整条链按五阶段归位（用户口径）：
+#   Ⅰ 配置网桥 / 网络接口 / 防火墙   —— NETBASE 前置 10 节点（br_lan_ports…docker_fw）
+#   Ⅱ 查 lxc + smartdns，缺则从 /rom 装回 —— pkg_base（+ lxc_auto 紧随其后）
+#   Ⅲ smartdns 配置                   —— NETBASE.smartdns
+#   Ⅳ crowdsec 配置与安装             —— INSTALL / PREP / CAPIBLOCK / BOOT / LOGCONF / LAPI / BOUNCERVERIFY
+#   Ⅴ 网络连通检测（到达 crowdsec）+ enroll —— DEPS / SMARTCHK / ENROLL
+#   联网只出现在 Ⅴ：Ⅴ 之前一律离线，包只在 /rom 与运行时文件系统之间搬。
+# 【v.180.102】pkg_base 的闸门从「只看 lxc」扩到「lxc 五件套 + smartdns」：
+#   · 两者都是固件该内置的东西，缺了都属于装机不合规，Ⅱ 阶段一次性说清；
+#   · 判据仍是「命令/文件真能用」而不是包名：lxc 看五件套，smartdns 看二进制 + init；
+#   · 缺任何一个都先走 /rom 文件级自愈（lxc→_rom_restore_lxc，smartdns→_rom_restore_smartdns）；
+#   · 自愈后仍缺才 hard exit 1。
 _SD_MISSING=""
+_PKG_MISSING=""
 
 # ---- 只读基座（/rom）文件级自愈（v.180.101）----
 # 前提：固件把 lxc / smartdns 编进 PACKAGES，于是 /rom 里有二进制，
@@ -764,6 +776,17 @@ _rom_restore_lxc() {
     return 0
 }
 
+# smartdns：单包 + 两个依赖（libpthread→libc / libopenssl3），走通用递归即可。
+# 与 lxc 的区别：没有「一堆 applet 各占一个包」的问题，所以不需要按通配符扫清单；
+# 反过来要显式判 .list 在不在 —— 不在说明这台机器的固件压根没编 smartdns，
+# 这种情况恢复不了，直接返回 1 让 pkg_base 把话说清楚。
+# /etc/config/smartdns 由 _rom_restore_pkg 统一跳过，配置交给 build_smartdns 按 uci 重写。
+_rom_restore_smartdns() {
+    [ -f "$ROMDIR/usr/lib/opkg/info/smartdns.list" ] || return 1
+    _rom_restore_tree smartdns
+    return 0
+}
+
 # smartdns 是否真在位：二进制 + init 脚本缺一不可（少了 init 就没法启停，等于没装）
 _smartdns_installed() {
     [ -x /usr/sbin/smartdns ] && [ -x /etc/init.d/smartdns ]
@@ -773,13 +796,29 @@ _smartdns_installed() {
 # 只读不写 —— verify / build 两侧都用它。
 # 五个命令逐一查：lxc-ls / lxc-info / lxc-attach 都是独立 applet 包（各自一个 ipk/apk），
 # 没有任何反向依赖会把它们拉进来；只查 lxc-start 会得出「装好了」的假阳性 —— v.180.99 修正。
-# 【v.180.100】smartdns 不在这里判：它在固件里，缺了由 NETBASE.smartdns 自己的 verify 报错。
+# 【v.180.100】smartdns 不在这里判：它由 _pkg_missing_all 合并，本函数只守 lxc 五件套。
 _sd_missing_deps() {
     _SD_MISSING=""
     for _md_c in lxc-start lxc-stop lxc-ls lxc-info lxc-attach; do
         command -v "$_md_c" >/dev/null 2>&1 || _SD_MISSING="$_SD_MISSING $_md_c"
     done
     [ -z "$_SD_MISSING" ]
+}
+
+# 必备组件总闸门（v.180.102）：lxc 五件套 + smartdns，全齐返回 0；否则返回 1，
+# 合并清单留在 _PKG_MISSING（如 "lxc-ls smartdns"）。只读不写，verify / build 共用。
+# 为什么合成一个函数而不是在两个地方各判一次：
+#   pkg_base 是 Ⅱ 阶段的唯一判据，它要回答的是「这台机器的固件到底合不合规」——
+#   只答一半会让「lxc 齐了但 smartdns 没了」的机器一路跑到 smartdns 节点才炸，
+#   那一节点已经是 Ⅲ（配置），届时缺的是二进制而不是配置，报错会指向错误的方向。
+_pkg_missing_all() {
+    _PKG_MISSING=""
+    _sd_missing_deps || _PKG_MISSING="$_SD_MISSING"
+    # 判据复用 _smartdns_installed（二进制 + init 两个都要可执行），不另立一套口径
+    if ! _smartdns_installed; then
+        _PKG_MISSING="${_PKG_MISSING:+$_PKG_MISSING }smartdns"
+    fi
+    [ -z "$_PKG_MISSING" ]
 }
 
 # smartdns 主配置段（config smartdns）的段名；没有则回空
@@ -1323,9 +1362,11 @@ SD_UPSTREAM_EOF
 build_smartdns() {
     # ① 配置之前先确保二进制在位：固件自带；万一被 opkg remove 遮掉了，
     #    从只读基座拷回来（不联网、不装包、不碰 opkg 数据库），然后照常写配置。
+    # 【v.180.102】pkg_base 已把 smartdns 纳入第 1 步闸门，正常路径到这里必然在位；
+    # 这段是二次兜底（中途被手工摘掉、或本节点被单独调用时），统一走 _rom_restore_smartdns。
     if ! _smartdns_installed; then
         log "[SMARTDNS] smartdns 不在位，先试只读基座 $ROMDIR"
-        _rom_restore_tree smartdns
+        _rom_restore_smartdns
         hash -r 2>/dev/null || true
         if ! _smartdns_installed; then
             log "[SMARTDNS] 只读基座也没有 smartdns：固件未内置该包（custom-packages.sh 第 79 行）"
@@ -1369,14 +1410,16 @@ _net_ready() {
 # 【v.180.98】DEPS 退化为「纯验证」：不装包、不写配置、不做任何落地改动。
 # 位置也从「网络基线之后」挪到「容器流程与 bouncer 校验之后、enroll 之前」——
 # 它是本轮的总闸门：网络通不通、lxc 与 smartdns 到底在不在，最后一次性交代清楚，
-# 然后才允许编 enroll。装包不再由脚本负责：固件自带，pkg_base 只做在位验证。
+# 然后才允许编 enroll。装包不再由脚本负责：固件自带，pkg_base（Ⅱ 阶段）只做在位验证。
+# 【v.180.103】本节点属 Ⅴ 阶段：它判的是「现在能不能真的够到 crowdsec」，所以网络三层是主体，
+# lxc 那 5 次 command -v 只是 enroll 前的断言式兜底（见下方日志括号里的说明）。
 verify_deps() {
     if ! _net_ready; then
         log "[DEPS] 网络不通（网关 / 公网 IP / DNS 至少一层没过）"
         return 1
     fi
     if ! _sd_missing_deps; then
-        log "[DEPS] lxc 命令不在位：$_SD_MISSING（pkg_base 已在第一步拦过，这里不该出现）"
+        log "[DEPS] lxc 命令不在位：$_SD_MISSING（pkg_base 已在 Ⅱ 阶段拦过，这里出现说明中途被摘）"
         return 1
     fi
     verify_smartdns_main || { log "[DEPS] smartdns 主段配置不符"; return 1; }
@@ -1393,33 +1436,47 @@ build_deps() {
     return 1
 }
 
-# ---- pkg_base：必备组件在位验证（v.180.99：从 INSTALL 组挪到整条链第一位）----
-# 为什么提到最前：lxc / smartdns 都由固件内置（构建期 PACKAGES 装进 /rom），
-# 脚本不再联网装包。缺包 = 固件不合规，在第一步就说清楚，不让后面十几步白跑。
-# 判据是「命令真能用」而不是「包名在列表里」：liblxc 在、lxc 壳在、applet 缺一个，
+# ---- pkg_base：必备组件在位验证 = Ⅱ 阶段（v.180.103 起排在网络基线之后）----
+# 位置口径（用户定的五阶段）：Ⅰ 配网桥/接口/防火墙 → Ⅱ 查 lxc+smartdns（缺则从 /rom 恢复）
+#   → Ⅲ smartdns 配置 → Ⅳ crowdsec 构建 → Ⅴ 网络连通检测 + enroll。
+# 所以本节点必须在 lxc_zone / fwd_rules / snat 等网络节点之后、lxc_auto 与 smartdns 之前：
+#   · 前面：网络配置一步都不需要 lxc，把它排在链首会让「先配网」这条前提不成立；
+#   · 后面：lxc_auto 要 lxc-auto 的服务脚本，smartdns 要二进制，都得等本节点恢复完。
+# 包的来源只有一处：固件内置（构建期 PACKAGES 装进 /rom）。脚本不联网装包。
+# 判据是「命令/文件真能用」而不是「包名在列表里」：liblxc 在、lxc 壳在、applet 缺一个，
 # 一样跑不起来 —— 见 _sd_missing_deps 的五件套。
+# 【v.180.102】闸门扩到 smartdns：判据 _pkg_missing_all（lxc 五件套 + smartdns 二进制/init），
+# 两项都要，缺哪项就在日志里点名哪项。
 # 只读不写：本节点不装包、不写 uci、不碰容器。
 verify_pkg_base() {
-    _sd_missing_deps
+    _pkg_missing_all
 }
 
+# 缺件才动，缺什么补什么：lxc 走全家桶通配，smartdns 走单包递归，互不连坐。
+# 全程只从 /rom 拷文件：不联网、不 opkg/apk、不碰 opkg 数据库、不覆盖 /etc/config。
 build_pkg_base() {
-    if _sd_missing_deps; then
-        log "[PKG] lxc 五件套（start/stop/ls/info/attach）均已就位（固件自带）"
+    if _pkg_missing_all; then
+        log "[PKG] 必备组件齐备：lxc 五件套（start/stop/ls/info/attach）+ smartdns（固件自带）"
         return 0
     fi
-    log "[PKG] lxc 命令缺失：$_SD_MISSING —— 先试只读基座 /rom"
-    if _rom_restore_lxc; then
-        hash -r 2>/dev/null || true
-        if _sd_missing_deps; then
-            log "[PKG] 已从只读基座恢复，五件套齐全"
-            return 0
-        fi
-        log "[PKG] 恢复后仍缺：$_SD_MISSING"
-    else
-        log "[PKG] 只读基座里没有 lxc 的安装清单（$ROMDIR/usr/lib/opkg/info/lxc-*.list）"
+    log "[PKG] 必备组件缺失：$_PKG_MISSING —— 先试只读基座 $ROMDIR"
+    # ① lxc：applet 是各自独立的包，必须扫 lxc-*.list 全量恢复，再补 liblxc 依赖树
+    if ! _sd_missing_deps; then
+        _rom_restore_lxc \
+            || log "[PKG] 只读基座里没有 lxc 的安装清单（$ROMDIR/usr/lib/opkg/info/lxc-*.list）"
     fi
-    log "[PKG] 固件未内置 lxc：检查 shell/custom-packages.sh 第 41 行 / apk-custom-packages.sh 第 10 行"
+    # ② smartdns：二进制 + init + 依赖（libopenssl3 等）；.list 不在就没救
+    if ! _smartdns_installed; then
+        _rom_restore_smartdns \
+            || log "[PKG] 只读基座里没有 smartdns 的安装清单（$ROMDIR/usr/lib/opkg/info/smartdns.list）"
+    fi
+    hash -r 2>/dev/null || true
+    if _pkg_missing_all; then
+        log "[PKG] 已从只读基座恢复，必备组件齐全"
+        return 0
+    fi
+    log "[PKG] 恢复后仍缺：$_PKG_MISSING"
+    log "[PKG] 固件未内置：检查 shell/custom-packages.sh 第 41 行(lxc) / 第 79 行(smartdns)"
     return 1
 }
 
@@ -1556,7 +1613,7 @@ build_lan_input() {
 # [v.180.91] NETBASE 组内顺序：网桥/lxc 链（bridge → lxc_zone → fwd_rules → lan_input →
 #   snat → ip_forward → lxc_auto）排在 smartdns 之前——先把容器网络铺起来，再配 DNS。
 #   dag_order 的组内次序就是取本行里同组节点的相对出现顺序。
-DAG_NODES="pkg_base img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto smartdns ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll deps sd_serve"
+DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink svc_bind docker_fw pkg_base lxc_auto smartdns ct_resolv capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll deps sd_serve"
 
 # ---- 网络基线模式（--net-only）----
 # 适用场景：镜像没进固件（v.107.7 起不再有 Include Crowdsec 开关，容器恒内置，
@@ -5275,7 +5332,7 @@ _sc_wait_pull() {
 
 
 # 各组节点清单（由 NODE_GROUP_* 派生，供组级 verify/build 遍历；顺序即组内声明序）
-NETBASE_NODES="pkg_base br_lan_ports lan_static dhcp_ignore bridge lxc_zone fwd_rules lan_input snat ip_forward lxc_auto smartdns svc_bind docker_fw"
+NETBASE_NODES="br_lan_ports lan_static dhcp_ignore bridge lxc_zone fwd_rules lan_input snat ip_forward svc_bind docker_fw pkg_base lxc_auto smartdns"
 PREP_NODES="ct_net cgroup_mount ct_bootlink ct_resolv"
 INSTALL_NODES="img_migrate rootfs ct_config"
 CAPIBLOCK_NODES="capi_block"
@@ -5614,6 +5671,26 @@ main() {
     # 这种机器只跑 NETBASE + DEPS：网络基线照常校准，组件在末尾按需安装。
     # 裁剪方式与 --net-only 同源：只改 GROUP_SEQ 不够，dag_order 会遍历整个 DAG_NODES
     # 并校验归属组是否在 GROUP_SEQ 里，所以 DAG_NODES 必须同步收窄。
+    #
+    # 【v.180.103】裁剪之前先试一次只读基座恢复 —— 否则 Ⅱ 阶段形同虚设：
+    #   lxc 缺了就被裁掉，而 pkg_base 正是被裁的那个节点，它永远没机会执行 /rom 恢复。
+    #   这里跑的是纯文件拷贝（幂等、不写 uci、不碰 /etc/config、不联网），
+    #   所以提前到组链之前做，不会破坏「Ⅰ 先配网络、Ⅱ 再查组件」的配置语义。
+    #   两级判据：先恢复 → 再看命令在不在；/rom 里也没有才降级为「只跑网络基线」。
+    if [ "$NET_ONLY" != "1" ]; then
+        if ! command -v lxc-start >/dev/null 2>&1; then
+            log "[PKG] lxc 不在位（Ⅱ 阶段前置自检），先试只读基座 $ROMDIR"
+            _rom_restore_lxc \
+                || log "[PKG] 只读基座里没有 lxc 的安装清单（$ROMDIR/usr/lib/opkg/info/lxc-*.list）"
+            hash -r 2>/dev/null || true
+        fi
+        if ! _smartdns_installed; then
+            log "[PKG] smartdns 不在位（Ⅱ 阶段前置自检），先试只读基座 $ROMDIR"
+            _rom_restore_smartdns \
+                || log "[PKG] 只读基座里没有 smartdns 的安装清单（$ROMDIR/usr/lib/opkg/info/smartdns.list）"
+            hash -r 2>/dev/null || true
+        fi
+    fi
     _LXC_READY=1
     _FULL_DAG=""
     _FULL_SEQ=""

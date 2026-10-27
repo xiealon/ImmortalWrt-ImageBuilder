@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.93"
+SCRIPT_VER="2026-10-27.180.94"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -651,6 +651,13 @@ verify_lan_static() {
 # DHCP 让权验证：lan ignore=1（旁路由不提供 DHCP，上游光猫发）+ IPv6 RA 项清净 + 无权威 DNS
 # DHCP 让权验证：只认「不对外发地址」这个实质结果。
 verify_dhcp_ignore() {
+    # 【v.180.94】dhcp.lan 段不存在 = LAN 上根本没有 DHCP 池，本身即「已关闭」。
+    # 这里若判未就绪，build 会把段建回来（旧行为），等于替用户重开 DHCP。
+    _vdi_has=0
+    if run uci show dhcp 2>/dev/null | grep -q '^dhcp\.lan=dhcp$'; then
+        _vdi_has=1
+    fi
+    [ "$_vdi_has" = "1" ] || return 0
     [ "$(run uci -q get dhcp.lan.ignore 2>/dev/null)" = "1" ] || return 1
     # 【v.108.24】删除项也要验。build 除了置 ignore=1，还删了 ra/dhcpv6/ndp/
     # ra_management 以及所有 dnsmasq 段的 authoritative。原来只验 ignore，
@@ -1134,10 +1141,17 @@ build_lan_static() {
 
 # DHCP 让权 builder：dhcp.lan.ignore=1；清 IPv6 RA 相关项；所有 dnsmasq 段删 authoritative
 build_dhcp_ignore() {
-    # dhcp.lan 段不存在就先建（dnsmasq 未装则无事可做）
-    if ! run uci -q get dhcp.lan >/dev/null 2>&1; then
-        run uci -q add dhcp dhcp >/dev/null 2>&1 || { log "[DHCP] 无 dhcp 配置，跳过让权"; return 0; }
-        run uci -q rename dhcp.@dhcp[-1]='lan' >/dev/null 2>&1
+    # 【v.180.94】缺 dhcp.lan 段时**不建**：旁路由的 LAN 本来就不跑 DHCP，
+    # 缺段是「已关闭」，不是「待配置」。旧行为是 add 一个段再 rename 成 lan 并置
+    # ignore=1 —— 段被搬回来了，虽然不发地址，但等于替用户重开了一个 DHCP 池。
+    # 这里改用 uci show 判段是否存在（uci get 两段式路径在精简 uci 上会误判）。
+    _bdi_has=0
+    if run uci show dhcp 2>/dev/null | grep -q '^dhcp\.lan=dhcp$'; then
+        _bdi_has=1
+    fi
+    if [ "$_bdi_has" != "1" ]; then
+        log "[DHCP] 无 dhcp.lan 段（LAN 不提供 DHCP），跳过让权"
+        return 0
     fi
     run uci -q set dhcp.lan.ignore='1'
     run uci -q delete dhcp.lan.ra 2>/dev/null

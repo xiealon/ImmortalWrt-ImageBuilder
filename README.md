@@ -55,7 +55,7 @@ Docker、LXC、CrowdSec 容器都已锁定为内置（纯 X86 平台，没有「
 按 `NETBASE → INSTALL → PREP → CAPIBLOCK → BOOT → LOGCONF → LAPI → BOUNCERVERIFY → DEPS → SMARTCHK → ENROLL`（`GROUP_SEQ` 定序）执行，每组开跑前校验所有前置组已置位。组内每个节点都是**先验证现场、达标就零写入、不达标才构建**。构建失败分两种处置：结构性节点（`_structurally_broken`）失败直接整机重装，软节点（`bouncer_verify` / `enroll` / `deps`）失败只记 failed 继续跑。复核统一放在 flush 之后与开机后，**不在 build 后即时复核**。
 
 **⑩ NETBASE（14 节点）**
-网络基线 11 项：`br_lan_ports` `lan_static` `dhcp_ignore` `bridge` `lxc_zone` `fwd_rules` `lan_input` `snat` `ip_forward` `svc_bind` `docker_fw`；`pkg_base` / `lxc_auto` 负责缺包时从 `/rom` 本地装回（不联网）；`smartdns` 写 13 条上游并让 dnsmasq 交还 53。
+网络基线 11 项：`br_lan_ports` `lan_static` `dhcp_ignore` `bridge` `lxc_zone` `fwd_rules` `lan_input` `snat` `ip_forward` `svc_bind` `docker_fw`；`pkg_base` / `lxc_auto` 负责缺包时从 `/rom` 本地装回（不联网）—— `pkg_base` 另带 `luci-app-smartdns` 界面：只在这台固件编过它、运行时又缺时才补，补不上不影响引导；`smartdns` 写 13 条上游并让 dnsmasq 交还 53。
 
 **⑪ INSTALL / PREP / CAPIBLOCK / BOOT**
 `INSTALL` 三节点：迁移校验镜像、解压 rootfs、写容器 config；`PREP` 四节点：容器网络、cgroup 挂载、开机链、resolv.conf；`CAPIBLOCK` 在开机前停用 `online_client`（`config.yaml` 只在 crowdsec 启动时读一次，启动后再改等于没改）；`BOOT` 依赖 `snat`，没 SNAT 不启动，全程唯一一次开机。
@@ -2324,6 +2324,73 @@ list interface 'eth1'    ← 实机是 br-lan
 
 配套风险：`/rom/usr/sbin/crowdsec-lxc-bootstrap.sh` 是构建镜像那一刻的版本（当前 286834 B，
 Apr 22 2026），比运行副本旧。要根治只能重新构建镜像，脚本侧改不动它。
+
+## v.180.116：把 LuCI 界面也纳入 `pkg_base`，但**不进功能闸门**
+
+### 起因：选了 smartdns 不等于有界面
+
+`smartdns` 本体的依赖只有 `+i386:libatomic +libopenssl`，没有任何 LuCI 包；
+界面是**反向依赖**本体：
+
+```
+luci-app-smartdns:  LUCI_DEPENDS := +smartdns [+PACKAGE_..._INCLUDE_WebUI:smartdns-ui]
+```
+
+所以 `PACKAGES` 里只写 `smartdns`，装出来的只有二进制 + init.d + `/etc/config/smartdns`，
+LuCI 里不会出现配置页。而 `wukongdaily/store`（`build*.sh` 里解 `.run` 的那个仓库）全树 167 个
+条目里**一个 smartdns 都没有** —— smartdns 只能走官方 feed，也就是 `CUSTOM_PACKAGES` 这条路。
+
+### 改动
+
+| 位置 | 改动 |
+|---|---|
+| `shell/custom-packages.sh`（24.10） | 加 `luci-app-smartdns` |
+| `shell/apk-custom-packages.sh`（25.12） | 加 `luci-app-smartdns` |
+| `x86-64/imm.config` / `imm25.config` | `CONFIG_PACKAGE_luci-app-smartdns=y`（声明用，选包靠 `PACKAGES`） |
+| 引导脚本 | 新增 `_luci_smartdns_ok` / `_rom_restore_luci_smartdns`，挂进 `pkg_base` 第 ③ 段 |
+| `tests/luci_restore.sh` | 新增，22 项断言 |
+
+**为什么不加 `smartdns-ui`**：那是 25.12 才有的 Rust 独立前端，几十 MB，脚本一行都用不到。
+`S127` 会卡住两件事：两条构建线必须带 `luci-app-smartdns`，且不得误选 `smartdns-ui`。
+
+### 为什么它不进 `_pkg_missing_all`
+
+`_pkg_missing_all` 是**功能闸门**：不通过 → `pkg_base` 判失败 → 结构性节点 →
+`_structurally_broken` → 整机重装。界面完全够不上这个分量：
+
+- 脚本只用 `uci` + `/usr/sbin/smartdns` + `/etc/init.d/smartdns` 三样，**一行都不依赖界面**；
+- 界面被卸是「少个网页」而不是「DNS 挂了」，把它塞进闸门等于让看板的存亡决定引导的存亡。
+
+所以它是**软补件**：缺了就顺手补，补不上只记一行日志，节点照常通过。
+
+### 判据取向（最容易写错的一条）
+
+```sh
+_luci_smartdns_ok() {
+    [ -f "$PKGROOT/usr/share/luci/menu.d/luci-app-smartdns.json" ]         && [ -f "$PKGROOT/usr/libexec/smartdns-call" ] && return 0
+    [ -f "$ROMDIR/usr/lib/opkg/info/luci-app-smartdns.list" ] || return 0   # 固件本来没编 → 不算缺
+    return 1
+}
+```
+
+- **两个文件一起判**：`menu.d` 决定菜单出不出现，`smartdns-call` 是界面按钮的实际后端。
+  只剩 `menu.d` 的界面能点开、点了没反应，比没菜单更误导，所以也算缺。
+- **`/rom` 没清单 = 不算缺**：老固件（如 2026-04-22 那版）压根没编界面，这一条让它静默通过；
+  否则每轮引导都会白恢复一次、每轮日志都留一行"缺"。
+- **`$PKGROOT` 前缀**：生产环境为空串，判的是真实 `/usr/...`；只在 `tests/luci_restore.sh`
+  里被换成临时目录 —— 否则"界面缺失"这种情形没法在不动真机的前提下复现。
+- **恢复不递归依赖**：`_rom_restore_luci_smartdns` 只调 `_rom_restore_pkg`，**不调**
+  `_rom_restore_tree`。它的 Depends 里有 `luci-base`，递归进去会一路碰 `rpcd` / `ubus` / `ucode`
+  —— 那是基础系统，界面被卸的时候这些从来都是好的，递归只有风险没有收益。
+
+### 验证
+
+`tests/luci_restore.sh`（busybox ash 实跑，22/22 通过）覆盖：判据四种情形（缺 / 全 / 残缺 /
+固件没编）、恢复两个方向（成功补回含可执行位、`/etc/config/smartdns` 被跳过）、
+`/rom` 无清单时一个文件都不写、以及"界面绝不进闸门"的三条静态断言。
+
+> 待办：真实设备上跑一次 `sh tests/luci_restore.sh` 复核；`tests/test_bp_reset.sh` 等结构测试
+> 依赖 `dash` 与 `mktemp -d`，在 Windows busybox 下跑不起来，只能在路由器上验。
 
 # crowdsec 引导流程图
 

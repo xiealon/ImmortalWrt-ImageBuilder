@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.95"
+SCRIPT_VER="2026-10-27.180.97"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -1176,15 +1176,11 @@ build_dhcp_ignore() {
     for _dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
         run uci -q delete "dhcp.$_dm.authoritative" 2>/dev/null
     done
-    # 【v.180.95】53 跟 DHCP 一起让：本机既不做 DHCP 也不做 DNS，两件事同属「让权」。
-    # 但只有 smartdns 已经能接管时才放 —— 未装或主段没配好就让出 53，本机立刻
-    # 没有 DNS：_net_ready 第三层是 nslookup www.baidu.com，必然失败，DEPS 就永远
-    # 装不上 smartdns，成了首轮引导死锁。
-    if _smartdns_installed && verify_smartdns_main; then
-        _dnsmasq_release_53 || log "[DHCP] dnsmasq 让出 53 失败（配置已落盘部分仍生效）"
-    else
-        log "[DHCP] smartdns 未就绪，暂不让出 53（避免引导期间无 DNS）"
-    fi
+    # 【v.180.97】53 不在这里让。曾经并到这一步试过，但 dhcp_ignore 排在 DEPS 之前：
+    # 那一刻 smartdns 可能还没装，让出 53 等于本机立刻没有 DNS，_net_ready 第三层
+    # 的 nslookup 必然失败，DEPS 就永远装不上 smartdns —— 首轮直接死锁。
+    # 所以让位只跟着 smartdns 的配置走（build_smartdns → _dnsmasq_release_53）：
+    # 能接管了才放手，接管不了就继续让 dnsmasq 顶着。
     log "[DHCP] 已让权：lan.ignore=1，并清除 RA/authoritative"
     return 0
 }
@@ -1587,7 +1583,7 @@ DEP_deps=""
 # INSTALL 排第一：rootfs 解压是 ct_net / ct_bootlink / ct_resolv（写容器内文件）
 # 以及 capi_block / ct_boot 的硬前置。放在 PREP 之后时，PREP 里那些节点拿不到
 # rootfs → 失败 → hard 终止 → INSTALL 永不执行 → rootfs 永不解压（自锁）。
-GROUP_SEQ="NETBASE INSTALL PREP CAPIBLOCK BOOT LOGCONF LAPI BOUNCERVERIFY DEPS ENROLL"
+GROUP_SEQ="NETBASE DEPS INSTALL PREP CAPIBLOCK BOOT LOGCONF LAPI BOUNCERVERIFY ENROLL"
 GROUP_TITLE_NETBASE="网络基线（br-lan / lxcbr0 双网桥 + 防火墙 zone 与转发规则 + smartdns 接管 53），最优先执行，不依赖 rootfs"
 GROUP_TITLE_INSTALL="安装容器（迁移校验镜像 / 解压 rootfs / 写 config）"
 GROUP_TITLE_PREP="容器启动前的全部静态准备（路由器网桥 / 容器网络 / cgroup）"
@@ -1597,12 +1593,12 @@ GROUP_TITLE_LOGCONF="日志链路与对外监听（宿主推送 + 容器采集 +
 GROUP_TITLE_LAPI="获取 LAPI 并填入路由器 bouncer"
 GROUP_TITLE_BOUNCERVERIFY="验证 bouncer 列表生效并解开 CAPI"
 GROUP_TITLE_ENROLL="Console Enroll"
-GROUP_TITLE_DEPS="检查网络并补齐组件（lxc / smartdns：通了再装，装完即配；不通则跳过 enroll）"
+GROUP_TITLE_DEPS="验证网络并补齐组件（lxc / smartdns：通了再装，装完即配）——排在网络基线之后、容器流程之前；不通则后续全跳过"
 # 组间强依赖只有一条主线：容器启动前必须先备好网桥/容器网络/cgroup，
 # 启动后才有运行态可言。其余组按功能细分，依赖如实声明（不强加线性）。
-GROUP_DEP_INSTALL=""
+GROUP_DEP_INSTALL="DEPS"
 GROUP_DEP_NETBASE=""
-GROUP_DEP_PREP="NETBASE"
+GROUP_DEP_PREP="NETBASE INSTALL"
 GROUP_DEP_CAPIBLOCK="INSTALL PREP"
 GROUP_DEP_BOOT="NETBASE PREP INSTALL CAPIBLOCK"
 GROUP_DEP_LOGCONF="BOOT"
@@ -5694,6 +5690,16 @@ if [ "$NET_ONLY" != "1" ] && [ ! -f "$TARBALL" ] && [ ! -f "$LEGACY_TARBALL" ] \
             log "[DEPS] 本轮容器流程已跳过（lxc 仍不在位）：网络基线与组件安装已完成，下次引导继续"
             exit 0
         fi
+    fi
+
+    # 【v.180.96】DEPS 已前移到 NETBASE 之后：网络没通 / 组件补不齐时它不置位，
+    # 后续 INSTALL → … → ENROLL 会因 GROUP_DEP 全部跳过。此时本轮到此结束，
+    # 不算失败：不写 installed 探针、不碰容器，下次开机（或联网后）自动重来。
+    # 注意判断放在 _LXC_READY 分支之后 —— 那条分支负责「缺 lxc → 装完 → 二次组链」的收尾。
+    if ! _bs_flag_on "GSET_DEPS"; then
+        log "[DEPS] 网络未就绪或组件未补齐：本轮跳过容器流程与 enroll，下次开机重试"
+        _bs_flag_on "GSET_NETBASE" && _NET_ONLY_OK=1
+        exit 0
     fi
 
     # 前置组（INSTALL / PREP / CAPIBLOCK / BOOT）任一未置位 → 容器内服务链无从谈起

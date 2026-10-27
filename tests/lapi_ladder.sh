@@ -258,11 +258,17 @@ echo "===== R34k. 版本号 ====="
 # 改为「三个脚本完全一致」—— 这才是真要求：同一次构建出来的三个脚本必须同版本，
 # 真机上 grep 一眼就能确认刷的是哪批。
 _v() { sed -n 's/^SCRIPT_VER="\(.*\)"$/\1/p' "$1" | head -n1; }
+# 口径是**五个**文件（guard / rc.local 的注释里早就写明）：
+#   grep -H -m1 '^SCRIPT_VER=' /usr/sbin/crowdsec-*.sh /etc/rc.local \
+#        /etc/init.d/crowdsec-lxc-probe
 _VER_BP=$(_v "$BS")
 _VER_PR=$(_v "$REPO/files/usr/sbin/crowdsec-lxc-probe.sh")
 _VER_GD=$(_v "$REPO/files/usr/sbin/crowdsec-guard.sh")
-ck "R34.51 三个脚本版本号一致（bootstrap / probe / guard）" \
-   "$_VER_BP|$_VER_PR|$_VER_GD" "$_VER_BP|$_VER_BP|$_VER_BP"
+_VER_RC=$(_v "$REPO/files/etc/rc.local")
+_VER_IN=$(_v "$REPO/files/etc/init.d/crowdsec-lxc-probe")
+ck "R34.51 五个文件版本号一致（bootstrap/probe/guard/rc.local/init.d）" \
+   "$_VER_BP|$_VER_PR|$_VER_GD|$_VER_RC|$_VER_IN" \
+   "$_VER_BP|$_VER_BP|$_VER_BP|$_VER_BP|$_VER_BP"
 ck "R34.51b 版本号已填且格式合法" \
    "$(sed -n 's/^SCRIPT_VER="\([0-9][0-9.-]*\)"$/ok/p' "$BS")" "ok"
 

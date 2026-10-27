@@ -14,14 +14,14 @@ on:
       Router IP:
         description: "请设置路由器的管理地址(仅对多网口路由器有效) 格式:192.168.x.1 或 10.x.x.1"
         required: true
-        default: "192.168.3.201"
+        default: "192.168.1.201"
       Router Netmask:
         description: "子网掩码，留空默认 255.255.255.0。非 /24 时必须在下面显式填网关"
         required: false
       Router Gateway:
         description: "网关地址，留空则自动取管理地址同网段的首个地址(如 192.168.100.1)。非 /24 网段请务必手填"
         required: false
-        default: "192.168.3.1"
+        default: "192.168.1.1"
       Router DNS:
         description: "DNS 地址，留空则跟随网关"
         required: false
@@ -76,9 +76,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    # 【CrowdSec 版本】留空 = 跟随 packagecloud 最新：Crowdsec-LXC 每周按最新重建一次，
+    # 【CrowdSec 版本】留空 = 跟随 packagecloud 最新：CloudRunFilesBuilder 的 crowdsec-lxc 分支每周按最新重建一次，
     # 本构建直接取它的产物，不再做版本比对（镜像「内容是否同一份代码」仍由指纹严格保证）。
-    # 想临时钉死某版：这里改成 "1.8.1" 这类版本号，并把 Crowdsec-LXC 的同一行改成一致。
+    # 想临时钉死某版：这里改成 "1.8.1" 这类版本号，并把 build-lxc-tarball.yml 的同一行改成一致。
     # 注意「跟最新」的代价：主仓代码不动，上游 crowdsec 升级也会悄悄进入固件，
     # 所以下面会把实际用到的版本写进 Release 说明（router-info.md），保证可回溯。
     env:
@@ -191,17 +191,17 @@ jobs:
             echo "shellcheck 不在，跳过（bash -n 已过）"
           fi
 
-      - name: Download prebuilt Crowdsec LXC tarball (Crowdsec-LXC Release)
+      - name: Download prebuilt Crowdsec LXC tarball (CloudRunFilesBuilder lxc-* Release)
         id: lxc_prebuilt
-        # 【v.108.59】唯一来源：Crowdsec-LXC 仓库出的 rootfs tarball。
+        # 【v.108.59】唯一来源：CloudRunFilesBuilder 的 crowdsec-lxc 分支产出的 rootfs tarball。
         # 本仓原来还有一条「本地 apt 拉包 + 打包」的回退，已经删掉 —— 容器出包这件事
-        # 早就分到 Crowdsec-LXC 了，留着两条路只会让「包没下到」被本地构建盖过去。
+        # 早就分到独立分支 crowdsec-lxc 了，留着两条路只会让「包没下到」被本地构建盖过去。
         # 现在取不到就在这一步 ::error:: + exit 1，不会走到 make image 才报。
         #
         # 判据是 MANIFEST 里的 prepare_script_sha256 / rootfs_skel_sha256 与当前仓库
         # 逐字节一致 —— 只认「同一份代码产出的镜像」。
         # 注意 shell/prepare-crowdsec-minimal.sh 与 rootfs-skel/ 的所有权仍在本仓：
-        # Crowdsec-LXC 的 workflow 会 checkout 本仓来跑那个脚本、用这个 skel 算指纹。
+        # crowdsec-lxc 分支的 workflow 会 checkout 本仓来跑那个脚本、用这个 skel 算指纹。
         # 这两处一改，本地指纹立刻和新包对不上，构建会红 —— 必须先去那边 dispatch 一次
         # 重新出包（那边没有 schedule，只能手动触发）。
         run: |
@@ -210,7 +210,7 @@ jobs:
           OUT="$OUT_DIR/lxc-crowdsec.tar.gz"
           mkdir -p "$OUT_DIR"
           SHORT="${GITHUB_SHA:0:7}"
-          BASE="https://github.com/xiealon/Crowdsec-LXC/releases/download"
+          BASE="https://github.com/xiealon/CloudRunFilesBuilder/releases/download"
           L_SCRIPT="$(sha256sum shell/prepare-crowdsec-minimal.sh | awk '{print $1}')"
           L_SKEL="$(find rootfs-skel -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
           echo "[预构建] 本地指纹 script=$L_SCRIPT skel=$L_SKEL"
@@ -288,14 +288,14 @@ jobs:
               echo "- **取不到**：${REASON# }"
               echo "- 本仓不再本地构建容器镜像（v.108.59），没有基底就不产出固件"
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::未取得可用的 Crowdsec LXC 基底（原因：${REASON# }）—— 去 Crowdsec-LXC 手动 dispatch 一次，或确认 lxc-latest 的 MANIFEST 指纹与本次 commit 一致"
+            echo "::error::未取得可用的 Crowdsec LXC 基底（原因：${REASON# }）—— 去 CloudRunFilesBuilder 的 build-lxc-tarball.yml 手动 dispatch 一次，或确认 lxc-latest 的 MANIFEST 指纹与本次 commit 一致"
             exit 1
           fi
           # 失败那条已经在上面 exit 了，这里只剩命中一种情况，不再留死分支。
           {
             echo "### Crowdsec LXC rootfs 来源"
             echo ""
-            echo "- 预构建命中：Crowdsec-LXC Release \`$TAG\`，crowdsec \`$M_CS\`"
+            echo "- 预构建命中：CloudRunFilesBuilder Release \`$TAG\`，crowdsec \`$M_CS\`"
             echo "- 指纹校验：prepare_script / rootfs_skel 与本次 commit 一致"
           } >> "$GITHUB_STEP_SUMMARY"
 

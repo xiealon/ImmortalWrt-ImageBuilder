@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.97"
+SCRIPT_VER="2026-10-27.180.98"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -1311,76 +1311,114 @@ _net_ready() {
 }
 
 # 就绪判据：lxc 与 smartdns 都在位。缺任何一个 → 未就绪，交给 build_deps 去装。
+# 【v.180.98】DEPS 退化为「纯验证」：不装包、不写配置、不做任何落地改动。
+# 位置也从「网络基线之后」挪到「容器流程与 bouncer 校验之后、enroll 之前」——
+# 它是本轮的总闸门：网络通不通、lxc 与 smartdns 到底在不在，最后一次性交代清楚，
+# 然后才允许编 enroll。装包是本地动作，全部归 INSTALL 组的 pkg_base。
 verify_deps() {
-    _sd_missing_deps && return 0
+    if ! _net_ready; then
+        log "[DEPS] 网络不通（网关 / 公网 IP / DNS 至少一层没过）"
+        return 1
+    fi
+    if ! command -v lxc-start >/dev/null 2>&1; then
+        log "[DEPS] lxc 不在位（本节点不装包，装包在 INSTALL 的 pkg_base）"
+        return 1
+    fi
+    if ! _smartdns_installed; then
+        log "[DEPS] smartdns 不在位（本节点不装包，装包在 INSTALL 的 pkg_base）"
+        return 1
+    fi
+    verify_smartdns_main || { log "[DEPS] smartdns 主段配置不符"; return 1; }
+    verify_smartdns_upstream || { log "[DEPS] smartdns 上游表不符"; return 1; }
+    log "[DEPS] 网络可用、lxc 与 smartdns 均已就位、smartdns 配置吻合"
+    return 0
+}
+
+# 只验证不安装：修不了就记账（deps 在 SOFT_NODES，不中止引导），
+# enroll 因 GROUP_DEP_ENROLL=SMARTCHK 整组跳过，下次开机重来。
+build_deps() {
+    log "[DEPS] 本节点只做验证，不落地任何改动（装包 / 改配置都不在这里）"
+    log "[DEPS] 本轮 enroll 跳过，缺的项由下一次开机重试"
     return 1
 }
 
-# 柔性的「补齐 + 配置」：装不上、没网都只记日志，返回 0；
-# 装完 smartdns 必须立刻配好 —— 只装不配是最糟的半截态（自启被打开、配置还是默认
-# 6053/无上游，等于把 DNS 交给一个空配置的守护进程）。
-build_deps() {
-    _bd_missing=""
-    command -v lxc-start >/dev/null 2>&1 || _bd_missing="$_bd_missing lxc"
-    _smartdns_installed || _bd_missing="$_bd_missing smartdns"
-    if [ -z "$_bd_missing" ]; then
-        log "[DEPS] lxc 与 smartdns 均已就位"
+# ---- pkg_base：本地装包（INSTALL 组第一个节点，v.180.98 新增）----
+# 装包从 DEPS 挪到这里，落实「安装在本地完成」。排 INSTALL 组最前，
+# 后面的 rootfs / ct_config 才有 lxc-* 命令可用。
+# 只装不配：刚装上的 smartdns 只在末尾补写一次 uci（NETBASE 跑在装包之前，
+# 那时还没有包，verify 直接放行、什么都没写），commit/重启交给本轮末尾的 flush_uci。
+verify_pkg_base() {
+    command -v lxc-start >/dev/null 2>&1 || return 1
+    _smartdns_installed || return 1
+    return 0
+}
+
+build_pkg_base() {
+    _pb_missing=""
+    command -v lxc-start >/dev/null 2>&1 || _pb_missing="$_pb_missing lxc"
+    _smartdns_installed || _pb_missing="$_pb_missing smartdns"
+    if [ -z "$_pb_missing" ]; then
+        log "[PKG] lxc 与 smartdns 均已就位"
         return 0
     fi
-    log "[DEPS] 仍缺必备组件：$_bd_missing"
     if ! _net_ready; then
-        # 按流程图：网络异常 → 跳过并结束。这里 return 1 是「本组未完成」，
-        # 不是「引导失败」—— deps 在 SOFT_NODES 里，ensure 只记账不中止；
-        # 效果是 GSET_DEPS 不置位 → ENROLL 整组跳过（注册本来也需要联网）。
-        log "[DEPS] 网络异常（网关/公网 IP/DNS 至少一层不通）：跳过安装，本轮也就此结束，下次引导重试"
+        log "[PKG] 网络不通，无法本地装包：$_pb_missing（下一次开机重试）"
         return 1
     fi
-    log "[DEPS] 网络已就绪，开始补齐：$_bd_missing"
-    _bd_new=""
-    for _bd_c in $_bd_missing; do
-        if _sd_install_missing "$_bd_c"; then
-            log "[DEPS] $_bd_c 安装完成"
-            _bd_new="$_bd_new $_bd_c"
-            # 本轮刚把 lxc 补上的标记：main 据此恢复完整组链，当场把容器装起来。
-            [ "$_bd_c" = "lxc" ] && _LXC_INSTALLED_NOW=1
+    log "[PKG] 本地补齐：$_pb_missing"
+    for _pb_c in $_pb_missing; do
+        if _sd_install_missing "$_pb_c"; then
+            log "[PKG] $_pb_c 安装完成"
+            # 本轮刚把 lxc 补上：main 据此恢复完整组链，当场把容器装起来
+            [ "$_pb_c" = "lxc" ] && _LXC_INSTALLED_NOW=1
         else
-            log "[DEPS] $_bd_c 安装失败（下次引导重试）"
+            log "[PKG] $_pb_c 安装失败（下一次开机重试）"
+            return 1
         fi
     done
-    # 装了 smartdns 就当场配置：写 uci + 置脏，交给本轮 flush_uci 提交并接管 53。
-    case " $_bd_new " in
-        *" smartdns "*)
-            if _smartdns_installed; then
-                if build_smartdns; then
-                    _bs_flag_set "_dirty_smartdns" B
-                    log "[DEPS] smartdns 已按 9 国内 + 4 境外上游配好，立即提交并接管 53"
-                    # 流程图 Ⅲ②：安装 smartdns 并配置 → 检查配置。
-                    # flush 内部会 commit + 重启 dnsmasq/smartdns 并等待 SD_RELEASE/SD_SETTLE，
-                    # 所以这里 flush 完直接复查，读到的就是生效后的现场。
-                    flush_uci || log "[DEPS] smartdns 提交/重载有失败项，见上方 [flush] 行"
-                    if verify_smartdns; then
-                        log "[DEPS] smartdns 配置检查通过（主段 port=53 / 13 上游 / dnsmasq 已让出 53）"
-                    else
-                        log "[DEPS] smartdns 配置检查未通过，下一轮引导会再修一次"
-                    fi
-                else
-                    log "[DEPS] smartdns 配置写入失败，保留 dnsmasq 原样，下次引导重试"
-                fi
-            fi
-            ;;
-    esac
-    # 装了 lxc：本轮就地继续，不留给下次开机 —— main 看到 _LXC_INSTALLED_NOW 会恢复
-    # 完整组链（INSTALL → … → BOOT → … → ENROLL）再跑一遍。
-    case " $_bd_new " in
-        *" lxc "*) log "[DEPS] lxc 已安装：稍后恢复完整组链，当场继续容器安装配置与 enroll" ;;
-    esac
-    # 装完再核一次：还有缺的就不让 enroll 往下走（半截环境注册必然失败，
-    # 还会在中央端留下一个半死的实例）。仍然只是「本组未完成」，不中止引导。
-    if ! _sd_missing_deps; then
-        log "[DEPS] 安装后仍缺：$_SD_MISSING —— enroll 跳过，下次引导重试"
-        return 1
+    # 刚装上 smartdns：NETBASE 的 smartdns 节点跑在装包之前，配置还没写过，
+    # 这里补一次，否则本轮 53 一直留在 dnsmasq 手里。
+    if _smartdns_installed && ! verify_smartdns; then
+        if build_smartdns; then
+            log "[PKG] smartdns 配置已补写，随本轮 flush_uci 生效并接管 53"
+        else
+            log "[PKG] smartdns 配置写入失败，下一轮引导重试"
+        fi
     fi
-    log "[DEPS] lxc 与 smartdns 均已就位，网络可用，可以进入 enroll"
+    return 0
+}
+
+# ---- sd_serve：smartdns 运行态验证（SMARTCHK 组，v.180.98 新增）----
+# 单独一组、排在 BOOT 与 BOUNCERVERIFY 之后：容器没起来之前谈「DNS 是否真的在服务」
+# 没有意义，口径就是「先跑完 lxc，再验证 smart」。只读不写；不通过时 build 只做
+# 「按已写好的 uci 重启一次」，绝不重装、不改配置。
+verify_sd_serve() {
+    run pgrep -x smartdns >/dev/null 2>&1 || {
+        log "[SMARTCHK] smartdns 进程不在"
+        return 1
+    }
+    run netstat -lnu 2>/dev/null | grep -qE ':53[[:space:]]' || {
+        log "[SMARTCHK] 53 没有在监听（UDP）"
+        return 1
+    }
+    verify_smartdns_upstream || return 1
+    if ct_running; then
+        run lxc-attach -n "$LXC_NAME" -- nslookup www.baidu.com >/dev/null 2>&1 || {
+            log "[SMARTCHK] 容器内解析失败（容器 DNS 指不到 smartdns）"
+            return 1
+        }
+        log "[SMARTCHK] 53 在服务，容器内解析正常"
+    else
+        log "[SMARTCHK] 53 在服务（容器未运行，跳过容器内解析）"
+    fi
+    return 0
+}
+
+build_sd_serve() {
+    log "[SMARTCHK] 按已写好的 uci 重启 smartdns（不重装、不改配置）"
+    run /etc/init.d/smartdns enable >/dev/null 2>&1
+    run /etc/init.d/smartdns restart >/dev/null 2>&1 || return 1
+    sleep "${SD_SETTLE:-2}"
     return 0
 }
 
@@ -1483,7 +1521,7 @@ build_lan_input() {
 # [v.180.91] NETBASE 组内顺序：网桥/lxc 链（bridge → lxc_zone → fwd_rules → lan_input →
 #   snat → ip_forward → lxc_auto）排在 smartdns 之前——先把容器网络铺起来，再配 DNS。
 #   dag_order 的组内次序就是取本行里同组节点的相对出现顺序。
-DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto smartdns ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll deps"
+DAG_NODES="pkg_base img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto smartdns ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll deps sd_serve"
 
 # ---- 网络基线模式（--net-only）----
 # 适用场景：镜像没进固件（v.107.7 起不再有 Include Crowdsec 开关，容器恒内置，
@@ -1583,7 +1621,7 @@ DEP_deps=""
 # INSTALL 排第一：rootfs 解压是 ct_net / ct_bootlink / ct_resolv（写容器内文件）
 # 以及 capi_block / ct_boot 的硬前置。放在 PREP 之后时，PREP 里那些节点拿不到
 # rootfs → 失败 → hard 终止 → INSTALL 永不执行 → rootfs 永不解压（自锁）。
-GROUP_SEQ="NETBASE DEPS INSTALL PREP CAPIBLOCK BOOT LOGCONF LAPI BOUNCERVERIFY ENROLL"
+GROUP_SEQ="NETBASE INSTALL PREP CAPIBLOCK BOOT LOGCONF LAPI BOUNCERVERIFY DEPS SMARTCHK ENROLL"
 GROUP_TITLE_NETBASE="网络基线（br-lan / lxcbr0 双网桥 + 防火墙 zone 与转发规则 + smartdns 接管 53），最优先执行，不依赖 rootfs"
 GROUP_TITLE_INSTALL="安装容器（迁移校验镜像 / 解压 rootfs / 写 config）"
 GROUP_TITLE_PREP="容器启动前的全部静态准备（路由器网桥 / 容器网络 / cgroup）"
@@ -1593,10 +1631,11 @@ GROUP_TITLE_LOGCONF="日志链路与对外监听（宿主推送 + 容器采集 +
 GROUP_TITLE_LAPI="获取 LAPI 并填入路由器 bouncer"
 GROUP_TITLE_BOUNCERVERIFY="验证 bouncer 列表生效并解开 CAPI"
 GROUP_TITLE_ENROLL="Console Enroll"
-GROUP_TITLE_DEPS="验证网络并补齐组件（lxc / smartdns：通了再装，装完即配）——排在网络基线之后、容器流程之前；不通则后续全跳过"
+GROUP_TITLE_DEPS="只验证不安装（网络是否通 / lxc 与 smartdns 是否就位）——排在容器流程与 bouncer 校验之后、enroll 之前；未就绪则 enroll 跳过"
+GROUP_TITLE_SMARTCHK="smartdns 运行态验证（容器跑起来之后再看 53 是否真在服务、容器内能否解析）"
 # 组间强依赖只有一条主线：容器启动前必须先备好网桥/容器网络/cgroup，
 # 启动后才有运行态可言。其余组按功能细分，依赖如实声明（不强加线性）。
-GROUP_DEP_INSTALL="DEPS"
+GROUP_DEP_INSTALL=""
 GROUP_DEP_NETBASE=""
 GROUP_DEP_PREP="NETBASE INSTALL"
 GROUP_DEP_CAPIBLOCK="INSTALL PREP"
@@ -1604,8 +1643,9 @@ GROUP_DEP_BOOT="NETBASE PREP INSTALL CAPIBLOCK"
 GROUP_DEP_LOGCONF="BOOT"
 GROUP_DEP_LAPI="BOOT"
 GROUP_DEP_BOUNCERVERIFY="LOGCONF LAPI"
-GROUP_DEP_ENROLL="BOUNCERVERIFY"
-GROUP_DEP_DEPS=""
+GROUP_DEP_ENROLL="SMARTCHK"
+GROUP_DEP_DEPS="BOUNCERVERIFY"
+GROUP_DEP_SMARTCHK="DEPS"
 NODE_GROUP_img_migrate=INSTALL
 NODE_GROUP_rootfs=INSTALL
 NODE_GROUP_ct_config=INSTALL
@@ -1635,6 +1675,8 @@ NODE_GROUP_bouncer_verify=BOUNCERVERIFY
 NODE_GROUP_capi_release=BOUNCERVERIFY
 NODE_GROUP_enroll=ENROLL
 NODE_GROUP_deps=DEPS
+NODE_GROUP_pkg_base=INSTALL
+NODE_GROUP_sd_serve=SMARTCHK
 
 # 层级拓扑排序（v.79）：先校验「每个小步骤都对应到某个组、组间依赖不倒置」，
 # 再按 GROUP_SEQ 分段，段内 Kahn 变体迭代排序（无递归，天然检测环/缺失/跨组依赖倒置）
@@ -5200,7 +5242,7 @@ _sc_wait_pull() {
 # 各组节点清单（由 NODE_GROUP_* 派生，供组级 verify/build 遍历；顺序即组内声明序）
 NETBASE_NODES="br_lan_ports lan_static dhcp_ignore bridge lxc_zone fwd_rules lan_input snat ip_forward lxc_auto smartdns svc_bind docker_fw"
 PREP_NODES="ct_net cgroup_mount ct_bootlink ct_resolv"
-INSTALL_NODES="img_migrate rootfs ct_config"
+INSTALL_NODES="pkg_base img_migrate rootfs ct_config"
 CAPIBLOCK_NODES="capi_block"
 BOOT_NODES="ct_boot"
 LOGCONF_NODES="logconf"
@@ -5208,6 +5250,7 @@ LAPI_NODES="lapi_fetch bouncer_fill"
 BOUNCERVERIFY_NODES="bouncer_verify capi_release"
 ENROLL_NODES="enroll"
 DEPS_NODES="deps"
+SMARTCHK_NODES="sd_serve"
 # ---- 8 组组级 verify/build（v.93 按功能切分，组内小步骤各自 ensure）----
 # 组级 verify = 组内节点全部内容一致；组级 build = 组内节点逐个 ensure（各自两次闭环）。
 # 组与组之间只保留一条真实存在的硬顺序：静态准备/安装/屏蔽 CAPI → 启动容器 → 其余。
@@ -5550,12 +5593,18 @@ main() {
         _lx_dag=""
         for _lx_n in $DAG_NODES; do
             case "$(eval "echo \$NODE_GROUP_$_lx_n")" in
-                NETBASE|DEPS)
+                NETBASE)
                     # lxc_auto 必须单独摘掉：它验的是 lxc-auto 包带来的服务脚本 + uci 段，
                     # 包不在时 build 从 /rom 恢复也拿不到脚本 → return 1 → ensure hard exit。
                     # 留着这一个节点，整个「lxc 缺失不硬失败」就等于没做。
                     [ "$_lx_n" = "lxc_auto" ] && continue
                     _lx_dag="$_lx_dag $_lx_n"
+                    ;;
+                INSTALL)
+                    # 【v.180.98】只留 pkg_base：它的活就是「本地把 lxc 装上」。
+                    # 镜像 / rootfs / config 交给「装好后恢复完整组链」的第二轮，
+                    # 免得没镜像的机器在这里退出、连 lxc 都补不上。
+                    [ "$_lx_n" = "pkg_base" ] && _lx_dag="$_lx_dag $_lx_n"
                     ;;
             esac
         done
@@ -5567,10 +5616,10 @@ main() {
             _lx_base="$_lx_base $_lx_n"
         done
         NETBASE_NODES="$_lx_base"
-        GROUP_SEQ="NETBASE DEPS"
+        GROUP_SEQ="NETBASE INSTALL"
         DAG_NODES="$_lx_dag"
-        log "[DEPS] 未检测到 lxc（缺 lxc-start）：本轮只跑网络基线与末尾组件安装，容器步骤整体跳过"
-        log "[DEPS] 补齐后请再跑一次引导（开机自动），容器流程从 INSTALL 组接管"
+        log "[PKG] 未检测到 lxc（缺 lxc-start）：本轮只跑网络基线与本地装包（pkg_base），容器步骤整体跳过"
+        log "[PKG] 补齐后请再跑一次引导（开机自动），容器流程从 INSTALL 组接管"
     fi
 
     # 重装自愈持久状态：目录就位 + 退出记账 + 上次未完成重装先计数
@@ -5681,25 +5730,23 @@ if [ "$NET_ONLY" != "1" ] && [ ! -f "$TARBALL" ] && [ ! -f "$LEGACY_TARBALL" ] \
             _bs_flag_clear "_dirty_deps"
             _LXC_READY=1
             dag_order
-            log "[DEPS] lxc 已就位：恢复完整组链，继续容器安装配置与 enroll"
+            log "[PKG] lxc 已就位：恢复完整组链，继续容器安装配置与 enroll"
             _run_chain
         else
             # 网络异常/装不上：按流程图「跳过结束」。网络基线跑通了，ip_forward=1 是
             # 期望稳态，不能因为「这轮没装完容器」被退出钩子还原成 0。
             _bs_flag_on "GSET_NETBASE" && _NET_ONLY_OK=1
-            log "[DEPS] 本轮容器流程已跳过（lxc 仍不在位）：网络基线与组件安装已完成，下次引导继续"
+            log "[PKG] 本轮容器流程已跳过（lxc 仍不在位）：网络基线与本地装包已完成，下次引导继续"
             exit 0
         fi
     fi
 
-    # 【v.180.96】DEPS 已前移到 NETBASE 之后：网络没通 / 组件补不齐时它不置位，
-    # 后续 INSTALL → … → ENROLL 会因 GROUP_DEP 全部跳过。此时本轮到此结束，
-    # 不算失败：不写 installed 探针、不碰容器，下次开机（或联网后）自动重来。
-    # 注意判断放在 _LXC_READY 分支之后 —— 那条分支负责「缺 lxc → 装完 → 二次组链」的收尾。
+    # 【v.180.98】DEPS 只管验证，且已挪到容器流程与 bouncer 校验之后、enroll 之前：
+    # 未置位 = 网络 / lxc / smartdns 至少一项没到位。容器该建的已经建完，
+    # 不拿它去判整轮失败（那会把「组件缺一点」记成安装失败、探针反复重跑），
+    # 只交代清楚「enroll 会被跳过」；installed 是否写由后面的 flush 与落地复核决定。
     if ! _bs_flag_on "GSET_DEPS"; then
-        log "[DEPS] 网络未就绪或组件未补齐：本轮跳过容器流程与 enroll，下次开机重试"
-        _bs_flag_on "GSET_NETBASE" && _NET_ONLY_OK=1
-        exit 0
+        log "[DEPS] 未就绪（网络 / lxc / smartdns 至少一项不符）：本轮 enroll 跳过，下次开机重试"
     fi
 
     # 前置组（INSTALL / PREP / CAPIBLOCK / BOOT）任一未置位 → 容器内服务链无从谈起

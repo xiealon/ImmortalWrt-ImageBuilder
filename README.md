@@ -2447,6 +2447,47 @@ _luci_smartdns_ok() {
 `sd_serve` 失败走 `exit 1`，**不会**触发整机重装 —— `_structurally_broken` 只看
 rootfs 资产（`/etc`、`crowdsec` 二进制等），不看 DNS。
 
+## v.180.118：探针自愈 bootstrap 本体
+
+### 补的缺口
+
+`crowdsec-lxc-bootstrap.sh` **不属于任何 opkg/apk 包**（是 `files/` 直接铺进固件的），
+所以 `opkg remove` 碰不到它 —— 只有手动 `rm` 或写错的脚本才让它消失。
+它一旦没了，补印 / 停滞 / DNS 三条通道全部以 **127** 空转，日志一路
+「bootstrap 退出 127」，最后停在「需人工介入」，而 `/rom` 里其实有一份。
+
+### 关键：绝不能照抄 `_guard_run`
+
+`_guard_run` 对 `crowdsec-guard.sh` 的做法是「与 `/rom` 不一致就用 `/rom` 覆盖」。
+这个模式**用在 bootstrap 上是灾难**：
+
+| | 大小 | 内容 |
+|---|---|---|
+| `/rom/usr/sbin/crowdsec-lxc-bootstrap.sh` | 构建固件那一刻的版本 | 可能落后几个月 |
+| 运行副本 `/usr/sbin/...` | 迭代后的版本 | 当前逻辑 |
+
+照抄就是每轮把新版**静默**打回旧版，日志还只说「已复原」，看不出逻辑退化了。
+
+所以 `_ensure_boot` 只判一件事：`[ -x "$BOOT" ] && return 0` —— **在位就立刻返回，
+一个字节都不碰**；只有「不存在或不可执行」才从 `$ROMDIR$BOOT` 补。
+
+### 刷机之后不存在「退回旧版」
+
+`files/usr/sbin/` 整个目录都会打进镜像，所以**刷了新固件，`/rom` 里就是新的那一份**。
+此时若运行副本被删，拷回来的仍是新版。「退回旧版」只出现在
+「不刷机 + 手动删文件」同时发生的情形，而且日志会明写
+「恢复的是固件内置版本，可能落后于当前仓库，请尽快重刷固件」。
+
+### 返回码分工
+
+| 码 | 含义 | 处置 |
+|---|---|---|
+| 77 | 抢锁失败，别的引导在跑 | 等下一轮 |
+| 78 | bootstrap 本体缺失且补不回来 | `boot-missing` / `dns-boot-missing`，需重刷 |
+
+`tests/probe_boot_heal.sh`（13 项）覆盖：缺失补回含可执行位、**在位内容零改动**、
+两边都没有时明说要重刷、无执行位视同缺失。
+
 # crowdsec 引导流程图
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)

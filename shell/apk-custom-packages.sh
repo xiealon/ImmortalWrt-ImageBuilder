@@ -65,4 +65,4 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES smartdns luci-app-smartdns luci-i18n-smartdns-
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES tailscale luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn kmod-tun"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES xz tar ip-full kmod-veth kmod-ikconfig kmod-br-netfilter"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES xz tar ip-full kmod-veth kmod-ikconfig kmod-br-netfilter kmod-crypto-chacha20poly1305"

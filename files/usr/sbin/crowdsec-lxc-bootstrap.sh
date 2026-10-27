@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.105"
+SCRIPT_VER="2026-10-27.180.106"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -1506,7 +1506,11 @@ build_pkg_base() {
 # 没有意义，口径就是「先跑完 lxc，再验证 smart」。只读不写；不通过时 build 只做
 # 「按已写好的 uci 重启一次」，绝不重装、不改配置。
 verify_sd_serve() {
-    run pgrep -x smartdns >/dev/null 2>&1 || {
+    # 【v.180.106】判据用 pidof，不用 pgrep -x：busybox 的 pgrep -x 拿 argv[0]
+    # 整串比对，进程实际是 "/usr/sbin/smartdns -f -c ..."，与 "smartdns" 不相等。
+    # 真机实测 pgrep -x 恒空、pidof 直接给 PID —— 原判据让本节点每轮必失败，
+    # SMARTCHK 永不置位，enroll 整组被跳过，crowdsec 也就是永远注册不上。
+    run pidof smartdns >/dev/null 2>&1 || {
         log "[SMARTCHK] smartdns 进程不在"
         return 1
     }

@@ -2644,6 +2644,69 @@ bootstrap 里有 `_rom_restore_tree nftables-json`，但两条构建线的包清
 **被改过时按只读基座覆盖回来**、两边都没有时明说要重刷、无执行位视同不可用、
 只有运行副本在（旧固件）时不动它。
 
+## [v.180.121] 构建期修事故：容器看不见 tests/
+
+### 事故
+
+2026-10-27 17:04 那次构建，包列表打完就死了：
+
+```
+Error: 自检脚本一个都没铺进去（tests/* 为空？）
+Error: Process completed with exit code 1.
+```
+
+### 根因
+
+问题不在 `tests/` 里有没有东西 —— 仓库里 30 个脚本一个不少。问题在**容器里根本看不见
+`tests/` 这个目录**。
+
+workflow 的 `docker run` 是**白名单挂载**，只挂了这几条：
+
+| 挂载 | 容器内 |
+|---|---|
+| `bin` | `/home/build/immortalwrt/bin` |
+| `files` | `/home/build/immortalwrt/files` |
+| `custom` | `/home/build/immortalwrt/custom` |
+| `x86-64/imm.config` | `/home/build/immortalwrt/.config` |
+| `shell` | `/home/build/immortalwrt/shell` |
+| `rootfs-skel` | `/home/build/immortalwrt/rootfs-skel` |
+| `x86-64/build24.sh` | `/home/build/immortalwrt/build.sh` |
+
+`tests/` 不在名单里。于是 `for _t in tests/*` 在容器内不会展开，`$_t` 字面量就是
+`tests/*`，`[ -f "tests/*" ]` 为假 → 全部 `continue` → 计数 0 → 撞上我上一版写的
+`exit 1`，整条线被打死。
+
+**是我上一版把检查写太硬了。** 自检脚本是附加能力，不是固件必需件，缺了它固件照样该出镜像。
+
+### 修法（两步，缺一不可）
+
+1. **补挂载**：两条 workflow 都加一行
+   `-v "${{ github.workspace }}/tests:/home/build/immortalwrt/tests"`。
+   仓库里 `tests/` 是单一真源，不在 `files/` 里再存一份副本。
+2. **降级检查**：`tests/` 缺失、或一个都没铺进去，只
+   `::warning::` + 继续，**不再 `exit 1`**。真出问题看日志能看见，但不会因为
+   一次漏挂载把整条构建线卡住。
+
+### 本地实测
+
+把 build24.sh 里那段原样抽出来单独跑，两种前提都过：
+
+| 前提 | rc | 铺出 | 输出 |
+|---|---|---|---|
+| `tests/` 存在（用仓库真实 30 个脚本） | 0 | 根 24 + danger 6 = 30 | `自检脚本已铺进固件：只读 24 个，danger 6 个` |
+| `tests/` 不存在 | **0** | 0 | 两条 `::warning::`，构建继续 |
+
+（上一版第二行是 `rc=1`，那就是事故。）
+
+### 新增静态检查
+
+| 检查 | 内容 |
+|---|---|
+| `S133` | 两条 workflow 的 `docker run` 都必须挂载 `tests/`，且挂载要出现在 `build.sh` 之前 |
+| `S133b` | build24/25 不得再把「没铺到」当致命错误 |
+
+`S133` 是这次事故的直接护栏：光有「构建线会铺 tests」这句话不成立，**必须配上挂载才算数**。
+
 # crowdsec 引导流程图
 
 ![CrowdSec LXC 引导流程图](docs/crowdsec-flow.png)

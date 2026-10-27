@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.90】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.92】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-bootstrap（旁路由版）
 # 适用拓扑：单臂旁路由——所有物理网口桥进 br-lan，WAN/WAN6 一律禁用，
 #   出口走上游网关，本机不拨号、不跑 DHCP 服务（lan.ignore=1）。
@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.90"
+SCRIPT_VER="2026-10-27.180.92"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -733,36 +733,72 @@ _sd_main_seg() {
         | sed -n 's/^smartdns\.\([^.=]*\)=smartdns$/\1/p' | head -n1
 }
 
-# smartdns 节点验证：必备组件齐全 + 主段 enabled/port=53 + 13 个上游 + dnsmasq 已让出 53
+# smartdns 校验入口：主段（verify_smartdns_main）+ 上游表（verify_smartdns_upstream）+ dnsmasq 已让出 53
+# smartdns 校验拆成两件事：① 「服务本身」（主段 + dnsmasq 让出 53）② 「上游服务器表」。
+# 为什么要拆（v.180.92）：混在一个函数里时上游只比了 ip 和条数，type / server_group /
+# host_name 被改坏也不会重建 —— DoT 掉成明文、Cn/Out 分组失效、SNI 丢失，全是「照样能解析」
+# 的静默退化，日志里看不出来。
+verify_smartdns_main() {
+    _vsm_seg=$(_sd_main_seg)
+    [ -n "$_vsm_seg" ] || return 1
+    [ "$(run uci -q get "smartdns.$_vsm_seg.enabled" 2>/dev/null)" = "1" ] || return 1
+    [ "$(run uci -q get "smartdns.$_vsm_seg.port" 2>/dev/null)" = "53" ] || return 1
+    [ "$(run uci -q get "smartdns.$_vsm_seg.cache_size" 2>/dev/null)" = "32768" ] || return 1
+    # serve_expired / prefetch_domain：过期照回 + 后台预取，build 里写死为 1，这里必须校验，
+    # 否则设备上若是 0，verify 直接判就绪、不进 build，开关永远纠正不过来。
+    [ "$(run uci -q get "smartdns.$_vsm_seg.serve_expired" 2>/dev/null)" = "1" ] || return 1
+    [ "$(run uci -q get "smartdns.$_vsm_seg.prefetch_domain" 2>/dev/null)" = "1" ] || return 1
+    return 0
+}
+
+# 上游表核对：这 13 条必须**都在，且逐项吻合**（ip / type / server_group / host_name / enabled）。
+# 只判「缺」和「错」，不判「多」—— 自己额外加的上游允许留着，不会被当成异常。
+# 缺一条或任一项不符 → 判「未就绪」→ build_smartdns_upstream 按表补齐/纠正（不动你加的那些）。
+verify_smartdns_upstream() {
+    _vsu_cnt=0
+    _vsu_dump="|"
+    # 先把现场所有 server 段打折成 "ip;type;组;host_name;enabled|" 串，后面纯字符串比对，
+    # 不再逐条 fork uci（13 段 × 5 字段只取一轮）。
+    for _vsu_s in $(run uci -q show smartdns 2>/dev/null | grep -E '=server$' | cut -d. -f2 | cut -d= -f1); do
+        _vsu_cnt=$((_vsu_cnt+1))
+        _vsu_dump="$_vsu_dump$(run uci -q get "smartdns.$_vsu_s.ip" 2>/dev/null);$(run uci -q get "smartdns.$_vsu_s.type" 2>/dev/null);$(run uci -q get "smartdns.$_vsu_s.server_group" 2>/dev/null);$(run uci -q get "smartdns.$_vsu_s.host_name" 2>/dev/null);$(run uci -q get "smartdns.$_vsu_s.enabled" 2>/dev/null)|"
+    done
+    [ "$_vsu_cnt" -ge 13 ] || return 1
+    while read -r _vsu_name _vsu_ip _vsu_tp _vsu_grp _vsu_host; do
+        [ -n "$_vsu_ip" ] || continue
+        # 表里 "-" 表示该上游不需要 SNI，对应 uci 里就不该有 host_name（get 为空串）
+        _vsu_sni=""
+        [ "$_vsu_tp" = "tls" ] && [ "$_vsu_host" != "-" ] && _vsu_sni="$_vsu_host"
+        case "$_vsu_dump" in
+            *"|$_vsu_ip;$_vsu_tp;$_vsu_grp;$_vsu_sni;1|"*) ;;
+            *) log "[SMARTDNS] 上游与表不符：$_vsu_name $_vsu_ip（期望 $_vsu_tp/$_vsu_grp/${_vsu_sni:-无SNI}，enabled=1）"
+               return 1 ;;
+        esac
+    done <<'SD_UPSTREAM_EOF'
+alidns 223.5.5.5 udp Cn -
+alidns 223.6.6.6 udp Cn -
+dnspod 119.29.29.29 udp Cn -
+baidu 180.76.76.76 udp Cn -
+360dns 101.226.4.6 udp Cn -
+360dns 218.30.118.6 udp Cn -
+360dns 123.125.81.6 udp Cn -
+360dns 140.207.198.6 udp Cn -
+cnnic 1.2.4.8 udp Cn -
+google 8.8.8.8 tls Out dns.google
+google 8.8.4.4 tls Out dns.google
+cloudflare 1.1.1.1 tls Out cloudflare-dns.com
+cloudflare 1.0.0.1 tls Out cloudflare-dns.com
+SD_UPSTREAM_EOF
+    return 0
+}
+
 verify_smartdns() {
     # ① 没装就放行：本节点只负责「已装的情况下把配置配对」。
     # 安装挪到末尾 DEPS 节点（网络通了才装，装完回调 build_smartdns 当场配好）。
     # 这里若判「未就绪」会触发 build，而 build 在没网时必然装不上 → 整轮引导死在这儿。
     _smartdns_installed || return 0
-    _vsd_seg=$(_sd_main_seg)
-    [ -n "$_vsd_seg" ] || return 1
-    [ "$(run uci -q get "smartdns.$_vsd_seg.enabled" 2>/dev/null)" = "1" ] || return 1
-    [ "$(run uci -q get "smartdns.$_vsd_seg.port" 2>/dev/null)" = "53" ] || return 1
-    [ "$(run uci -q get "smartdns.$_vsd_seg.cache_size" 2>/dev/null)" = "32768" ] || return 1
-    # serve_expired / prefetch_domain 决定「过期照样秒回 + 后台预取」。
-    # 不校验的话：设备上是 0 时 verify 仍判就绪、不会进 build，开关永远纠正不过来
-    # （build 里是写死的 1，所以只有「校验 + 重建」才能把旧机器拉齐）。
-    [ "$(run uci -q get "smartdns.$_vsd_seg.serve_expired" 2>/dev/null)" = "1" ] || return 1
-    [ "$(run uci -q get "smartdns.$_vsd_seg.prefetch_domain" 2>/dev/null)" = "1" ] || return 1
-    _vsd_have=""
-    _vsd_cnt=0
-    for _vsd_s in $(run uci -q show smartdns 2>/dev/null | grep -E '=server$' | cut -d. -f2 | cut -d= -f1); do
-        [ "$(run uci -q get "smartdns.$_vsd_s.enabled" 2>/dev/null)" = "1" ] || return 1
-        _vsd_have="$_vsd_have $(run uci -q get "smartdns.$_vsd_s.ip" 2>/dev/null)"
-        _vsd_cnt=$((_vsd_cnt+1))
-    done
-    for _vsd_ip in $SD_DNS_IPS; do
-        case " $_vsd_have " in
-            *" $_vsd_ip "*) ;;
-            *) return 1 ;;
-        esac
-    done
-    [ "$_vsd_cnt" -ge 13 ] || return 1
+    verify_smartdns_main || return 1
+    verify_smartdns_upstream || return 1
     # dnsmasq 必须已经让出 53：port=0 是 OpenWrt 官方的「禁用 DNS」写法
     for _vsd_dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
         [ "$(run uci -q get "dhcp.$_vsd_dm.port" 2>/dev/null)" = "0" ] || return 1
@@ -1091,47 +1127,70 @@ build_dhcp_ignore() {
     return 0
 }
 
-# smartdns 接管 builder：写主段 + 重建 13 个上游 + 让 dnsmasq 交出 53
+# smartdns 配置入口：主段（build_smartdns_main）+ 上游表（build_smartdns_upstream）+ dnsmasq 让位
 # 只写 uci 内存态，重启动作全部交给 flush_uci（commit 后重启 dnsmasq / smartdns）。
-build_smartdns() {
-    # ① 没装就没有「配置」可言：装与配由 DEPS 节点串起来（装完立刻回调本函数）。
-    # 这里只做防御 —— 真到这一步还没装，说明调用方跳过了前置检查，直接说明白。
-    if ! _smartdns_installed; then
-        log "[SMARTDNS] smartdns 未安装，无法配置（由末尾 DEPS 节点安装后回调）"
-        return 1
-    fi
-    _bsd_seg=$(_sd_main_seg)
-    if [ -z "$_bsd_seg" ]; then
+# smartdns 配置拆成两件事：① 「服务本身」（主段）② 「上游服务器表」，dnsmasq 让位留在外层。
+# 只写 uci 内存态，重启动作全部交给 flush_uci（commit 后重启 dnsmasq / smartdns）。
+build_smartdns_main() {
+    _bsm_seg=$(_sd_main_seg)
+    if [ -z "$_bsm_seg" ]; then
         run uci -q add smartdns >/dev/null 2>&1
-        _bsd_seg=$(_sd_main_seg)
-        [ -n "$_bsd_seg" ] || { log "[SMARTDNS] 无法创建主配置段"; return 1; }
+        _bsm_seg=$(_sd_main_seg)
+        [ -n "$_bsm_seg" ] || { log "[SMARTDNS] 无法创建主配置段"; return 1; }
     fi
-    run uci -q set "smartdns.$_bsd_seg.enabled=1"
-    run uci -q set "smartdns.$_bsd_seg.port=53"
-    # bind 会盖过 port：LuCI 里若留了 0.0.0.0:6053 这类值，port=53 白写
-    run uci -q delete "smartdns.$_bsd_seg.bind" 2>/dev/null
-    run uci -q set "smartdns.$_bsd_seg.cache_size=32768"
-    run uci -q set "smartdns.$_bsd_seg.serve_expired=1"
-    run uci -q set "smartdns.$_bsd_seg.prefetch_domain=1"
+    run uci -q set "smartdns.$_bsm_seg.enabled=1"
+    run uci -q set "smartdns.$_bsm_seg.port=53"
+    # bind 不是 UCI 选项：init 脚本只读 port / bind_device，历史残留的 bind 不生效，
+    # 只会让人误以为在控制监听地址，顺手清掉。
+    run uci -q delete "smartdns.$_bsm_seg.bind" 2>/dev/null
+    run uci -q set "smartdns.$_bsm_seg.cache_size=32768"
+    run uci -q set "smartdns.$_bsm_seg.serve_expired=1"
+    run uci -q set "smartdns.$_bsm_seg.prefetch_domain=1"
+    return 0
+}
 
-    # 上游整组重建：先删光再按表写，重复引导不会累积出两套重复条目
-    for _bsd_s in $(run uci -q show smartdns 2>/dev/null | grep -E '=server$' | cut -d. -f2 | cut -d= -f1); do
-        run uci -q delete "smartdns.$_bsd_s" 2>/dev/null
+# 上游按表补齐/纠正，不清空：逐条按 ip 定位段 —— 有就修正字段，没有就新建；
+# 同一 ip 若存在多个重复段，只保留第一个、其余删掉。你额外加的上游（ip 不在表里）原样保留。
+# 表与 verify_smartdns_upstream 里那份必须逐行一致（静态检查 S40 卡这条）。
+build_smartdns_upstream() {
+    # 先建「ip=段名」索引，避免每条都重新扫一遍 uci show（13 条 × 13 段 = 169 次 fork）
+    _bsu_map=" "
+    for _bsu_s in $(run uci -q show smartdns 2>/dev/null | grep -E '=server$' | cut -d. -f2 | cut -d= -f1); do
+        _bsu_map="$_bsu_map$(run uci -q get "smartdns.$_bsu_s.ip" 2>/dev/null)=$_bsu_s "
     done
-    _bsd_n=0
-    while read -r _bsd_name _bsd_ip _bsd_tp _bsd_grp _bsd_host; do
-        [ -n "$_bsd_ip" ] || continue
-        run uci -q add smartdns server >/dev/null 2>&1
-        run uci -q set "smartdns.@server[-1].enabled=1"
-        run uci -q set "smartdns.@server[-1].name=$_bsd_name"
-        run uci -q set "smartdns.@server[-1].ip=$_bsd_ip"
-        run uci -q set "smartdns.@server[-1].type=$_bsd_tp"
-        run uci -q set "smartdns.@server[-1].server_group=$_bsd_grp"
-        # DoT 必须带 SNI，否则证书主机名校验必然失败（8.8.8.8 的证书是 dns.google）
-        if [ "$_bsd_tp" = "tls" ] && [ "$_bsd_host" != "-" ]; then
-            run uci -q set "smartdns.@server[-1].host_name=$_bsd_host"
+    _bsu_n=0
+    while read -r _bsu_name _bsu_ip _bsu_tp _bsu_grp _bsu_host; do
+        [ -n "$_bsu_ip" ] || continue
+        _bsu_hit=""
+        _bsu_dup=""
+        for _bsu_p in $_bsu_map; do
+            [ "${_bsu_p%%=*}" = "$_bsu_ip" ] || continue
+            if [ -z "$_bsu_hit" ]; then
+                _bsu_hit=${_bsu_p#*=}
+            else
+                _bsu_dup="$_bsu_dup ${_bsu_p#*=}"
+            fi
+        done
+        for _bsu_d in $_bsu_dup; do
+            run uci -q delete "smartdns.$_bsu_d" 2>/dev/null
+        done
+        if [ -z "$_bsu_hit" ]; then
+            run uci -q add smartdns server >/dev/null 2>&1
+            _bsu_hit="@server[-1]"
         fi
-        _bsd_n=$((_bsd_n+1))
+        run uci -q set "smartdns.$_bsu_hit.enabled=1"
+        run uci -q set "smartdns.$_bsu_hit.name=$_bsu_name"
+        run uci -q set "smartdns.$_bsu_hit.ip=$_bsu_ip"
+        run uci -q set "smartdns.$_bsu_hit.type=$_bsu_tp"
+        run uci -q set "smartdns.$_bsu_hit.server_group=$_bsu_grp"
+        # DoT 必须带 SNI，否则证书主机名校验必然失败（8.8.8.8 的证书是 dns.google）
+        if [ "$_bsu_tp" = "tls" ] && [ "$_bsu_host" != "-" ]; then
+            run uci -q set "smartdns.$_bsu_hit.host_name=$_bsu_host"
+        else
+            # UDP 段不该带 SNI：历史残留的 host_name 清掉，否则 verify 会一直判不符
+            run uci -q delete "smartdns.$_bsu_hit.host_name" 2>/dev/null
+        fi
+        _bsu_n=$((_bsu_n+1))
     done <<'SD_UPSTREAM_EOF'
 alidns 223.5.5.5 udp Cn -
 alidns 223.6.6.6 udp Cn -
@@ -1147,17 +1206,25 @@ google 8.8.4.4 tls Out dns.google
 cloudflare 1.1.1.1 tls Out cloudflare-dns.com
 cloudflare 1.0.0.1 tls Out cloudflare-dns.com
 SD_UPSTREAM_EOF
-    if [ "$_bsd_n" -lt 13 ]; then
-        log "[SMARTDNS] 上游写入数量异常（$_bsd_n < 13），不接管 DNS，保持 dnsmasq 原样"
+    [ "$_bsu_n" -eq 13 ] || { log "[SMARTDNS] 上游按表处理条数异常（$_bsu_n ≠ 13），不接管 DNS"; return 1; }
+    return 0
+}
+
+build_smartdns() {
+    # ① 没装就没有「配置」可言：装与配由 DEPS 节点串起来（装完立刻回调本函数）。
+    if ! _smartdns_installed; then
+        log "[SMARTDNS] smartdns 未安装，无法配置（由末尾 DEPS 节点安装后回调）"
         return 1
     fi
-
+    build_smartdns_main || return 1
+    # 上游没铺满就不接管 DNS：此时 dnsmasq 仍留着 53，不会出现「53 让出去了却没人应答」
+    build_smartdns_upstream || return 1
     # dnsmasq 让出 53：只关 DNS 端口，DHCP/RA 一概不碰。
     # 配置全部由 uci 写出，smartdns 不存在「起不来」的情况，所以不再记录原端口做回滚。
     for _bsd_dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
         run uci -q set "dhcp.$_bsd_dm.port=0"
     done
-    log "[SMARTDNS] 已写入 $_bsd_n 个上游（国内 9 UDP / 境外 4 DoT），dnsmasq 退为纯 DHCP"
+    log "[SMARTDNS] 已写入 13 个上游（国内 9 UDP / 境外 4 DoT），dnsmasq 退为纯 DHCP"
     return 0
 }
 
@@ -1352,7 +1419,10 @@ build_lan_input() {
 # re_enroll / console_enroll_ok / 注册码保管（v.108.52 起为 _park_enroll_key）一次都没被调用过（死代码）。
 # 真机证据（24.10，2026-10-22）：/etc/config/crowdsec_enroll_key.txt 26 字节一直在，
 # 全量日志 grep 不到「已删除注册码文件」，而 cscli console status 是 not registered。
-DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore smartdns bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll deps"
+# [v.180.91] NETBASE 组内顺序：网桥/lxc 链（bridge → lxc_zone → fwd_rules → lan_input →
+#   snat → ip_forward → lxc_auto）排在 smartdns 之前——先把容器网络铺起来，再配 DNS。
+#   dag_order 的组内次序就是取本行里同组节点的相对出现顺序。
+DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto smartdns ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll deps"
 
 # ---- 网络基线模式（--net-only）----
 # 适用场景：镜像没进固件（v.107.7 起不再有 Include Crowdsec 开关，容器恒内置，
@@ -5067,7 +5137,7 @@ _sc_wait_pull() {
 
 
 # 各组节点清单（由 NODE_GROUP_* 派生，供组级 verify/build 遍历；顺序即组内声明序）
-NETBASE_NODES="br_lan_ports lan_static dhcp_ignore smartdns bridge lxc_auto lxc_zone fwd_rules lan_input snat ip_forward svc_bind docker_fw"
+NETBASE_NODES="br_lan_ports lan_static dhcp_ignore bridge lxc_zone fwd_rules lan_input snat ip_forward lxc_auto smartdns svc_bind docker_fw"
 PREP_NODES="ct_net cgroup_mount ct_bootlink ct_resolv"
 INSTALL_NODES="img_migrate rootfs ct_config"
 CAPIBLOCK_NODES="capi_block"

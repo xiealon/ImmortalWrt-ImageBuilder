@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.109"
+SCRIPT_VER="2026-10-27.180.110"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -2999,8 +2999,21 @@ _rom_restore_bouncer() {
     _rbc_cfg=/etc/config/crowdsec
     if [ ! -e "$_rbc_cfg" ] && [ -f "$ROMDIR$_rbc_cfg" ]; then
         mkdir -p "${_rbc_cfg%/*}" 2>/dev/null
-        cp -a "$ROMDIR$_rbc_cfg" "$_rbc_cfg" 2>/dev/null \
-            && log "[bouncer] 配置缺失，已从只读基座恢复 $_rbc_cfg"
+        if cp -a "$ROMDIR$_rbc_cfg" "$_rbc_cfg" 2>/dev/null; then
+            # /rom 里那份是固件出厂版，权限也照抄（常是 600），补回 uci 配置惯用的 644
+            chmod 644 "$_rbc_cfg" 2>/dev/null
+            log "[bouncer] 配置缺失，已从只读基座恢复 $_rbc_cfg"
+            # 【v.180.110】必须强告警：二进制恢复的是「原件」，配置恢复的是「出厂默认值」。
+            # 真机实证（2026-10-27）：/rom 版 341 B/md5 17a7b16f，运行时版 387 B/md5 620ef10e，
+            # 差 46 字节 —— 直接恢复会把用户调过的设置悄悄换成默认值，且发生在配置刚丢、
+            # 人最需要它的时候。所以这里绝不能静默，必须把「这是出厂版」说清楚。
+            # 为什么仍然恢复而不是只告警：配置彻底丢了的时候，「能启动」优于「等人来」；
+            # 但代价必须当场摊开，由人决定是否覆盖回去。
+            log "[bouncer] ** 注意：恢复的是固件出厂版，与丢失前的运行时配置可能不一致"
+            log "[bouncer] ** 请核对：uci show crowdsec（重点 api_url / deny_action / log_level / filter_*）"
+        else
+            log "[bouncer] ** 配置恢复失败：$_rbc_cfg（只读基座不可读或目标不可写）"
+        fi
     fi
     return 0
 }

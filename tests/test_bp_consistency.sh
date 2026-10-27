@@ -33,6 +33,7 @@ python3 - "$BS" \
     build_bridge build_ip_forward \
     verify_wan_input verify_lan_input verify_br_lan_ports verify_lan_static \
     verify_dhcp_ignore verify_wan_removed verify_dns_domain verify_svc_bind \
+    verify_smartdns build_smartdns _sd_main_seg _sd_bound_53 \
     verify_docker_fw verify_lxc_zone verify_fwd_rules verify_snat verify_snat_rule _snat_sec \
     verify_ip_forward verify_bridge \
     build_wan_input build_lan_input build_br_lan_ports build_lan_static \
@@ -544,9 +545,9 @@ reset_all; restore_real; : > "$UCI_STATE"
 chk "C7.1 docker_fw build 成功" ok "$?"
 ( verify_docker_fw ) >/dev/null 2>&1
 chk "C7.2 docker_fw build 之后 verify 通过" ok "$?"
-eq  "C7.3 两条 forwarding 齐全（wan zone 已删，docker2wan 不再存在）" \
+eq  "C7.3 三条 forwarding 齐全" \
    "$(awk -F'|' '$1=="firewall" && $3=="__type__" && $4=="rule"{print $2}' "$UCI_STATE" | sort | tr '\n' ' ')" \
-   "docker2lan lan2docker "
+   "docker2lan docker2wan lan2docker "
 # 未装 dockerd：verify 直接放行（可选功能，不该把整条引导卡死）
 rm -f /tmp/cons_mockbin/dockerd
 ( verify_docker_fw ) >/dev/null 2>&1

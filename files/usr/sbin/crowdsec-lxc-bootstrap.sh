@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.79】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.82】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-bootstrap（旁路由版）
 # 适用拓扑：单臂旁路由——所有物理网口桥进 br-lan，WAN/WAN6 一律禁用，
 #   出口走上游网关，本机不拨号、不跑 DHCP 服务（lan.ignore=1）。
@@ -16,6 +16,9 @@
 #   脚本会写的东西（按配置面分）：
 #     · /etc/config/network   桥端口 / lan 静态地址 / 删 wan+wan6 段 / lxcbr0 段与地址
 #     · /etc/config/dhcp      lan.ignore（关 DHCP / RA / authoritative）
+#                             + 所有 dnsmasq 段 port=0（DNS 让给 smartdns）
+#     · /etc/config/smartdns  主段 enabled/port=53/cache_size；10 个上游
+#                             （国内 6 UDP 走 Cn 组、国外 4 DoT 走 Out 组）
 #     · /etc/config/firewall  lxc zone + 3 条 forwarding / wan·lan input / SNAT /
 #                             docker zone + 3 条 rule（仅装了 dockerd 时）
 #     · /proc/sys/net/ipv4/ip_forward  置 1（写完必须回读，读不回来判失败）
@@ -38,7 +41,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-26.180.80"
+SCRIPT_VER="2026-10-27.180.82"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -659,6 +662,69 @@ verify_dhcp_ignore() {
     return 0
 }
 
+# ---- smartdns 接管 DNS（DNS 从 dnsmasq 手里拿过来）----
+# 目标：smartdns 直接监听 53 当权威解析，dnsmasq 只留 DHCP/RA，不再做 DNS。
+# 上游：国内 6 个 UDP（近、快），国外 4 个 DoT（带 SNI，防污染）。
+# 关于 server_group：smartdns 的 server 默认「既进默认组、又进指定组」，只有显式
+# 加 -exclude-default-group 才会被踢出默认组。所以这里写 Cn/Out 分组不会造成
+# 「分组没人引用 → 上游全不参与解析 → 整机没 DNS」这种坑，两组都会正常出结果。
+SD_DNS_IP_CN="223.5.5.5 223.6.6.6 119.29.29.29 180.76.76.76 114.114.114.114 1.2.4.8"
+SD_DNS_IP_OUT="8.8.8.8 8.8.4.4 1.1.1.1 1.0.0.1"
+SD_DNS_IPS="$SD_DNS_IP_CN $SD_DNS_IP_OUT"
+# dnsmasq 原端口记录（回滚用）："段名:端口" 的空格分隔串，build_smartdns 填
+_SD_DM_ORIG=""
+
+# smartdns 主配置段（config smartdns）的段名；没有则回空
+_sd_main_seg() {
+    run uci -q show smartdns 2>/dev/null \
+        | sed -n 's/^smartdns\.\([^.=]*\)=smartdns$/\1/p' | head -n1
+}
+
+# smartdns 是否真在 53 上监听（flush 决定要不要回滚 dnsmasq 的唯一判据）
+_sd_bound_53() {
+    run pgrep -x smartdns >/dev/null 2>&1 || return 1
+    _sd_ln=$(run netstat -lnup 2>/dev/null)
+    case "$_sd_ln" in
+        *smartdns*) return 0 ;;
+    esac
+    # netstat 不带进程名（实现差异）时退回「53 有人监听 + smartdns 进程活着」，
+    # 这时 dnsmasq 已按 port=0 撤出 53，能监听的只可能是 smartdns。
+    printf '%s\n' "$_sd_ln" | grep -qE '[.:]53[[:space:]]' || return 1
+    return 0
+}
+
+# smartdns 接管验证：主段 enabled/port=53、10 个上游齐全、dnsmasq 已让出 53
+verify_smartdns() {
+    # 没装 smartdns（或只有二进制没有 init）：本节点无事可做，直接算通过。
+    # 绝不在这里判失败 —— 那会把「用官方源构建、没带这个包」的固件判死。
+    [ -x /usr/sbin/smartdns ] || return 0
+    [ -x /etc/init.d/smartdns ] || return 0
+    _vsd_seg=$(_sd_main_seg)
+    [ -n "$_vsd_seg" ] || return 1
+    [ "$(run uci -q get "smartdns.$_vsd_seg.enabled" 2>/dev/null)" = "1" ] || return 1
+    [ "$(run uci -q get "smartdns.$_vsd_seg.port" 2>/dev/null)" = "53" ] || return 1
+    [ "$(run uci -q get "smartdns.$_vsd_seg.cache_size" 2>/dev/null)" = "32768" ] || return 1
+    _vsd_have=""
+    _vsd_cnt=0
+    for _vsd_s in $(run uci -q show smartdns 2>/dev/null | grep -E '=server$' | cut -d. -f2 | cut -d= -f1); do
+        [ "$(run uci -q get "smartdns.$_vsd_s.enabled" 2>/dev/null)" = "1" ] || return 1
+        _vsd_have="$_vsd_have $(run uci -q get "smartdns.$_vsd_s.ip" 2>/dev/null)"
+        _vsd_cnt=$((_vsd_cnt+1))
+    done
+    for _vsd_ip in $SD_DNS_IPS; do
+        case " $_vsd_have " in
+            *" $_vsd_ip "*) ;;
+            *) return 1 ;;
+        esac
+    done
+    [ "$_vsd_cnt" -ge 10 ] || return 1
+    # dnsmasq 必须已经让出 53：port=0 是 OpenWrt 官方的「禁用 DNS」写法
+    for _vsd_dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
+        [ "$(run uci -q get "dhcp.$_vsd_dm.port" 2>/dev/null)" = "0" ] || return 1
+    done
+    return 0
+}
+
 # 探测 network.wan / network.wan6 段是否仍存在，存在则回显段名。
 # 用 uci show 而不是 uci get network.wan：后者依赖"段存在但无 option 时的返回"，
 # 在精简 uci（busybox 版、测试 mock）里两段式路径一律 exit 1，会把"存在"误判成"不存在"。
@@ -980,6 +1046,74 @@ build_dhcp_ignore() {
     return 0
 }
 
+# smartdns 接管 builder：写主段 + 重建 10 个上游 + 让 dnsmasq 交出 53
+# 只写 uci 内存态，重启动作全部交给 flush_uci（那里有「起不来就把端口还回去」的回滚）。
+build_smartdns() {
+    if [ ! -x /usr/sbin/smartdns ] || [ ! -x /etc/init.d/smartdns ]; then
+        log "[SMARTDNS] 未装 smartdns（或缺少 init 脚本），本节点跳过"
+        return 0
+    fi
+    _bsd_seg=$(_sd_main_seg)
+    if [ -z "$_bsd_seg" ]; then
+        run uci -q add smartdns >/dev/null 2>&1
+        _bsd_seg=$(_sd_main_seg)
+        [ -n "$_bsd_seg" ] || { log "[SMARTDNS] 无法创建主配置段"; return 1; }
+    fi
+    run uci -q set "smartdns.$_bsd_seg.enabled=1"
+    run uci -q set "smartdns.$_bsd_seg.port=53"
+    # bind 会盖过 port：LuCI 里若留了 0.0.0.0:6053 这类值，port=53 白写
+    run uci -q delete "smartdns.$_bsd_seg.bind" 2>/dev/null
+    run uci -q set "smartdns.$_bsd_seg.cache_size=32768"
+    run uci -q set "smartdns.$_bsd_seg.serve_expired=1"
+    run uci -q set "smartdns.$_bsd_seg.prefetch_domain=1"
+
+    # 上游整组重建：先删光再按表写，重复引导不会累积出两套重复条目
+    for _bsd_s in $(run uci -q show smartdns 2>/dev/null | grep -E '=server$' | cut -d. -f2 | cut -d= -f1); do
+        run uci -q delete "smartdns.$_bsd_s" 2>/dev/null
+    done
+    _bsd_n=0
+    while read -r _bsd_name _bsd_ip _bsd_tp _bsd_grp _bsd_host; do
+        [ -n "$_bsd_ip" ] || continue
+        run uci -q add smartdns server >/dev/null 2>&1
+        run uci -q set "smartdns.@server[-1].enabled=1"
+        run uci -q set "smartdns.@server[-1].name=$_bsd_name"
+        run uci -q set "smartdns.@server[-1].ip=$_bsd_ip"
+        run uci -q set "smartdns.@server[-1].type=$_bsd_tp"
+        run uci -q set "smartdns.@server[-1].server_group=$_bsd_grp"
+        # DoT 必须带 SNI，否则证书主机名校验必然失败（8.8.8.8 的证书是 dns.google）
+        if [ "$_bsd_tp" = "tls" ] && [ "$_bsd_host" != "-" ]; then
+            run uci -q set "smartdns.@server[-1].host_name=$_bsd_host"
+        fi
+        _bsd_n=$((_bsd_n+1))
+    done <<'SD_UPSTREAM_EOF'
+alidns 223.5.5.5 udp Cn -
+alidns 223.6.6.6 udp Cn -
+dnspod 119.29.29.29 udp Cn -
+baidu 180.76.76.76 udp Cn -
+dns114 114.114.114.114 udp Cn -
+cnnic 1.2.4.8 udp Cn -
+google 8.8.8.8 tls Out dns.google
+google 8.8.4.4 tls Out dns.google
+cloudflare 1.1.1.1 tls Out cloudflare-dns.com
+cloudflare 1.0.0.1 tls Out cloudflare-dns.com
+SD_UPSTREAM_EOF
+    if [ "$_bsd_n" -lt 10 ]; then
+        log "[SMARTDNS] 上游写入数量异常（$_bsd_n < 10），不接管 DNS，保持 dnsmasq 原样"
+        return 1
+    fi
+
+    # dnsmasq 让出 53：只关 DNS 端口，DHCP/RA 一概不碰。原值记下来给 flush 回滚用。
+    _SD_DM_ORIG=""
+    for _bsd_dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
+        _bsd_old=$(run uci -q get "dhcp.$_bsd_dm.port" 2>/dev/null)
+        [ -n "$_bsd_old" ] || _bsd_old=53
+        _SD_DM_ORIG="$_SD_DM_ORIG $_bsd_dm:$_bsd_old"
+        run uci -q set "dhcp.$_bsd_dm.port=0"
+    done
+    log "[SMARTDNS] 已写入 $_bsd_n 个上游（国内 6 UDP / 国外 4 DoT），dnsmasq 退为纯 DHCP"
+    return 0
+}
+
 # lxc zone + 四条转发规则（lxc2lan / lxc2docker / lxc2vpn / lan2lxc）
 build_lxc_zone_fwd() {
     if [ -z "$(_zone_sec lxc)" ]; then
@@ -1076,7 +1210,7 @@ build_lan_input() {
 # re_enroll / console_enroll_ok / 注册码保管（v.108.52 起为 _park_enroll_key）一次都没被调用过（死代码）。
 # 真机证据（24.10，2026-10-22）：/etc/config/crowdsec_enroll_key.txt 26 字节一直在，
 # 全量日志 grep 不到「已删除注册码文件」，而 cscli console status 是 not registered。
-DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll"
+DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore smartdns bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink lxc_auto ct_resolv svc_bind docker_fw capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll"
 
 # ---- 网络基线模式（--net-only）----
 # 适用场景：镜像没进固件（v.107.7 起不再有 Include Crowdsec 开关，容器恒内置，
@@ -1112,6 +1246,9 @@ DEP_rootfs="img_migrate"
 DEP_br_lan_ports=""
 DEP_lan_static="br_lan_ports"
 DEP_dhcp_ignore=""
+# smartdns 与 dhcp_ignore 都碰 /etc/config/dhcp，但字段不重叠（ignore/ra vs port）：
+# 谁先谁后都不冲突，故不声明相互依赖。它也不依赖 LAN 地址（监听 0.0.0.0:53）。
+DEP_smartdns=""
 DEP_bridge="lan_static"
 # ct_net / ct_bootlink / ct_resolv 写的是容器 rootfs 里的文件（10-eth0.network、
 # 自启软链、resolv.conf），显式依赖 rootfs。rootfs 属 INSTALL 组，而 INSTALL 排在
@@ -1166,7 +1303,7 @@ DEP_enroll="capi_release"
 # 以及 capi_block / ct_boot 的硬前置。放在 PREP 之后时，PREP 里那些节点拿不到
 # rootfs → 失败 → hard 终止 → INSTALL 永不执行 → rootfs 永不解压（自锁）。
 GROUP_SEQ="NETBASE INSTALL PREP CAPIBLOCK BOOT LOGCONF LAPI BOUNCERVERIFY ENROLL"
-GROUP_TITLE_NETBASE="网络基线（br-lan / lxcbr0 双网桥 + 防火墙 zone 与转发规则），最优先执行，不依赖 rootfs"
+GROUP_TITLE_NETBASE="网络基线（br-lan / lxcbr0 双网桥 + 防火墙 zone 与转发规则 + smartdns 接管 53），最优先执行，不依赖 rootfs"
 GROUP_TITLE_INSTALL="安装容器（迁移校验镜像 / 解压 rootfs / 写 config）"
 GROUP_TITLE_PREP="容器启动前的全部静态准备（路由器网桥 / 容器网络 / cgroup）"
 GROUP_TITLE_CAPIBLOCK="屏蔽 CAPI（容器内 online_client 停用）"
@@ -1192,6 +1329,7 @@ NODE_GROUP_ct_config=INSTALL
 NODE_GROUP_br_lan_ports=NETBASE
 NODE_GROUP_lan_static=NETBASE
 NODE_GROUP_dhcp_ignore=NETBASE
+NODE_GROUP_smartdns=NETBASE
 NODE_GROUP_bridge=NETBASE
 NODE_GROUP_ct_net=PREP
 NODE_GROUP_cgroup_mount=PREP
@@ -1609,7 +1747,7 @@ _nft_fw_report() {
 # 每组至多一次。commit 只把内存改动落到 /etc/config/*，reload 才让运行中的进程读到新值，
 # 两者必须成对：
 flush_uci() {
-    _n=0; _d=0; _f=0
+    _n=0; _d=0; _f=0; _s=0
     _fu_bad=""
     # 判「脏」即「非空」：值现在是 B:<时间戳>，不再是 1
     for _o in br_lan_ports lan_static bridge; do
@@ -1617,6 +1755,11 @@ flush_uci() {
     done
     for _o in dhcp_ignore; do
         _bs_flag_on "_dirty_$_o" && _d=1
+    done
+    # smartdns 单独一档：它要 commit 两份配置（smartdns + dhcp），还要「先让 dnsmasq
+    # 放 53、再拉 smartdns、起不来就还回去」，跟单纯的 commit+reload 不是一回事。
+    for _o in smartdns; do
+        _bs_flag_on "_dirty_$_o" && _s=1
     done
     for _o in lxc_zone fwd_rules lan_input snat docker_fw; do
         _bs_flag_on "_dirty_$_o" && _f=1
@@ -1679,6 +1822,57 @@ flush_uci() {
         fi
     fi
 
+    # ---- smartdns：接管 53（先让 dnsmasq 退，再拉 smartdns；起不来立刻把端口还回去）----
+    # 顺序不能反：dnsmasq 还占着 53 时 smartdns 绑不上；可一旦 dnsmasq 撤走、smartdns
+    # 又起不来，全屋解析就断在这里。所以撤完立刻验 53，验不过就把 dnsmasq 端口还原。
+    if [ "$_s" = 1 ]; then
+        if run uci -q commit smartdns; then
+            log "[flush] smartdns 已提交"
+        else
+            _fu_bad="$_fu_bad smartdns-commit"
+            log "[flush] smartdns 提交失败：改动只在内存里，重启即丢"
+        fi
+        if run uci -q commit dhcp; then
+            log "[flush] dhcp 已提交（dnsmasq 的 DNS 端口置 0）"
+        else
+            _fu_bad="$_fu_bad dhcp-commit"
+            log "[flush] dhcp 提交失败：改动只在内存里，重启即丢"
+        fi
+        # ① dnsmasq 先松手
+        run_svc /etc/init.d/dnsmasq restart >/dev/null 2>&1 \
+            || log "[flush] dnsmasq 重启失败（53 可能仍被占用）"
+        # ② 拉 smartdns，并确保开机自启（否则重启后 53 空着，整机没 DNS）
+        run /etc/init.d/smartdns enable >/dev/null 2>&1
+        run_svc /etc/init.d/smartdns restart >/dev/null 2>&1 \
+            || log "[flush] smartdns 重启失败"
+        sleep 1
+        # ③ 验 53：不过就回滚。宁可回到「dnsmasq 做 DNS」，也不要留一台没 DNS 的路由器。
+        if _sd_bound_53; then
+            log "[flush] smartdns 已接管 53（dnsmasq 只剩 DHCP/RA）"
+        else
+            log "[flush] smartdns 未在 53 上监听，回滚 dnsmasq 的 DNS 端口，避免整机失解析"
+            if [ -n "$_SD_DM_ORIG" ]; then
+                for _fu_sd in $_SD_DM_ORIG; do
+                    _fu_sd_seg=${_fu_sd%%:*}
+                    _fu_sd_prt=${_fu_sd##*:}
+                    run uci -q set "dhcp.$_fu_sd_seg.port=$_fu_sd_prt"
+                done
+            else
+                # 记录丢了（跨轮/子 shell）：按 dnsmasq 默认端口兜底还原
+                for _fu_sd_seg in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
+                    run uci -q set "dhcp.$_fu_sd_seg.port=53"
+                done
+            fi
+            if run uci -q commit dhcp; then
+                log "[flush] dnsmasq 端口已还原"
+            else
+                log "[flush] dnsmasq 端口还原提交失败（配置已落盘，下次重启仍生效）"
+            fi
+            run_svc /etc/init.d/dnsmasq restart >/dev/null 2>&1
+            _fu_bad="$_fu_bad smartdns-bind53"
+        fi
+    fi
+
     # 清脏标记：把 DAG 里所有网络/服务侧节点全扫一遍，比手写清单更抗漏。
     # （原先手写清单漏过 bridge / svc_bind，残留脏标记会让下一轮多 reload 一次。）
     for _o in $DAG_NODES; do
@@ -1695,7 +1889,7 @@ flush_uci() {
         fi
         _bs_flag_clear "_dirty_$_o"   # v.99：置位值是 B:<ts>，归零 = 清空（写 0 会被判成脏）
     done
-    [ "$_n$_d$_f" = "000" ] && log "[flush] 无配置改动，零 commit、零 reload"
+    [ "$_n$_d$_f$_s" = "0000" ] && log "[flush] 无配置改动，零 commit、零 reload"
     # 提交/重载失败必须能被上层看见：--net-only 据此 exit 1，不再「日志写了失败、
     # 退出码却是 0」。commit 失败尤其严重——改动只在内存里，重启就没了。
     if [ -n "$_fu_bad" ]; then
@@ -4739,7 +4933,7 @@ _sc_wait_pull() {
 
 
 # 各组节点清单（由 NODE_GROUP_* 派生，供组级 verify/build 遍历；顺序即组内声明序）
-NETBASE_NODES="br_lan_ports lan_static dhcp_ignore bridge lxc_auto lxc_zone fwd_rules lan_input snat ip_forward svc_bind docker_fw"
+NETBASE_NODES="br_lan_ports lan_static dhcp_ignore smartdns bridge lxc_auto lxc_zone fwd_rules lan_input snat ip_forward svc_bind docker_fw"
 PREP_NODES="ct_net cgroup_mount ct_bootlink ct_resolv"
 INSTALL_NODES="img_migrate rootfs ct_config"
 CAPIBLOCK_NODES="capi_block"

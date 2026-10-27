@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.110"
+SCRIPT_VER="2026-10-27.180.111"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -2984,7 +2984,10 @@ _bouncer_missing_deps() {
     # 真机实测：rm /etc/config/crowdsec 后 _bouncer_rule_sane 静默无输出、文件不回来。
     # 它必须单独判，不能指望 _rom_restore_pkg：那个函数对 /etc/config/* 与 conffiles
     # 一律跳过（不覆盖用户改动），配置恢复只由 _rom_restore_bouncer 的特判负责。
-    [ -f /etc/config/crowdsec ] || _BOUNCER_MISSING="$_BOUNCER_MISSING /etc/config/crowdsec"
+    # 【v.180.111】判据升级：从「文件存在」改为「字段正确」。
+    # 真机实测出厂版是 enabled='0' / api_key='' / api_url=localhost / interface=eth1，
+    # 文件在、bouncer 却不会启动 —— 只查存在性会把这种情况当健康态放过去。
+    _bouncer_cfg_ok || _BOUNCER_MISSING="$_BOUNCER_MISSING crowdsec配置"
     [ -z "$_BOUNCER_MISSING" ]
 }
 
@@ -2992,27 +2995,53 @@ _bouncer_missing_deps() {
 # .list 里含 /etc/config/crowdsec，而通用逻辑对 /etc/config/* 与 conffiles 一律跳过 ——
 # 那对「用户改过配置」是对的，但对「整个文件都没了」等于不修。
 # 所以这里特判：文件不存在才拷回，存在则一个字节不动（哪怕内容被改过）。
+# 【v.180.111】配置判据不再是「文件在不在」，而是「字段对不对」。
+# 与 verify_bouncer_fill 同口径（enabled / api_url / api_key 三项），但独立实现：
+# bouncer_fill 属 LAPI 组，探针属 BOUNCERVERIFY 组，跨组调用会把两组的完成语义搅在一起。
+# 真机依据：出厂版文件在、字段全错（enabled='0'），只查存在性等于放行。
+_bouncer_cfg_ok() {
+    [ -f /etc/config/crowdsec ] || return 1
+    _bco_sec=$(run uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    [ -n "$_bco_sec" ] || return 1
+    [ "$(run uci -q get "$_bco_sec.enabled" 2>/dev/null)" = "1" ] || return 1
+    [ "$(run uci -q get "$_bco_sec.api_url" 2>/dev/null)" = "http://${CONTAINER_IP}:${LAPI_PORT}/" ] || return 1
+    [ -n "$(run uci -q get "$_bco_sec.api_key" 2>/dev/null)" ] || return 1
+    return 0
+}
 _rom_restore_bouncer() {
     _rom_restore_tree crowdsec-firewall-bouncer
     # nft 走递归：libnftables.so* 与 libnftnl11 在 Depends 里，一并补
     _rom_restore_tree nftables-json
+    # 【v.180.111】配置一律重建，不再从只读基座拷出厂版。
+    # 真机实测（2026-10-27）出厂版本身不可用：
+    #   enabled '0' / api_key '' / api_url http://localhost:8080/ / list interface 'eth1'
+    # 照抄过来 init 根本不会拉起 bouncer —— 等于把「配置缺失」换成了「配置在但静默失能」，
+    # 后者更隐蔽（缺失至少会报 not found）。而 _bouncer_uci_apply 本来就能从零建段，
+    # api_key 由 LAPI 注册时签发 —— 这与「lxc 缺了就重装」是同一套思路：
+    # 判据不对就重建，而不是拿一份旧副本凑合。
     _rbc_cfg=/etc/config/crowdsec
-    if [ ! -e "$_rbc_cfg" ] && [ -f "$ROMDIR$_rbc_cfg" ]; then
+    if [ ! -e "$_rbc_cfg" ]; then
+        # uci 对不存在的配置文件无法 add section，先落一个空文件占位
         mkdir -p "${_rbc_cfg%/*}" 2>/dev/null
-        if cp -a "$ROMDIR$_rbc_cfg" "$_rbc_cfg" 2>/dev/null; then
-            # /rom 里那份是固件出厂版，权限也照抄（常是 600），补回 uci 配置惯用的 644
-            chmod 644 "$_rbc_cfg" 2>/dev/null
-            log "[bouncer] 配置缺失，已从只读基座恢复 $_rbc_cfg"
-            # 【v.180.110】必须强告警：二进制恢复的是「原件」，配置恢复的是「出厂默认值」。
-            # 真机实证（2026-10-27）：/rom 版 341 B/md5 17a7b16f，运行时版 387 B/md5 620ef10e，
-            # 差 46 字节 —— 直接恢复会把用户调过的设置悄悄换成默认值，且发生在配置刚丢、
-            # 人最需要它的时候。所以这里绝不能静默，必须把「这是出厂版」说清楚。
-            # 为什么仍然恢复而不是只告警：配置彻底丢了的时候，「能启动」优于「等人来」；
-            # 但代价必须当场摊开，由人决定是否覆盖回去。
-            log "[bouncer] ** 注意：恢复的是固件出厂版，与丢失前的运行时配置可能不一致"
-            log "[bouncer] ** 请核对：uci show crowdsec（重点 api_url / deny_action / log_level / filter_*）"
-        else
-            log "[bouncer] ** 配置恢复失败：$_rbc_cfg（只读基座不可读或目标不可写）"
+        : > "$_rbc_cfg" 2>/dev/null
+    fi
+    if _bouncer_uci_apply; then
+        chmod 644 "$_rbc_cfg" 2>/dev/null
+        log "[bouncer] 配置已按标准字段重建（api_url=${CONTAINER_IP}:${LAPI_PORT} / enabled=1 / interface=br-lan）"
+    else
+        log "[bouncer] ** 配置重建失败：$_rbc_cfg（uci 不可用或写入受限）"
+        return 0
+    fi
+    # api_key 只能由 LAPI 签发，读不回来。重建后为空属正常，就地补一次注册。
+    _rbc_sec=$(run uci show crowdsec 2>/dev/null | grep '=bouncer$' | head -n1 | cut -d= -f1)
+    if [ -n "$_rbc_sec" ]; then
+        if [ -z "$(run uci -q get "$_rbc_sec.api_key" 2>/dev/null)" ]; then
+            if _bouncer_register_once; then
+                log "[bouncer] api_key 为空，已重新注册并写入（bouncer 需重启才生效）"
+                _bouncer_service_restart >/dev/null 2>&1 || true
+            else
+                log "[bouncer] ** api_key 为空且注册失败（容器/LAPI 未就绪），下一轮会再试"
+            fi
         fi
     fi
     return 0

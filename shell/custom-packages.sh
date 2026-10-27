@@ -32,7 +32,7 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES keepalived luci-app-keepalived luci-i18n-keepa
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-fs-cifs cifsmount luci-app-cifs-mount luci-i18n-cifs-mount-zh-cn"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-nft-tproxy kmod-nft-socket luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn xray-core xray-plugin v2ray-plugin v2ray-geoip v2ray-geosite shadowsocks-rust-sslocal shadowsocks-rust-ssserver shadowsocksr-libev-ssr-redir shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-server trojan-plus tuic-client shadow-tls naiveproxy simple-obfs-client microsocks dns2socks ipt2socks chinadns-ng tcping libopenssl3"
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-nft-tproxy kmod-nft-socket xray-core naiveproxy luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-usb-printer luci-app-usb-printer luci-i18n-usb-printer-zh-cn"
 

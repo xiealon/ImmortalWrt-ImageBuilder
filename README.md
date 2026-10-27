@@ -2550,6 +2550,27 @@ bootstrap 里有 `_rom_restore_tree nftables-json`，但两条构建线的包清
 
 新增 `S128` 静态检查：bootstrap 里每个手写常量恢复目标，两条包清单都得有。
 
+### 版本号统一：三个脚本同一个号
+
+以前三个脚本各自漂着：bootstrap `180.116`、probe `180.119`、guard 停在 `180.78`。
+真机上排查「到底刷的是哪批」时，三个号对不上很绕。
+
+现在统一为 `2026-10-28.180.119`，并加了机械保障：
+
+| 检查 | 位置 | 内容 |
+|---|---|---|
+| `S129` | `check_bp_static.py` | bootstrap / probe / guard 的 `SCRIPT_VER` 必须完全相同 |
+| `R34.51` | `tests/lapi_ladder.sh` | 同上（真机侧） |
+| `R35.1l` | `tests/probe_boot_heal.sh` | 探针必须与 bootstrap 同版本 |
+
+顺带清掉两处负资产：`lapi_ladder.sh` 与 `log_trim.sh` 里原本钉死
+`SCRIPT_VER="2026-10-24.180.78"`（早已过期，一直在 FAIL），改成只查格式合法。
+**以后升级不用再改测试。**
+
+一处要注意：bootstrap 用 `SCRIPT_VER` 给 `CFG_SHA_FILE` 打基线钉子。
+改版本号 = 旧基线作废 = 下次运行会重写一遍配置哈希。这是设计如此
+（避免升级后全红），不是副作用。
+
 ### 返回码不变
 
 | 码 | 含义 | 处置 |

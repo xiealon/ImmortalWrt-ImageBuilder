@@ -70,6 +70,8 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-xfrpc luci-i18n-xfrpc-zh-cn xfrpc"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-zerotier luci-i18n-zerotier-zh-cn zerotier"
 
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-daed-zh-cn"
+
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard kmod-wireguard wireguard-tools"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES lucky luci-app-lucky luci-i18n-lucky-zh-cn yq kmod-dummy ca-bundle"

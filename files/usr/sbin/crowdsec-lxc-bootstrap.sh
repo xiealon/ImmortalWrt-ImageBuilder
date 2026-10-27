@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.115"
+SCRIPT_VER="2026-10-28.180.116"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -789,6 +789,43 @@ _rom_restore_smartdns() {
     return 0
 }
 
+# luci-app-smartdns 界面是否可用（v.180.116）。
+# 与 _smartdns_installed 的区别在于「缺了之后谁承压」：
+#   · smartdns 本体是功能闸门 —— 缺了整轮引导就该停，走 _pkg_missing_all；
+#   · 界面只是可看可点 —— 脚本一行都不依赖它（只用 uci + /usr/sbin/smartdns + init.d），
+#     所以进不了 _pkg_missing_all，否则「界面被卸」会把 pkg_base 判成硬失败、
+#     经 _structurally_broken 一路把引导带走，代价和收益完全不成比例。
+# 判据取向（关键）：
+#   · 固件压根没编界面（$ROMDIR 里没有安装清单）→ 算「本来就没有」，返回 0，
+#     不判缺、不尝试恢复、不报警。老固件（如 2026-04-22 那版）就是这个情形，
+#     换成新固件之前本函数必须静默通过，否则每轮都白恢复一次。
+#   · 固件编了、现在没了 → 返回 1，交给 build_pkg_base 第 ③ 段从只读基座补回。
+# 两个文件一起判：menu.d 决定菜单出不出现，smartdns-call 是界面按钮的实际后端，
+# 少任何一个界面都是残的（能点开、点了没反应，比没菜单更误导）。
+# 路径带 $PKGROOT 前缀：生产环境它为空串（判的就是真实 /usr/...），
+# 只在 tests/luci_restore.sh 里被替换成临时目录 —— 否则「界面缺失」这种情形
+# 没法在不动真机的前提下复现。
+_luci_smartdns_ok() {
+    if [ -f "$PKGROOT/usr/share/luci/menu.d/luci-app-smartdns.json" ] \
+       && [ -f "$PKGROOT/usr/libexec/smartdns-call" ]; then
+        return 0
+    fi
+    [ -f "$ROMDIR/usr/lib/opkg/info/luci-app-smartdns.list" ] || return 0
+    return 1
+}
+
+# 恢复 luci-app-smartdns：纯前端包（menu.d / rpcd acl / view js / smartdns-call），
+# 无二进制、无 init、无 conffiles 之外的状态。
+# 只调 _rom_restore_pkg，**不调 _rom_restore_tree** —— 它的 Depends 里有 luci-base，
+# 递归进去会一路碰 rpcd / ubus / ucode 一大片，那是基础系统，不归 pkg_base 管；
+# 而界面被卸的情形里 luci-base 从来都是好的，递归只有风险没有收益。
+# smartdns 本体也不在这里补：上一段 ② 已经单独处理，各管各的。
+_rom_restore_luci_smartdns() {
+    [ -f "$ROMDIR/usr/lib/opkg/info/luci-app-smartdns.list" ] || return 1
+    _rom_restore_pkg luci-app-smartdns
+    return 0
+}
+
 # smartdns 是否真在位：二进制 + init 脚本缺一不可（少了 init 就没法启停，等于没装）
 # 【v.180.105】同 lxc 一样加冒烟：opkg remove libopenssl3 之后两个 -x 判断依然为真，
 # 只有真跑才看得见动态库缺口。取向也一致 —— 只有明确的加载错误才判「不在位」；
@@ -1475,9 +1512,12 @@ build_deps() {
 # 一样跑不起来 —— 见 _lxc_missing_deps 的五件套。
 # 【v.180.102】闸门扩到 smartdns：判据 _pkg_missing_all（lxc 五件套 + smartdns 二进制/init），
 # 两项都要，缺哪项就在日志里点名哪项。
+# 【v.180.116】再叠一层 luci-app-smartdns，但**不是闸门**：它缺了本节点一样算过，
+# 只是顺手补回（见 _luci_smartdns_ok 的取向说明）。功能闸门仍然只有前两项。
 # 只读不写：本节点不装包、不写 uci、不碰容器。
 verify_pkg_base() {
-    _pkg_missing_all
+    _pkg_missing_all || return 1
+    _luci_smartdns_ok
 }
 
 # 缺件才动，缺什么补什么：lxc 走全家桶通配，smartdns 走单包递归，互不连坐。
@@ -1485,6 +1525,11 @@ verify_pkg_base() {
 build_pkg_base() {
     if _pkg_missing_all; then
         log "[PKG] 必备组件齐备：lxc 五件套（start/stop/ls/info/attach）+ smartdns（固件自带）"
+        if ! _luci_smartdns_ok; then
+            log "[PKG] 界面 luci-app-smartdns 缺失（固件里有、现在没了）—— 单独补，不影响上面两项"
+            _rom_restore_luci_smartdns \
+                || log "[PKG] 只读基座里没有 luci-app-smartdns 的安装清单，界面不恢复（不影响引导）"
+        fi
         return 0
     fi
     log "[PKG] 必备组件缺失：$_PKG_MISSING —— 先试只读基座 $ROMDIR"
@@ -1498,13 +1543,19 @@ build_pkg_base() {
         _rom_restore_smartdns \
             || log "[PKG] 只读基座里没有 smartdns 的安装清单（$ROMDIR/usr/lib/opkg/info/smartdns.list）"
     fi
+    # ③ luci-app-smartdns：界面，可选件。补不上只记一条，绝不影响本节点成败
+    if ! _luci_smartdns_ok; then
+        _rom_restore_luci_smartdns \
+            || log "[PKG] 只读基座里没有 luci-app-smartdns 的安装清单，界面不恢复（不影响引导）"
+    fi
     hash -r 2>/dev/null || true
     if _pkg_missing_all; then
         log "[PKG] 已从只读基座恢复，必备组件齐全"
+        _luci_smartdns_ok || log "[PKG] 提示：LuCI 界面仍未恢复（只影响网页配置，不影响引导与自愈）"
         return 0
     fi
     log "[PKG] 恢复后仍缺：$_PKG_MISSING"
-    log "[PKG] 固件未内置：查 shell/custom-packages.sh（24.10）/ shell/apk-custom-packages.sh（25.12）里的 CUSTOM_PACKAGES —— lxc 全家桶与 smartdns 都必须随固件进 /rom"
+    log "[PKG] 固件未内置：查 shell/custom-packages.sh（24.10）/ shell/apk-custom-packages.sh（25.12）里的 CUSTOM_PACKAGES —— lxc 全家桶、smartdns、luci-app-smartdns 都必须随固件进 /rom"
     return 1
 }
 

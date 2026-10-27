@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.111"
+SCRIPT_VER="2026-10-27.180.112"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -705,7 +705,7 @@ SD_DNS_IPS="$SD_DNS_IP_CN $SD_DNS_IP_OUT"
 #   · 判据仍是「命令/文件真能用」而不是包名：lxc 看五件套，smartdns 看二进制 + init；
 #   · 缺任何一个都先走 /rom 文件级自愈（lxc→_rom_restore_lxc，smartdns→_rom_restore_smartdns）；
 #   · 自愈后仍缺才 hard exit 1。
-_SD_MISSING=""
+_LXC_MISSING=""
 _PKG_MISSING=""
 
 # ---- 只读基座（/rom）文件级自愈（v.180.101）----
@@ -800,7 +800,8 @@ _smartdns_installed() {
     return 0
 }
 
-# 必备组件缺哪些（lxc 五件套）：全在返回 0；否则返回 1，缺失清单留在 _SD_MISSING。
+# 必备组件缺哪些（lxc 五件套）：全在返回 0；否则返回 1，缺失清单留在 _LXC_MISSING。
+# 【v.180.112】只管 lxc，不含 smartdns —— 后者见 _smartdns_installed。
 # 只读不写 —— verify / build 两侧都用它。
 # 五个命令逐一查：lxc-ls / lxc-info / lxc-attach 都是独立 applet 包（各自一个 ipk/apk），
 # 没有任何反向依赖会把它们拉进来；只查 lxc-start 会得出「装好了」的假阳性 —— v.180.99 修正。
@@ -811,19 +812,23 @@ _smartdns_installed() {
 # 所以五件套齐全后再跑一次 lxc-start --version 冒烟（一次进程，约 10ms）。
 # 判据取向：只有明确看到动态库加载错误才判缺。反过来的「误判成缺」会让 pkg_base
 # 硬失败、把整轮引导带走，代价远大于漏报，所以其余任何异常输出一律放过。
-_sd_missing_deps() {
-    _SD_MISSING=""
+# 【v.180.112】本函数旧名带 sd 字样，有歧义：函数体只查 lxc 五件套，
+# 与 smartdns 毫无关系；而 _pkg_missing_all / verify_sd_serve 都带 sd 字样，
+# 三处混在一起看，很容易以为「smartdns 的检查在这儿」。
+# smartdns 的检查在 _smartdns_installed，由 _pkg_missing_all 单独调用。
+_lxc_missing_deps() {
+    _LXC_MISSING=""
     for _md_c in lxc-start lxc-stop lxc-ls lxc-info lxc-attach; do
-        command -v "$_md_c" >/dev/null 2>&1 || _SD_MISSING="$_SD_MISSING $_md_c"
+        command -v "$_md_c" >/dev/null 2>&1 || _LXC_MISSING="$_LXC_MISSING $_md_c"
     done
     # 文件齐了才冒烟：缺文件时上面已经判过，不必再花一次进程
-    if [ -z "$_SD_MISSING" ]; then
+    if [ -z "$_LXC_MISSING" ]; then
         case "$(lxc-start --version 2>&1)" in
             *"Error loading"*|*"No such file"*|*"not found"*|*"cannot open shared object"*)
-                _SD_MISSING=" lxc(动态库)" ;;
+                _LXC_MISSING=" lxc(动态库)" ;;
         esac
     fi
-    [ -z "$_SD_MISSING" ]
+    [ -z "$_LXC_MISSING" ]
 }
 
 # 必备组件总闸门（v.180.102）：lxc 五件套 + smartdns，全齐返回 0；否则返回 1，
@@ -834,7 +839,7 @@ _sd_missing_deps() {
 #   那一节点已经是 Ⅲ（配置），届时缺的是二进制而不是配置，报错会指向错误的方向。
 _pkg_missing_all() {
     _PKG_MISSING=""
-    _sd_missing_deps || _PKG_MISSING="$_SD_MISSING"
+    _lxc_missing_deps || _PKG_MISSING="$_LXC_MISSING"
     # 判据复用 _smartdns_installed（二进制 + init 两个都要可执行），不另立一套口径
     if ! _smartdns_installed; then
         _PKG_MISSING="${_PKG_MISSING:+$_PKG_MISSING }smartdns"
@@ -1439,8 +1444,8 @@ verify_deps() {
         log "[DEPS] 网络不通（网关 / 公网 IP / DNS 至少一层没过）"
         return 1
     fi
-    if ! _sd_missing_deps; then
-        log "[DEPS] lxc 命令不在位：$_SD_MISSING（pkg_base 已在 Ⅱ 阶段拦过，这里出现说明中途被摘）"
+    if ! _lxc_missing_deps; then
+        log "[DEPS] lxc 命令不在位：$_LXC_MISSING（pkg_base 已在 Ⅱ 阶段拦过，这里出现说明中途被摘）"
         return 1
     fi
     verify_smartdns_main || { log "[DEPS] smartdns 主段配置不符"; return 1; }
@@ -1465,7 +1470,7 @@ build_deps() {
 #   · 后面：lxc_auto 要 lxc-auto 的服务脚本，smartdns 要二进制，都得等本节点恢复完。
 # 包的来源只有一处：固件内置（构建期 PACKAGES 装进 /rom）。脚本不联网装包。
 # 判据是「命令/文件真能用」而不是「包名在列表里」：liblxc 在、lxc 壳在、applet 缺一个，
-# 一样跑不起来 —— 见 _sd_missing_deps 的五件套。
+# 一样跑不起来 —— 见 _lxc_missing_deps 的五件套。
 # 【v.180.102】闸门扩到 smartdns：判据 _pkg_missing_all（lxc 五件套 + smartdns 二进制/init），
 # 两项都要，缺哪项就在日志里点名哪项。
 # 只读不写：本节点不装包、不写 uci、不碰容器。
@@ -1482,7 +1487,7 @@ build_pkg_base() {
     fi
     log "[PKG] 必备组件缺失：$_PKG_MISSING —— 先试只读基座 $ROMDIR"
     # ① lxc：applet 是各自独立的包，必须扫 lxc-*.list 全量恢复，再补 liblxc 依赖树
-    if ! _sd_missing_deps; then
+    if ! _lxc_missing_deps; then
         _rom_restore_lxc \
             || log "[PKG] 只读基座里没有 lxc 的安装清单（$ROMDIR/usr/lib/opkg/info/lxc-*.list）"
     fi

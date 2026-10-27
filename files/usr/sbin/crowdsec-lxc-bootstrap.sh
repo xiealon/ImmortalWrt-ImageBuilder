@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.99"
+SCRIPT_VER="2026-10-27.180.101"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -696,21 +696,89 @@ SD_DNS_IPS="$SD_DNS_IP_CN $SD_DNS_IP_OUT"
 # docker 不再必选：路由上跑不跑 docker 是用户的选择，缺 dockerd 时 docker_fw 自己豁免。
 _SD_MISSING=""
 
+# ---- 只读基座（/rom）文件级自愈（v.180.101）----
+# 前提：固件把 lxc / smartdns 编进 PACKAGES，于是 /rom 里有二进制，
+#       还留着 /rom/usr/lib/opkg/info/*.list / *.control 这套元数据。
+# 语义：opkg remove 并不会删掉 /rom 里的原件，只在 overlay 层写一个 whiteout 把上层遮住。
+#       所以「恢复」= 按清单把 /rom 的原件拷回运行时路径，不联网、不装包。
+# 边界：不修 opkg 数据库（opkg list-installed 依旧看不到它），也不覆盖 conffiles
+#       （/etc/config/* 这类用户配置一律跳过，配置由 build_smartdns 按 uci 重写）。
+ROMDIR="${ROMDIR:-/rom}"
+# PKGROOT 只给夹具用：生产环境为空串，写的仍是真实路径 /usr/...
+PKGROOT="${PKGROOT:-}"
+
+# 恢复单个包：只补「运行时不存在、只读基座存在」的文件，其余一概不动
+_rom_restore_pkg() {
+    _rrp_base="$ROMDIR/usr/lib/opkg/info"
+    [ -f "$_rrp_base/$1.list" ] || return 1
+    _rrp_n=0
+    while IFS= read -r _rrp_f; do
+        case "$_rrp_f" in
+            /etc/config/*) continue ;;
+            /?*) ;;
+            *) continue ;;
+        esac
+        # conffiles 不动：那是用户的 /etc/config，恢复出厂值等于删他的配置
+        if [ -f "$_rrp_base/$1.conffiles" ] \
+           && grep -qxF "$_rrp_f" "$_rrp_base/$1.conffiles" 2>/dev/null; then
+            continue
+        fi
+        [ -e "$PKGROOT$_rrp_f" ] && continue
+        [ -e "$ROMDIR$_rrp_f" ] || continue
+        mkdir -p "$PKGROOT${_rrp_f%/*}" 2>/dev/null
+        cp -a "$ROMDIR$_rrp_f" "$PKGROOT$_rrp_f" 2>/dev/null && _rrp_n=$((_rrp_n + 1))
+    done < "$_rrp_base/$1.list"
+    [ "$_rrp_n" -gt 0 ] && log "[PKG] 从只读基座恢复 $1：$_rrp_n 个文件"
+    return 0
+}
+
+# 连依赖一起恢复（最多三层，防止环）。
+# libc / libpthread / busybox / kernel / kmod-* 一律跳过：动它们不是「恢复」是「砸系统」。
+_rom_restore_tree() {
+    _rrt_d="${2:-0}"
+    [ "$_rrt_d" -le 2 ] || return 0
+    _rom_restore_pkg "$1"
+    _rrt_ctl="$ROMDIR/usr/lib/opkg/info/$1.control"
+    [ -f "$_rrt_ctl" ] || return 0
+    for _rrt_x in $(sed -n 's/^Depends:[[:space:]]*//p' "$_rrt_ctl" 2>/dev/null | head -n1 | tr ',' ' '); do
+        case "$_rrt_x" in
+            libc|libpthread|libgcc*|librt|libm|kernel|kmod-*|busybox*) continue ;;
+        esac
+        [ -f "$ROMDIR/usr/lib/opkg/info/$_rrt_x.list" ] || continue
+        _rom_restore_tree "$_rrt_x" $((_rrt_d + 1))
+    done
+    return 0
+}
+
+# lxc 全家桶：/rom 里装了哪些 lxc-* 就恢复哪些（applet 是独立包，不会互相拉）
+_rom_restore_lxc() {
+    _rl_any=0
+    for _rl_l in "$ROMDIR"/usr/lib/opkg/info/lxc-*.list; do
+        [ -f "$_rl_l" ] || continue
+        _rl_p="${_rl_l##*/}"
+        _rom_restore_pkg "${_rl_p%.list}"
+        _rl_any=1
+    done
+    [ "$_rl_any" = 1 ] || return 1
+    _rom_restore_tree liblxc
+    return 0
+}
+
 # smartdns 是否真在位：二进制 + init 脚本缺一不可（少了 init 就没法启停，等于没装）
 _smartdns_installed() {
     [ -x /usr/sbin/smartdns ] && [ -x /etc/init.d/smartdns ]
 }
 
-# 必备组件缺哪些（lxc 五件套 + smartdns）：全在返回 0；否则返回 1，缺失清单留在 _SD_MISSING。
+# 必备组件缺哪些（lxc 五件套）：全在返回 0；否则返回 1，缺失清单留在 _SD_MISSING。
 # 只读不写 —— verify / build 两侧都用它。
 # 五个命令逐一查：lxc-ls / lxc-info / lxc-attach 都是独立 applet 包（各自一个 ipk/apk），
 # 没有任何反向依赖会把它们拉进来；只查 lxc-start 会得出「装好了」的假阳性 —— v.180.99 修正。
+# 【v.180.100】smartdns 不在这里判：它在固件里，缺了由 NETBASE.smartdns 自己的 verify 报错。
 _sd_missing_deps() {
     _SD_MISSING=""
     for _md_c in lxc-start lxc-stop lxc-ls lxc-info lxc-attach; do
         command -v "$_md_c" >/dev/null 2>&1 || _SD_MISSING="$_SD_MISSING $_md_c"
     done
-    _smartdns_installed || _SD_MISSING="$_SD_MISSING smartdns"
     [ -z "$_SD_MISSING" ]
 }
 
@@ -803,10 +871,10 @@ SD_UPSTREAM_EOF
 }
 
 verify_smartdns() {
-    # ① 没装就放行：本节点只负责「已装的情况下把配置配对」。
-    # 安装挪到末尾 DEPS 节点（网络通了才装，装完回调 build_smartdns 当场配好）。
-    # 这里若判「未就绪」会触发 build，而 build 在没网时必然装不上 → 整轮引导死在这儿。
-    _smartdns_installed || return 0
+    # ① 固件自带 smartdns（构建期 PACKAGES 内置），本节点只负责「把配置写对」。
+    # 【v.180.100】不再「未装就放行」：缺二进制说明固件不合规，直接判未就绪，
+    # 让 build_smartdns 打出明确日志后硬失败，问题当场暴露，不拖到末尾 sd_serve。
+    _smartdns_installed || return 1
     verify_smartdns_main || return 1
     verify_smartdns_upstream || return 1
     # dnsmasq 必须已经让出 53：port=0 是 OpenWrt 官方的「禁用 DNS」写法
@@ -1253,11 +1321,17 @@ SD_UPSTREAM_EOF
 }
 
 build_smartdns() {
-    # ① 没装就没有「配置」可言：固件应自带 smartdns（custom-packages.sh 第 79 行），
-    #    缺包由最前面的 pkg_base 拦下；走到这里说明固件不合规。
+    # ① 配置之前先确保二进制在位：固件自带；万一被 opkg remove 遮掉了，
+    #    从只读基座拷回来（不联网、不装包、不碰 opkg 数据库），然后照常写配置。
     if ! _smartdns_installed; then
-        log "[SMARTDNS] smartdns 未安装，无法配置（固件未内置该包）"
-        return 1
+        log "[SMARTDNS] smartdns 不在位，先试只读基座 $ROMDIR"
+        _rom_restore_tree smartdns
+        hash -r 2>/dev/null || true
+        if ! _smartdns_installed; then
+            log "[SMARTDNS] 只读基座也没有 smartdns：固件未内置该包（custom-packages.sh 第 79 行）"
+            return 1
+        fi
+        log "[SMARTDNS] 已从只读基座恢复，继续写配置"
     fi
     build_smartdns_main || return 1
     # 上游没铺满就不接管 DNS：此时 dnsmasq 仍留着 53，不会出现「53 让出去了却没人应答」
@@ -1302,7 +1376,7 @@ verify_deps() {
         return 1
     fi
     if ! _sd_missing_deps; then
-        log "[DEPS] 组件不在位：$_SD_MISSING（pkg_base 已在第一步拦过，这里不该出现）"
+        log "[DEPS] lxc 命令不在位：$_SD_MISSING（pkg_base 已在第一步拦过，这里不该出现）"
         return 1
     fi
     verify_smartdns_main || { log "[DEPS] smartdns 主段配置不符"; return 1; }
@@ -1331,13 +1405,21 @@ verify_pkg_base() {
 
 build_pkg_base() {
     if _sd_missing_deps; then
-        log "[PKG] lxc 五件套（start/stop/ls/info/attach）+ smartdns 均已就位（固件自带）"
+        log "[PKG] lxc 五件套（start/stop/ls/info/attach）均已就位（固件自带）"
         return 0
     fi
-    log "[PKG] 固件缺组件：$_SD_MISSING"
-    log "[PKG] 本脚本不装包 —— 请用内置 lxc/smartdns 的固件重刷："
-    log "[PKG]   24.10：shell/custom-packages.sh 第 41 行 + 第 79 行"
-    log "[PKG]   25.12：shell/apk-custom-packages.sh 第 10 行 + 第 79 行"
+    log "[PKG] lxc 命令缺失：$_SD_MISSING —— 先试只读基座 /rom"
+    if _rom_restore_lxc; then
+        hash -r 2>/dev/null || true
+        if _sd_missing_deps; then
+            log "[PKG] 已从只读基座恢复，五件套齐全"
+            return 0
+        fi
+        log "[PKG] 恢复后仍缺：$_SD_MISSING"
+    else
+        log "[PKG] 只读基座里没有 lxc 的安装清单（$ROMDIR/usr/lib/opkg/info/lxc-*.list）"
+    fi
+    log "[PKG] 固件未内置 lxc：检查 shell/custom-packages.sh 第 41 行 / apk-custom-packages.sh 第 10 行"
     return 1
 }
 

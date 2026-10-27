@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.87】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.88】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-bootstrap（旁路由版）
 # 适用拓扑：单臂旁路由——所有物理网口桥进 br-lan，WAN/WAN6 一律禁用，
 #   出口走上游网关，本机不拨号、不跑 DHCP 服务（lan.ignore=1）。
@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.87"
+SCRIPT_VER="2026-10-27.180.88"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -1976,13 +1976,18 @@ flush_uci() {
             _fu_bad="$_fu_bad dhcp-commit"
             log "[flush] dhcp 提交失败：改动只在内存里，重启即丢"
         fi
-        # ① dnsmasq 先松手
+        # ① dnsmasq 先松手（给它 1 秒真正放开 53，别让 smartdns 撞端口）
         run_svc /etc/init.d/dnsmasq restart >/dev/null 2>&1 \
             || log "[flush] dnsmasq 重启失败"
+        sleep "${SD_RELEASE:-1}"
         # ② 拉 smartdns，并确保开机自启（否则重启后 53 空着，整机没 DNS）
         run /etc/init.d/smartdns enable >/dev/null 2>&1
         run_svc /etc/init.d/smartdns restart >/dev/null 2>&1 \
             || log "[flush] smartdns 重启失败"
+        # ③ 等服务真正把 53 接下来。删掉的是「绑不上就回滚」那段，不是这里的等待 ——
+        #    紧接着的收尾复核（_post_verify）会重放 verify_smartdns，太早读只能读到
+        #    「进程刚 fork、还没 listen」。默认 2 秒，可用 SD_SETTLE 覆盖。
+        sleep "${SD_SETTLE:-2}"
         log "[flush] smartdns 已接管 53（dnsmasq 只剩 DHCP/RA）"
     fi
 

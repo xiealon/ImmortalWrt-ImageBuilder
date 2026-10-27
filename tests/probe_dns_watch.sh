@@ -89,7 +89,7 @@ trap 'rm -rf "$TMPD"' EXIT
 
 LIB="$TMPD/fns.sh"
 : > "$LIB"
-for _f in _dns_ok _run_fix _dns_watch; do
+for _f in _ensure_boot _dns_ok _run_fix _dns_watch; do
     body "$_f" "$PR" >> "$LIB"
 done
 [ -s "$LIB" ] || { echo "FAIL: 抽不到函数"; exit 1; }
@@ -102,7 +102,14 @@ netstat() {
 }
 date() { echo "${FAKE_NOW:-1700000000}"; return 0; }
 
-BOOT="/usr/sbin/crowdsec-lxc-bootstrap.sh"
+# _run_fix 现在开头会调 _ensure_boot，这里给一个真实可执行的假 bootstrap，
+# 否则每条通道都会以 78（boot-missing）提前返回，测不到后面的逻辑。
+BOOT="$TMPD/boot.sh"
+printf '#!/bin/sh\nexit 0\n' > "$BOOT"
+chmod 755 "$BOOT"
+ROMDIR="$TMPD/rom"
+mkdir -p "$ROMDIR"
+BOOT_SRC=""
 BOOT_LOG="$TMPD/boot.log"
 LOCK="$TMPD/lock"
 STATE_FILE="$TMPD/state"

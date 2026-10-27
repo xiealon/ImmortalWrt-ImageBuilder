@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.79】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.78】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-probe：运行期 last_pull 监视探针（v.106）
 # 职责边界（刻意收窄成一条）：
 #   只验证 last_pull。判停滞 → 告警 + 持引导锁重跑 crowdsec-lxc-bootstrap.sh。
@@ -73,13 +73,13 @@ PROBE_VERIFY_MAX="${CS_PROBE_VERIFY_MAX:-300}"
 PROBE_FIX_MAX="${CS_PROBE_FIX_MAX:-900}"
 # guard 自身有 3 次 attach × 10s，正常几百 ms；60s 是硬顶，不是预期耗时。
 PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
-# 【v.180.79】固件版本号。五个脚本统一用 SCRIPT_VER 一个名字，
+# 【v.180.78】固件版本号。五个脚本统一用 SCRIPT_VER 一个名字，
 # 一条命令就能全查出来：
 #   grep -H -m1 '^SCRIPT_VER=' /usr/sbin/crowdsec-*.sh /etc/rc.local \
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-26.180.80"
+SCRIPT_VER="2026-10-28.180.117"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -141,9 +141,118 @@ _lock_stale() {
     return 0
 }
 
+# ---- smartdns 53 体检（v.180.117）----
+# 补的是一整类白屏：DNS 挂了但 last_pull 照样新鲜，于是 stalled 判定永远不触发。
+# last_pull 走的是 IP 直连 LAPI（http://10.1.0.10:8080/），不查 DNS ——
+# 所以「53 没人应答」这件事，原来的探针完全看不见，一直要到人去翻 /etc/resolv.conf 才发现。
+# 典型成因：在 LuCI 里改 smartdns 配置写坏了 → restart 失败 → 53 无应答 → 全家断网，
+# 而探针日志一路「ok」，重启路由器才恢复。
+#
+# 判据取向（只认本地故障，这一点决定了它不会误刷）：
+#   · 进程不在        → 本机问题，重跑引导有意义
+#   · 53 没在监听     → 本机问题（起不来 / bind 绑到具体网卡）
+#   · 进程在、53 在听 → 一律算好。上游全挂、外网不通也一样「算好」——
+#     那是网络问题，重跑引导修不好，每轮触发只会刷日志、白撞冷却。
+_dns_ok() {
+    if ! pidof smartdns >/dev/null 2>&1; then
+        DNS_WHY="进程不在"
+        return 1
+    fi
+    if ! netstat -lnu 2>/dev/null | grep -qE ':53[[:space:]]'; then
+        DNS_WHY="53 未监听（UDP）"
+        return 1
+    fi
+    DNS_WHY=""
+    return 0
+}
+
+# 持锁跑一轮 bootstrap，等它结束，回收锁。返回它的退出码；77 = 抢锁失败。
+# 抽出来是因为现在有两条通道要跑同一件事（last_pull 停滞 / DNS 不可用），
+# 各写一遍的话，「pid 写进锁」这类容易写错的细节迟早会分叉 ——
+# 陈旧锁判定依据的是持有者 pid，不是探针自己，写错了会让锁被误判成陈旧。
+_run_fix() {
+    if ! mkdir "$LOCK" 2>/dev/null; then
+        plog "【持锁失败】并发占用，本轮放弃"
+        return 77
+    fi
+    # 后台起 bootstrap 并立刻把「它的」pid 写进锁：陈旧判定的依据必须是持有者，
+    # 不是探针自己 —— 否则探针被重启时会把一个仍在跑着的 bootstrap 判成陈旧。
+    _boot >>"$BOOT_LOG" 2>&1 &
+    _rf_pid=$!
+    echo "$_rf_pid" > "$LOCK/pid" 2>/dev/null
+    date +%s > "$LOCK/ts" 2>/dev/null
+    wait "$_rf_pid"
+    _rf_rc=$?
+    rm -rf "$LOCK" 2>/dev/null
+    return "$_rf_rc"
+}
+
+# DNS 通道：连续 PROBE_STALL_ROUNDS 轮不可用 → 冷却检查 → 跑一轮引导 → 看现场复验。
+# 计数与锁存都是独立的（P_DNS_*）：与 last_pull 那条链路根因完全不同，
+# 共用一个计数器的话，修 DNS 会把「容器拉不动」的累计清零，反过来也一样 ——
+# 这正是 v.108.58 在两个锁存上踩过的坑（P_HUMAN 归补印、P_HUMAN_PULL 归停滞）。
+# 复验不看退出码看现场：引导可能 exit 0（sd_serve 失败只是 hard 终止在最后一步），
+# 也可能 exit 1 而 DNS 其实已恢复，唯一可信的判据是再问一次 _dns_ok。
+_dns_watch() {
+    if _dns_ok; then
+        if [ "${P_DNS_BAD:-0}" -gt 0 ]; then
+            plog "【DNS】smartdns 已恢复（此前不可用 $P_DNS_BAD 轮）"
+        fi
+        P_DNS_BAD=0
+        P_DNS_FIX=0
+        return 0
+    fi
+    P_DNS_BAD=$((${P_DNS_BAD:-0} + 1))
+    if [ "${P_HUMAN_DNS:-0}" = "1" ]; then
+        P_ACTION="dns-need-human-hold"
+        plog "【DNS】【需人工介入】已停止重跑（smartdns 仍不可用：$DNS_WHY，累计第 ${P_DNS_BAD} 轮）。修好后重启探针或删除 $STATE_FILE 解除"
+        return 0
+    fi
+    if [ "$P_DNS_BAD" -lt "$PROBE_STALL_ROUNDS" ]; then
+        P_ACTION="dns-warn"
+        plog "【DNS】smartdns 不可用：$DNS_WHY（第 $P_DNS_BAD/$PROBE_STALL_ROUNDS 轮）"
+        return 0
+    fi
+    _dw_now="$(date +%s)"
+    if [ $((_dw_now - ${P_DNS_TRIG:-0})) -lt "$PROBE_COOLDOWN" ]; then
+        P_ACTION="dns-cooldown"
+        plog "【DNS】smartdns 持续不可用（$DNS_WHY），冷却中（剩余 $((PROBE_COOLDOWN - (_dw_now - P_DNS_TRIG)))s），暂不触发"
+        return 0
+    fi
+    P_DNS_TRIG="$_dw_now"
+    P_DNS_BAD=0
+    P_ACTION="dns-trigger"
+    plog "【DNS】smartdns 连续 ${PROBE_STALL_ROUNDS} 轮不可用（$DNS_WHY），持锁重跑 $BOOT 复验/修复"
+    _run_fix
+    _dw_rc=$?
+    if [ "$_dw_rc" = 77 ]; then
+        P_ACTION="dns-lock-fail"
+        return 0
+    fi
+    if [ "$_dw_rc" = 124 ]; then
+        plog "【DNS】【超时】bootstrap 超过 ${_BOOT_MAX:-$PROBE_FIX_MAX}s 未返回，已终止（锁已回收）"
+    fi
+    if _dns_ok; then
+        P_DNS_FIX=0
+        plog "【DNS】已恢复（bootstrap 退出 $_dw_rc）"
+        return 0
+    fi
+    P_DNS_FIX=$((${P_DNS_FIX:-0} + 1))
+    if [ "$P_DNS_FIX" -ge "$PROBE_FAIL_ALERT" ]; then
+        P_ACTION="dns-need-human"
+        P_HUMAN_DNS=1
+        plog "【DNS】【需人工介入】bootstrap 连续 $P_DNS_FIX 次未能让 smartdns 恢复（本次 $_dw_rc，仍 $DNS_WHY）。先查 $BOOT_LOG，再看 /etc/config/smartdns 是否被手工改坏"
+    else
+        P_ACTION="dns-fix-fail"
+        plog "【DNS】bootstrap 退出 $_dw_rc，smartdns 仍不可用（连续第 $P_DNS_FIX/${PROBE_FAIL_ALERT} 次，日志见 $BOOT_LOG）"
+    fi
+    return 0
+}
+
 # ---- 可测化的一轮处理：判定 + 动作 ----
 # 全局状态（测试可直接预设/断言）：
 #   P_STALL 连续停滞轮数 / P_LAST_TRIG 上次触发时刻 / P_FAIL 连续修复失败次数
+#   P_DNS_BAD 连续 DNS 不可用轮数 / P_DNS_TRIG 上次 DNS 触发时刻 / P_DNS_FIX 连续 DNS 修复失败次数
 #   P_LOCK_RECLAIMED 本轮是否回收过陈旧锁 / P_ACTION 本轮动作标签
 probe_tick() {
     P_ACTION=""
@@ -192,18 +301,12 @@ probe_tick() {
         P_LAST_TRIG="$_rs_now"
         P_ACTION="restamp"
         plog "【补印】installed 缺失但容器 rootfs 已就绪（$ROOTFS），持锁重跑引导补印"
-        if ! mkdir "$LOCK" 2>/dev/null; then
+                _run_fix
+        _rs_rc=$?
+        if [ "$_rs_rc" = 77 ]; then
             P_ACTION="lock-fail"
-            plog "【持锁失败】并发占用，本轮放弃"
             return 0
         fi
-        _boot >>"$BOOT_LOG" 2>&1 &
-        _rs_pid=$!
-        echo "$_rs_pid" > "$LOCK/pid" 2>/dev/null
-        date +%s > "$LOCK/ts" 2>/dev/null
-        wait "$_rs_pid"
-        _rs_rc=$?
-        rm -rf "$LOCK" 2>/dev/null
         if [ "$_rs_rc" = 0 ] && [ -s "$STAMP_FILE" ]; then
             P_ACTION="restamp-ok"
             P_FAIL=0
@@ -244,16 +347,12 @@ probe_tick() {
         else
             P_AUDIT_BAD=$((${P_AUDIT_BAD:-0} + 1))
             plog "【体检】第 ${P_ROUND} 轮：首检与复检都不符（连续 ${P_AUDIT_BAD} 次），重跑引导按需补齐"
-            if mkdir "$LOCK" 2>/dev/null; then
-                _boot >>"$BOOT_LOG" 2>&1 &
-                _ap=$!
-                echo "$_ap" > "$LOCK/pid" 2>/dev/null
-                date +%s > "$LOCK/ts" 2>/dev/null
-                wait "$_ap"
-                rm -rf "$LOCK" 2>/dev/null
-            fi
+            _run_fix
         fi
     fi
+    # 【v.180.117】DNS 体检必须排在 last_pull 判定之前：后者在「链路正常」时直接
+    # return 0，放在它后面等于永远不执行 —— 而 DNS 挂掉恰恰是「链路照样正常」的情形。
+    _dns_watch
     if _boot --probe-check >/dev/null 2>&1; then
         if [ "${P_STALL:-0}" -gt 0 ]; then
             plog "【恢复】last_pull 已恢复（停滞 $P_STALL 轮后）"
@@ -297,20 +396,12 @@ probe_tick() {
     P_STALL=0
     P_ACTION="trigger"
     plog "【触发】last_pull 连续停滞 $PROBE_STALL_ROUNDS 轮，持锁重跑 $BOOT 复验/修复"
-    if ! mkdir "$LOCK" 2>/dev/null; then
+    _run_fix
+    _rc=$?
+    if [ "$_rc" = 77 ]; then
         P_ACTION="lock-fail"
-        plog "【持锁失败】并发占用，本轮放弃"
         return 0
     fi
-    # 后台起 bootstrap 并立刻把「它的」pid 写进锁：陈旧判定的依据必须是持有者，
-    # 不是探针自己 —— 否则探针被重启时会把一个仍在跑着的 bootstrap 判成陈旧。
-    _boot >>"$BOOT_LOG" 2>&1 &
-    _bp=$!
-    echo "$_bp" > "$LOCK/pid" 2>/dev/null
-    date +%s > "$LOCK/ts"  2>/dev/null
-    wait "$_bp"
-    _rc=$?
-    rm -rf "$LOCK" 2>/dev/null
     # 【v.108.67】124 撞的是 _boot 的总上限，语义是「卡住了」，不是「修不好」。
     # 不单独说一句的话，日志只剩「bootstrap 退出 124」，看的人会当成脚本自己的退出码。
     if [ "$_rc" = 124 ]; then
@@ -347,9 +438,15 @@ probe_tick() {
 
 # ---- 状态落盘 / 恢复：让停滞轮数、冷却、失败计数跨重启仍然准确 ----
 _probe_save() {
-    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s human_pull=%s\n' \
+    # 【v.180.117】四个 dns* 键的命名是被 sed 逼出来的：_probe_load 用
+    # `s/.*fail=\([0-9]*\).*/` 这类贪婪匹配取值，新键只要含有旧键的字面量
+    # （比如 dns_fail 含 fail=、dns_human 含 human=）就会被当成旧键取走，
+    # 于是「DNS 修复失败 2 次」会把 last_pull 的失败计数改成 2。
+    # 所以叫 dnsfix / dnshold，不叫 dns_fail / dns_human。
+    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s human_pull=%s dnsbad=%s dnsfix=%s dnstrig=%s dnshold=%s\n' \
         "${P_STALL:-0}" "${P_LAST_TRIG:-0}" "${P_FAIL:-0}" "${P_ACTION:-none}" "$(date +%s)" \
         "${P_ROUND:-0}" "${P_AUDIT_BAD:-0}" "${P_HUMAN:-0}" "${P_HUMAN_PULL:-0}" \
+        "${P_DNS_BAD:-0}" "${P_DNS_FIX:-0}" "${P_DNS_TRIG:-0}" "${P_HUMAN_DNS:-0}" \
         > "$STATE_FILE" 2>/dev/null
 }
 _probe_load() {
@@ -370,6 +467,15 @@ _probe_load() {
     [ -n "$_v" ] && P_AUDIT_BAD="$_v"
     _v=$(printf '%s\n' "$_pl" | sed -n 's/.*human=\([0-9][0-9]*\).*/\1/p')
     [ -n "$_v" ] && P_HUMAN="$_v"
+    # 【v.180.117】DNS 通道的独立计数与锁存。旧状态文件没这几个键 → 保持 0（向后兼容）。
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*dnsbad=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_DNS_BAD="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*dnsfix=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_DNS_FIX="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*dnstrig=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_DNS_TRIG="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*dnshold=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_HUMAN_DNS="$_v"
     return 0
 }
 
@@ -382,6 +488,11 @@ P_ROUND=0
 P_AUDIT_BAD=0
 P_HUMAN=0
 P_HUMAN_PULL=0
+P_DNS_BAD=0
+P_DNS_FIX=0
+P_DNS_TRIG=0
+P_HUMAN_DNS=0
+DNS_WHY=""
 _probe_load
 while true; do
     P_LOCK_RECLAIMED=0

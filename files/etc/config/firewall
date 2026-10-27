@@ -72,7 +72,7 @@ config nat 'lxcsnat'
 	option proto 'all'
 	option src 'lan'
 	option src_ip '10.1.0.0/24'
-	option snat_ip '10.0.0.201'
+	option snat_ip '192.168.3.201'
 
 config zone 'docker'
 	option name 'docker'

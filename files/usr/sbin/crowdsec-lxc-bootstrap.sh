@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.94"
+SCRIPT_VER="2026-10-27.180.95"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -740,6 +740,20 @@ _sd_main_seg() {
         | sed -n 's/^smartdns\.\([^.=]*\)=smartdns$/\1/p' | head -n1
 }
 
+# 让 dnsmasq 只做 DHCP、不做 DNS：所有 dnsmasq 段写 port=0（OpenWrt 官方「禁用 DNS」写法）。
+# 幂等：已经是 0 也照写一遍，uci 不产生实际改动，可反复调用。
+# 两个调用点：① DHCP 让权节点（smartdns 已就绪时顺手让位）② smartdns 配好之后（装完即配）。
+# 段名不写死：@dnsmasq[0] 的内部名（cfg01411c 之类）重建配置就会变，一律遍历。
+_dnsmasq_release_53() {
+    _dr5_n=0
+    for _dr5_dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
+        run uci -q set "dhcp.$_dr5_dm.port=0" || return 1
+        _dr5_n=$((_dr5_n+1))
+    done
+    [ "$_dr5_n" -gt 0 ] || log "[DNS] 没有 dnsmasq 段，53 无需让出"
+    return 0
+}
+
 # smartdns 校验入口：主段（verify_smartdns_main）+ 上游表（verify_smartdns_upstream）+ dnsmasq 已让出 53
 # smartdns 校验拆成两件事：① 「服务本身」（主段 + dnsmasq 让出 53）② 「上游服务器表」。
 # 为什么要拆（v.180.92）：混在一个函数里时上游只比了 ip 和条数，type / server_group /
@@ -1162,6 +1176,15 @@ build_dhcp_ignore() {
     for _dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
         run uci -q delete "dhcp.$_dm.authoritative" 2>/dev/null
     done
+    # 【v.180.95】53 跟 DHCP 一起让：本机既不做 DHCP 也不做 DNS，两件事同属「让权」。
+    # 但只有 smartdns 已经能接管时才放 —— 未装或主段没配好就让出 53，本机立刻
+    # 没有 DNS：_net_ready 第三层是 nslookup www.baidu.com，必然失败，DEPS 就永远
+    # 装不上 smartdns，成了首轮引导死锁。
+    if _smartdns_installed && verify_smartdns_main; then
+        _dnsmasq_release_53 || log "[DHCP] dnsmasq 让出 53 失败（配置已落盘部分仍生效）"
+    else
+        log "[DHCP] smartdns 未就绪，暂不让出 53（避免引导期间无 DNS）"
+    fi
     log "[DHCP] 已让权：lan.ignore=1，并清除 RA/authoritative"
     return 0
 }
@@ -1263,10 +1286,9 @@ build_smartdns() {
     # 上游没铺满就不接管 DNS：此时 dnsmasq 仍留着 53，不会出现「53 让出去了却没人应答」
     build_smartdns_upstream || return 1
     # dnsmasq 让出 53：只关 DNS 端口，DHCP/RA 一概不碰。
-    # 配置全部由 uci 写出，smartdns 不存在「起不来」的情况，所以不再记录原端口做回滚。
-    for _bsd_dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
-        run uci -q set "dhcp.$_bsd_dm.port=0"
-    done
+    # 与 DHCP 让权节点共用 _dnsmasq_release_53（v.180.95），这里保留调用是因为
+    # 「刚装完 smartdns」这一刻 DHCP 节点早已跑过，只能由本函数当场让位。
+    _dnsmasq_release_53 || return 1
     log "[SMARTDNS] 已写入 13 个上游（国内 9 UDP / 境外 4 DoT），dnsmasq 退为纯 DHCP"
     return 0
 }

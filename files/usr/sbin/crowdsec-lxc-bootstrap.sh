@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.106"
+SCRIPT_VER="2026-10-27.180.107"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -2935,7 +2935,58 @@ build_bouncer_fill() {
 }
 
 # ---- BOUNCERVERIFY / bouncer_verify：验证 bouncer 列表里确实有这个 bouncer 且在拉取 ----
+# ---- bouncer 规则落地探针（v.180.107）----
+# 为什么需要这一层：2026-10-27 真机故障 —— bouncer 在 LAPI 注册正常、Valid ✔️、
+# last_pull 按周期刷新，但 nftables 里一条 drop 规则都没有，23870 条 CAPI 决策
+# 全部没下发；机器处于「看着健康、实际裸奔」状态长达 5.5 小时。
+# bouncer 自己的日志每 15 分钟刷一次：
+#   can't get set elements for crowdsec-blacklists-CAPI: Receive: netlink receive: no such file or directory
+# 根因是 jail 重启时的时序竞争（旧进程 removing 'crowdsec' table 与新进程 nftables
+# initiated 挨得太近），新进程的 netlink 句柄指向已删除的 handle，此后针对 set 的
+# 所有操作永久 ENOENT —— 不重启 bouncer 不恢复。
+# 既有判据 bouncer_exists / bouncer_pulling 在这一整轮里全程为绿，所以必须补这一层。
+#
+# 两条判据，都是软告警：只打日志、置标志，绝不 return 1，不阻断 BOUNCERVERIFY，
+# 也不影响 enroll。理由：新机器首次启动时 CAPI 决策还没拉到，规则确实可能为空，
+# 硬判会把它误判成故障，而「宁可漏报不误杀」是这套脚本一贯的取向。
+#   ① 结构：crowdsec-chain-input 里有没有 drop 规则
+#   ② 错误：bouncer 日志近期有没有上面那句 netlink ENOENT
+# 文件读取一律先守卫：nft 不在 / 表不存在 / 日志不存在或不可读，全部静默跳过。
+_BC_SANE=0
+_BC_LOG="${BC_LOG:-/var/log/crowdsec-firewall-bouncer.log}"
+_bouncer_rule_sane() {
+    # verify 在阶段 A / 阶段 3 / build 循环里会被反复调用，这里保证一轮只查一次
+    [ "$_BC_SANE" = "1" ] && return 0
+    _BC_SANE=1
+    # ① 结构探针：表不存在说明 bouncer 压根没建起来，那是 bouncer_exists 的职责，
+    #    这里不重复报，直接跳过，避免同一件事刷两条日志。
+    if command -v nft >/dev/null 2>&1 && nft list table ip crowdsec >/dev/null 2>&1; then
+        _bs_drop="$(nft list chain ip crowdsec crowdsec-chain-input 2>/dev/null | grep -c 'drop')"
+        case "$_bs_drop" in
+            ''|*[!0-9]*) _bs_drop=0 ;;
+        esac
+        if [ "$_bs_drop" -eq 0 ]; then
+            log "[bouncer] ** 结构探针：crowdsec-chain-input 里没有任何 drop 规则（决策未下发到防火墙）"
+            log "[bouncer] ** 排查：nft list chain ip crowdsec crowdsec-chain-input ；日志见 $_BC_LOG"
+        fi
+    fi
+    # ② 错误探针：只读最后 200 行（约覆盖 2 天的 15 分钟心跳），轮转后读不到就放过
+    if [ -f "$_BC_LOG" ] && [ -r "$_BC_LOG" ]; then
+        _bs_err="$(tail -n 200 "$_BC_LOG" 2>/dev/null | grep -c 'netlink receive: no such file or directory')"
+        case "$_bs_err" in
+            ''|*[!0-9]*) _bs_err=0 ;;
+        esac
+        if [ "$_bs_err" -gt 0 ]; then
+            log "[bouncer] ** 错误探针：$_BC_LOG 近 200 行出现 $_bs_err 次 netlink ENOENT（进程实例已坏）"
+            log "[bouncer] ** 修复：/etc/init.d/crowdsec-firewall-bouncer restart（重启即恢复，配置无需改动）"
+        fi
+    fi
+    return 0
+}
+
 verify_bouncer_verify() {
+    # 软告警探针：先看一眼规则有没有真落地，再走原有的三项硬判据
+    _bouncer_rule_sane
     ct_running || return 1
     bouncer_exists || return 1
     bouncer_pulling || return 1

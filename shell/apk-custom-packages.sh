@@ -50,6 +50,8 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-lxc rpcd-mod-lxc luci-i18n-lxc-zh-cn"
 
 # smartdns：crowdsec-lxc-bootstrap 的 DNS 前置（同上，必须随固件进 /rom）
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES smartdns"
+# 界面：同上，随固件进 /rom 才能被 pkg_base 补回；不选 smartdns-ui（Rust 大包）。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-smartdns"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES dockerd luci-app-dockerman luci-i18n-dockerman-zh-cn"
 

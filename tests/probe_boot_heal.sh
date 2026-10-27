@@ -60,8 +60,12 @@ ck "R35.1j _guard_run 每轮都调 _ensure_boot" \
    "$(body _guard_run "$PR" | grep -c '_ensure_boot || :')" "1"
 ck "R35.1k _guard_run 里先修 bootstrap 再跑 guard" \
    "$(body _guard_run "$PR" | awk '/_ensure_boot/{b=NR} /PROBE_GUARD_MAX/{g=NR} END{print (b<g && b>0 && g>0) ? "yes" : "no"}')" "yes"
-ck "R35.1l 版本号已升到 180.119" \
-   "$(grep -c 'SCRIPT_VER="2026-10-28.180.119"' "$PR")" "1"
+_v() { sed -n 's/^SCRIPT_VER="\(.*\)"$/\1/p' "$1" | head -n1; }
+ck "R35.1l 探针版本号与 bootstrap 一致（同批构建同版本）" \
+   "$(_v "$PR")" \
+   "$(_v "$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh")"
+ck "R35.1m 探针版本号格式合法" \
+   "$(sed -n 's/^SCRIPT_VER="\([0-9][0-9.-]*\)"$/ok/p' "$PR")" "ok"
 
 echo
 echo "== 35.2 动态 =="

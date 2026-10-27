@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.85】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.86】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-bootstrap（旁路由版）
 # 适用拓扑：单臂旁路由——所有物理网口桥进 br-lan，WAN/WAN6 一律禁用，
 #   出口走上游网关，本机不拨号、不跑 DHCP 服务（lan.ignore=1）。
@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.85"
+SCRIPT_VER="2026-10-27.180.86"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -1214,8 +1214,11 @@ build_deps() {
     fi
     log "[DEPS] 仍缺必备组件：$_bd_missing"
     if ! _net_ready; then
-        log "[DEPS] 网络尚未就绪（网关/公网 IP/DNS 至少一层不通），本轮不下载安装，下次引导重试"
-        return 0
+        # 按流程图：网络异常 → 跳过并结束。这里 return 1 是「本组未完成」，
+        # 不是「引导失败」—— deps 在 SOFT_NODES 里，ensure 只记账不中止；
+        # 效果是 GSET_DEPS 不置位 → ENROLL 整组跳过（注册本来也需要联网）。
+        log "[DEPS] 网络异常（网关/公网 IP/DNS 至少一层不通）：跳过安装，本轮也就此结束，下次引导重试"
+        return 1
     fi
     log "[DEPS] 网络已就绪，开始补齐：$_bd_missing"
     _bd_new=""
@@ -1245,6 +1248,13 @@ build_deps() {
     case " $_bd_new " in
         *" lxc "*) log "[DEPS] lxc 已安装，容器流程留给下次引导（本轮跳过容器相关组）" ;;
     esac
+    # 装完再核一次：还有缺的就不让 enroll 往下走（半截环境注册必然失败，
+    # 还会在中央端留下一个半死的实例）。仍然只是「本组未完成」，不中止引导。
+    if ! _sd_missing_deps; then
+        log "[DEPS] 安装后仍缺：$_SD_MISSING —— enroll 跳过，下次引导重试"
+        return 1
+    fi
+    log "[DEPS] lxc 与 smartdns 均已就位，网络可用，可以进入 enroll"
     return 0
 }
 
@@ -1431,16 +1441,20 @@ DEP_capi_release="bouncer_verify"
 # ---- ENROLL：console 注册（v.108.49 补的节点，之前这一组是空壳）----
 # 依赖 capi_release：capi_block 在容器启动前把 online_client 注释掉，bouncer 验证通过
 # 后由 capi_release 放回来；注册要连中央 API，必须等它放出来之后再做。
-DEP_enroll="capi_release"
-# ---- DEPS：末尾的必备组件补齐（v.180.85）----
+# 【v.180.86】再加 deps 依赖：注册要连中央 API，网络必须真的通、必备组件必须齐。
+# 流程图里 enroll 就排在「检查网络」之后 —— 网络异常时 DEPS 组不置位，enroll 自动跳过。
+DEP_enroll="capi_release deps"
+# ---- DEPS：网络检查 + 必备组件补齐（v.180.85，v.180.86 提到 ENROLL 之前）----
 # 故意不依赖任何组：前置组失败了它也要跑 —— 「网络好了就把 lxc/smartdns 装上」这件事
-# 与容器流程成功与否无关。节点自身柔性，装不上只记日志。
+# 与容器流程成功与否无关。
+# 位置按流程图定：容器流程之后、enroll 之前。enroll 要靠它联网注册，所以它是 enroll 的前置；
+# 网络异常时本组不置位 → enroll 整组跳过 → 本轮就此结束（不判失败）。
 DEP_deps=""
 
 # INSTALL 排第一：rootfs 解压是 ct_net / ct_bootlink / ct_resolv（写容器内文件）
 # 以及 capi_block / ct_boot 的硬前置。放在 PREP 之后时，PREP 里那些节点拿不到
 # rootfs → 失败 → hard 终止 → INSTALL 永不执行 → rootfs 永不解压（自锁）。
-GROUP_SEQ="NETBASE INSTALL PREP CAPIBLOCK BOOT LOGCONF LAPI BOUNCERVERIFY ENROLL DEPS"
+GROUP_SEQ="NETBASE INSTALL PREP CAPIBLOCK BOOT LOGCONF LAPI BOUNCERVERIFY DEPS ENROLL"
 GROUP_TITLE_NETBASE="网络基线（br-lan / lxcbr0 双网桥 + 防火墙 zone 与转发规则 + smartdns 接管 53），最优先执行，不依赖 rootfs"
 GROUP_TITLE_INSTALL="安装容器（迁移校验镜像 / 解压 rootfs / 写 config）"
 GROUP_TITLE_PREP="容器启动前的全部静态准备（路由器网桥 / 容器网络 / cgroup）"
@@ -1450,7 +1464,7 @@ GROUP_TITLE_LOGCONF="日志链路与对外监听（宿主推送 + 容器采集 +
 GROUP_TITLE_LAPI="获取 LAPI 并填入路由器 bouncer"
 GROUP_TITLE_BOUNCERVERIFY="验证 bouncer 列表生效并解开 CAPI"
 GROUP_TITLE_ENROLL="Console Enroll"
-GROUP_TITLE_DEPS="必备组件补齐（lxc / smartdns：先探网络，通了再装，装完即配）"
+GROUP_TITLE_DEPS="检查网络并补齐组件（lxc / smartdns：通了再装，装完即配；不通则跳过 enroll）"
 # 组间强依赖只有一条主线：容器启动前必须先备好网桥/容器网络/cgroup，
 # 启动后才有运行态可言。其余组按功能细分，依赖如实声明（不强加线性）。
 GROUP_DEP_INSTALL=""

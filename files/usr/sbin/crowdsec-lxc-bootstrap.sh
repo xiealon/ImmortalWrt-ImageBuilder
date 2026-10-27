@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.82】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.83】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-bootstrap（旁路由版）
 # 适用拓扑：单臂旁路由——所有物理网口桥进 br-lan，WAN/WAN6 一律禁用，
 #   出口走上游网关，本机不拨号、不跑 DHCP 服务（lan.ignore=1）。
@@ -17,8 +17,8 @@
 #     · /etc/config/network   桥端口 / lan 静态地址 / 删 wan+wan6 段 / lxcbr0 段与地址
 #     · /etc/config/dhcp      lan.ignore（关 DHCP / RA / authoritative）
 #                             + 所有 dnsmasq 段 port=0（DNS 让给 smartdns）
-#     · /etc/config/smartdns  主段 enabled/port=53/cache_size；10 个上游
-#                             （国内 6 UDP 走 Cn 组、国外 4 DoT 走 Out 组）
+#     · /etc/config/smartdns  主段 enabled/port=53/cache_size；13 个上游
+#                             （国内 9 UDP 走 Cn 组、境外 4 DoT 走 Out 组）
 #     · /etc/config/firewall  lxc zone + 3 条 forwarding / wan·lan input / SNAT /
 #                             docker zone + 3 条 rule（仅装了 dockerd 时）
 #     · /proc/sys/net/ipv4/ip_forward  置 1（写完必须回读，读不回来判失败）
@@ -41,7 +41,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.82"
+SCRIPT_VER="2026-10-27.180.83"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -664,11 +664,11 @@ verify_dhcp_ignore() {
 
 # ---- smartdns 接管 DNS（DNS 从 dnsmasq 手里拿过来）----
 # 目标：smartdns 直接监听 53 当权威解析，dnsmasq 只留 DHCP/RA，不再做 DNS。
-# 上游：国内 6 个 UDP（近、快），国外 4 个 DoT（带 SNI，防污染）。
+# 上游：国内 9 个 UDP（近、快；阿里/腾讯/百度/360/CNNIC），境外 4 个 DoT（带 SNI，防污染）。
 # 关于 server_group：smartdns 的 server 默认「既进默认组、又进指定组」，只有显式
 # 加 -exclude-default-group 才会被踢出默认组。所以这里写 Cn/Out 分组不会造成
 # 「分组没人引用 → 上游全不参与解析 → 整机没 DNS」这种坑，两组都会正常出结果。
-SD_DNS_IP_CN="223.5.5.5 223.6.6.6 119.29.29.29 180.76.76.76 114.114.114.114 1.2.4.8"
+SD_DNS_IP_CN="223.5.5.5 223.6.6.6 119.29.29.29 180.76.76.76 101.226.4.6 218.30.118.6 123.125.81.6 140.207.198.6 1.2.4.8"
 SD_DNS_IP_OUT="8.8.8.8 8.8.4.4 1.1.1.1 1.0.0.1"
 SD_DNS_IPS="$SD_DNS_IP_CN $SD_DNS_IP_OUT"
 # dnsmasq 原端口记录（回滚用）："段名:端口" 的空格分隔串，build_smartdns 填
@@ -693,7 +693,7 @@ _sd_bound_53() {
     return 0
 }
 
-# smartdns 接管验证：主段 enabled/port=53、10 个上游齐全、dnsmasq 已让出 53
+# smartdns 接管验证：主段 enabled/port=53、13 个上游齐全、dnsmasq 已让出 53
 verify_smartdns() {
     # 没装 smartdns（或只有二进制没有 init）：本节点无事可做，直接算通过。
     # 绝不在这里判失败 —— 那会把「用官方源构建、没带这个包」的固件判死。
@@ -717,7 +717,7 @@ verify_smartdns() {
             *) return 1 ;;
         esac
     done
-    [ "$_vsd_cnt" -ge 10 ] || return 1
+    [ "$_vsd_cnt" -ge 13 ] || return 1
     # dnsmasq 必须已经让出 53：port=0 是 OpenWrt 官方的「禁用 DNS」写法
     for _vsd_dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
         [ "$(run uci -q get "dhcp.$_vsd_dm.port" 2>/dev/null)" = "0" ] || return 1
@@ -1046,7 +1046,7 @@ build_dhcp_ignore() {
     return 0
 }
 
-# smartdns 接管 builder：写主段 + 重建 10 个上游 + 让 dnsmasq 交出 53
+# smartdns 接管 builder：写主段 + 重建 13 个上游 + 让 dnsmasq 交出 53
 # 只写 uci 内存态，重启动作全部交给 flush_uci（那里有「起不来就把端口还回去」的回滚）。
 build_smartdns() {
     if [ ! -x /usr/sbin/smartdns ] || [ ! -x /etc/init.d/smartdns ]; then
@@ -1090,15 +1090,18 @@ alidns 223.5.5.5 udp Cn -
 alidns 223.6.6.6 udp Cn -
 dnspod 119.29.29.29 udp Cn -
 baidu 180.76.76.76 udp Cn -
-dns114 114.114.114.114 udp Cn -
+360dns 101.226.4.6 udp Cn -
+360dns 218.30.118.6 udp Cn -
+360dns 123.125.81.6 udp Cn -
+360dns 140.207.198.6 udp Cn -
 cnnic 1.2.4.8 udp Cn -
 google 8.8.8.8 tls Out dns.google
 google 8.8.4.4 tls Out dns.google
 cloudflare 1.1.1.1 tls Out cloudflare-dns.com
 cloudflare 1.0.0.1 tls Out cloudflare-dns.com
 SD_UPSTREAM_EOF
-    if [ "$_bsd_n" -lt 10 ]; then
-        log "[SMARTDNS] 上游写入数量异常（$_bsd_n < 10），不接管 DNS，保持 dnsmasq 原样"
+    if [ "$_bsd_n" -lt 13 ]; then
+        log "[SMARTDNS] 上游写入数量异常（$_bsd_n < 13），不接管 DNS，保持 dnsmasq 原样"
         return 1
     fi
 
@@ -1110,7 +1113,7 @@ SD_UPSTREAM_EOF
         _SD_DM_ORIG="$_SD_DM_ORIG $_bsd_dm:$_bsd_old"
         run uci -q set "dhcp.$_bsd_dm.port=0"
     done
-    log "[SMARTDNS] 已写入 $_bsd_n 个上游（国内 6 UDP / 国外 4 DoT），dnsmasq 退为纯 DHCP"
+    log "[SMARTDNS] 已写入 $_bsd_n 个上游（国内 9 UDP / 境外 4 DoT），dnsmasq 退为纯 DHCP"
     return 0
 }
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.83】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.84】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-bootstrap（旁路由版）
 # 适用拓扑：单臂旁路由——所有物理网口桥进 br-lan，WAN/WAN6 一律禁用，
 #   出口走上游网关，本机不拨号、不跑 DHCP 服务（lan.ignore=1）。
@@ -17,6 +17,7 @@
 #     · /etc/config/network   桥端口 / lan 静态地址 / 删 wan+wan6 段 / lxcbr0 段与地址
 #     · /etc/config/dhcp      lan.ignore（关 DHCP / RA / authoritative）
 #                             + 所有 dnsmasq 段 port=0（DNS 让给 smartdns）
+#     · 必备组件            lxc / smartdns / dockerd：缺了先试装，装不上判 hard
 #     · /etc/config/smartdns  主段 enabled/port=53/cache_size；13 个上游
 #                             （国内 9 UDP 走 Cn 组、境外 4 DoT 走 Out 组）
 #     · /etc/config/firewall  lxc zone + 3 条 forwarding / wan·lan input / SNAT /
@@ -41,7 +42,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.83"
+SCRIPT_VER="2026-10-27.180.84"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -664,6 +665,7 @@ verify_dhcp_ignore() {
 
 # ---- smartdns 接管 DNS（DNS 从 dnsmasq 手里拿过来）----
 # 目标：smartdns 直接监听 53 当权威解析，dnsmasq 只留 DHCP/RA，不再做 DNS。
+# 同时承担「必备组件」检查：lxc / smartdns / dockerd 三者缺一不可（见 _sd_missing_deps）。
 # 上游：国内 9 个 UDP（近、快；阿里/腾讯/百度/360/CNNIC），境外 4 个 DoT（带 SNI，防污染）。
 # 关于 server_group：smartdns 的 server 默认「既进默认组、又进指定组」，只有显式
 # 加 -exclude-default-group 才会被踢出默认组。所以这里写 Cn/Out 分组不会造成
@@ -673,6 +675,48 @@ SD_DNS_IP_OUT="8.8.8.8 8.8.4.4 1.1.1.1 1.0.0.1"
 SD_DNS_IPS="$SD_DNS_IP_CN $SD_DNS_IP_OUT"
 # dnsmasq 原端口记录（回滚用）："段名:端口" 的空格分隔串，build_smartdns 填
 _SD_DM_ORIG=""
+
+# ---- 必备组件（v.180.84）：lxc / smartdns / dockerd ----
+# 为什么放在这个节点里：三者都是「网络基线跑完就该在位」的东西——lxc 是容器本体，
+# smartdns 是 DNS 接管，dockerd 是 docker 防火墙规则的服务对象。原来缺了只会静默跳过
+# （docker_fw 里 `command -v dockerd || return 0`、smartdns 里 `[ -x ] || return 0`），
+# 日志全绿、实际那一步根本没做，事后无从查起。现在缺哪个都会在 verify 里暴露，
+# 由 build 去补；补不上就按「必选」判失败，不再伪装成已就绪。
+_SD_MISSING=""
+_sd_missing_deps() {
+    _SD_MISSING=""
+    command -v lxc-start >/dev/null 2>&1 || _SD_MISSING="$_SD_MISSING lxc"
+    { [ -x /usr/sbin/smartdns ] && [ -x /etc/init.d/smartdns ]; } || _SD_MISSING="$_SD_MISSING smartdns"
+    command -v dockerd >/dev/null 2>&1 || _SD_MISSING="$_SD_MISSING docker"
+    [ -z "$_SD_MISSING" ]
+}
+
+# 缺什么装什么：25.12 走 apk、24.10 走 opkg。装完再验一次，验不出就是真失败。
+# 只装最小可用集（lxc 的核心包 + lxc-auto），不碰 LuCI 那些壳。
+_sd_install_missing() {
+    _sim_want="$1"
+    _sim_pkgs=""
+    case " $_sim_want " in
+        *" lxc "*)      _sim_pkgs="$_sim_pkgs lxc lxc-common lxc-auto" ;;
+    esac
+    case " $_sim_want " in
+        *" smartdns "*) _sim_pkgs="$_sim_pkgs smartdns" ;;
+    esac
+    case " $_sim_want " in
+        *" docker "*)   _sim_pkgs="$_sim_pkgs dockerd" ;;
+    esac
+    [ -n "$_sim_pkgs" ] || return 0
+    log "[DEPS] 尝试补齐：$_sim_pkgs"
+    if command -v apk >/dev/null 2>&1; then
+        run_svc apk add --no-progress $_sim_pkgs >/dev/null 2>&1 || return 1
+    elif command -v opkg >/dev/null 2>&1; then
+        run_svc opkg install $_sim_pkgs >/dev/null 2>&1 || return 1
+    else
+        log "[DEPS] 本机没有 apk / opkg，无法补装"
+        return 1
+    fi
+    _sd_missing_deps
+}
 
 # smartdns 主配置段（config smartdns）的段名；没有则回空
 _sd_main_seg() {
@@ -693,12 +737,13 @@ _sd_bound_53() {
     return 0
 }
 
-# smartdns 接管验证：主段 enabled/port=53、13 个上游齐全、dnsmasq 已让出 53
+# smartdns 节点验证：必备组件齐全 + 主段 enabled/port=53 + 13 个上游 + dnsmasq 已让出 53
 verify_smartdns() {
-    # 没装 smartdns（或只有二进制没有 init）：本节点无事可做，直接算通过。
-    # 绝不在这里判失败 —— 那会把「用官方源构建、没带这个包」的固件判死。
-    [ -x /usr/sbin/smartdns ] || return 0
-    [ -x /etc/init.d/smartdns ] || return 0
+    # ① 必备组件先验：缺任何一个都判「未就绪」，交给 build 去补。
+    # 这一步只读不写 —— 先验证、后增加，别在 verify 里动手。
+    if ! _sd_missing_deps; then
+        return 1
+    fi
     _vsd_seg=$(_sd_main_seg)
     [ -n "$_vsd_seg" ] || return 1
     [ "$(run uci -q get "smartdns.$_vsd_seg.enabled" 2>/dev/null)" = "1" ] || return 1
@@ -1049,9 +1094,15 @@ build_dhcp_ignore() {
 # smartdns 接管 builder：写主段 + 重建 13 个上游 + 让 dnsmasq 交出 53
 # 只写 uci 内存态，重启动作全部交给 flush_uci（那里有「起不来就把端口还回去」的回滚）。
 build_smartdns() {
-    if [ ! -x /usr/sbin/smartdns ] || [ ! -x /etc/init.d/smartdns ]; then
-        log "[SMARTDNS] 未装 smartdns（或缺少 init 脚本），本节点跳过"
-        return 0
+    # ① 先补缺失的必备组件。verify 已经验出缺哪个，这里只管去装；
+    # 装不上就 return 1 —— 按「必选」处理，ensure 会 hard 终止并在日志里说清楚缺什么。
+    if ! _sd_missing_deps; then
+        log "[DEPS] 必备组件缺失：$_SD_MISSING"
+        if ! _sd_install_missing "$_SD_MISSING"; then
+            log "[DEPS] 补齐失败，仍缺：$_SD_MISSING —— 该组件被列为必选，引导终止"
+            return 1
+        fi
+        log "[DEPS] 必备组件已补齐"
     fi
     _bsd_seg=$(_sd_main_seg)
     if [ -z "$_bsd_seg" ]; then

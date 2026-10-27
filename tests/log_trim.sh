@@ -62,8 +62,8 @@ ck "R32.3b 调用在 main 之前" \
    "$(awk '/^_boot_log_trim$/{t=NR} /^main "\$@"$/{m=NR} END{print (t && m && t < m) ? "yes" : "no"}' "$BS")" "yes"
 ck "R32.3c --only-funcs 测试钩子仍在调用点之前（导函数时不该截真日志）" \
    "$(awk '/= "--only-funcs"/{o=NR} /^_boot_log_trim$/{t=NR} END{print (o && t && o < t) ? "yes" : "no"}' "$BS")" "yes"
-ck "R32.3d 版本号推进到 180.78" \
-   "$(grep -c 'SCRIPT_VER="2026-10-24.180.78"' "$BS")" "1"
+ck "R32.3d 版本号已填且格式合法（不钉死具体号）" \
+   "$(sed -n 's/^SCRIPT_VER="\([0-9][0-9.-]*\)"$/ok/p' "$BS")" "ok"
 
 echo "== 32.4 真跑：超限要截 =="
 TMPD=$(mktemp -d)

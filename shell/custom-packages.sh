@@ -56,6 +56,8 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-taskplan luci-i18n-taskplan-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-wechatpush luci-i18n-wechatpush-zh-cn"
 
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-daed-zh-cn"
+
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-proto-wireguard kmod-wireguard wireguard-tools"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES lucky luci-app-lucky yq kmod-dummy ca-bundle"

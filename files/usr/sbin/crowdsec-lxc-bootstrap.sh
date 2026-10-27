@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.114"
+SCRIPT_VER="2026-10-27.180.115"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -1397,7 +1397,7 @@ build_smartdns() {
         _rom_restore_smartdns
         hash -r 2>/dev/null || true
         if ! _smartdns_installed; then
-            log "[SMARTDNS] 只读基座也没有 smartdns：固件未内置该包（custom-packages.sh 第 79 行）"
+            log "[SMARTDNS] 只读基座也没有 smartdns：固件未内置该包（查 shell/custom-packages.sh 24.10 / shell/apk-custom-packages.sh 25.12 的 CUSTOM_PACKAGES）"
             return 1
         fi
         log "[SMARTDNS] 已从只读基座恢复，继续写配置"
@@ -1504,7 +1504,7 @@ build_pkg_base() {
         return 0
     fi
     log "[PKG] 恢复后仍缺：$_PKG_MISSING"
-    log "[PKG] 固件未内置：检查 shell/custom-packages.sh 第 41 行(lxc) / 第 79 行(smartdns)"
+    log "[PKG] 固件未内置：查 shell/custom-packages.sh（24.10）/ shell/apk-custom-packages.sh（25.12）里的 CUSTOM_PACKAGES —— lxc 全家桶与 smartdns 都必须随固件进 /rom"
     return 1
 }
 
@@ -1547,7 +1547,7 @@ build_sd_serve() {
 }
 
 # ---- lxc_zone：只写 zone 段 ----
-# 【v.180.114】拆开：原来 zone 与 4 条转发规则共用 build_lxc_zone_fwd，任一处不符就
+# 【v.180.115】拆开：原来 zone 与 4 条转发规则共用 build_lxc_zone_fwd，任一处不符就
 # 整体重写一遍。行为等价（都幂等），但日志分不出是 zone 坏了还是规则坏了，出问题只能
 # 整段排查。现在两个节点各自 build，各自打日志，失败也各自停在那一小步。
 # 顺序由 DEP_fwd_rules="lxc_zone" 保证，不靠函数里"顺手先建 zone"。
@@ -3002,7 +3002,7 @@ _bouncer_missing_deps() {
     [ -z "$_BOUNCER_MISSING" ]
 }
 
-# 【v.180.114】原名 _rom_restore_bouncer 已不符实：v.180.111 之后它除了从 /rom 补回
+# 【v.180.115】原名 _rom_restore_bouncer 已不符实：v.180.111 之后它除了从 /rom 补回
 # 二进制，还会重建配置（_bouncer_uci_apply）、给空 api_key 重签（_bouncer_register_once）。
 # 名字改成 _bouncer_heal —— 它做的是"把这层修到能用"，而不是"拷贝文件"。
 # 从只读基座恢复 bouncer 依赖。与 _rom_restore_pkg 的唯一差别是配置那一项：

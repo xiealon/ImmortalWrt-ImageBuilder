@@ -234,6 +234,9 @@ echo "$PACKAGES"
 mkdir -p files/usr/share/crowdsec-tests/danger
 _t_n=0
 _t_d=0
+# tests/ 是仓库里的目录，靠 workflow 的 -v 挂进容器；没挂上就只是没自检脚本，
+# 不影响固件功能（guard 对 /usr/share/crowdsec-tests 是「没有就跳过」），所以只警告不中断。
+[ -d tests ] || echo "::warning::容器里没有 tests/ 目录，本次镜像不带自检脚本"
 for _t in tests/*; do
     [ -f "$_t" ] || continue
     case "${_t##*/}" in
@@ -249,9 +252,13 @@ for _t in tests/*; do
 done
 chmod 755 files/usr/share/crowdsec-tests/*.sh files/usr/share/crowdsec-tests/danger/*.sh 2>/dev/null || true
 chmod 644 files/usr/share/crowdsec-tests/*.py 2>/dev/null || true
-# 空目录会被 make image 静默丢掉，铺不出东西就别往下走
-[ "$_t_n" -gt 0 ] || { echo "::error::自检脚本一个都没铺进去（tests/* 为空？）"; exit 1; }
-echo "==> 自检脚本已铺进固件：只读 $_t_n 个，danger $_t_d 个"
+# 空目录会被 make image 静默丢掉。这里只警告不 exit：自检脚本是附加能力，
+# 缺了它固件照样该出，否则一次漏挂载就把整条构建线卡死。
+if [ "$_t_n" -gt 0 ]; then
+    echo "==> 自检脚本已铺进固件：只读 $_t_n 个，danger $_t_d 个"
+else
+    echo "::warning::自检脚本一个都没铺进去，本镜像不含 crowdsec-tests（不阻断出镜像）"
+fi
 
 make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE
 

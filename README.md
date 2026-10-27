@@ -1,9 +1,6 @@
 # 这是什么
-在悟空大佬https://github.com/wukongdaily
 
-项目https://github.com/wukongdaily/ImmortalWrt-ImageBuilder
-
-进行修改的全自动化的immortalwrt的自动编译项目。
+![这是什么 · 十一组链式置位](docs/bp-eleven-group-flow.png)
 
 # 整体流程
 
@@ -110,10 +107,6 @@ uci 配置。bootstrap 的 `_drop_enroll_key` 在绑定成功后会删 enroll ke
 手动清 N 天前的 Actions 运行记录，防止积累太多。
 
 ---
-
-# 十一组链式置位（旁路由锁定版）
-
-![十一组链式置位](docs/bp-eleven-group-flow.png)
 
 ## LAPI 组细部：取 LAPI → 填入 bouncer → 重启宿主机服务
 

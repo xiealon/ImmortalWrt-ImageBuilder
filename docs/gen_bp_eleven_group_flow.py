@@ -47,7 +47,7 @@ NET_NODES = ["br_lan_ports", "lan_static", "dhcp_ignore", "bridge", "lxc_zone",
 NET_TAIL = ["pkg_base", "lxc_auto", "smartdns"]
 
 ROW_GAP = 14
-TOP = 118
+TOP = 258
 BOTTOM = 96
 TOTAL_H = TOP + sum(g[7] for g in GROUPS) + ROW_GAP * len(GROUPS) + BOTTOM
 RIGHT = W - PAD - 20
@@ -70,19 +70,35 @@ A = svg.append
 A('<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">'
   % (W, TOTAL_H, W, TOTAL_H))
 A('<rect width="100%" height="100%" fill="#ffffff"/>')
-A('<text x="%d" y="46" font-size="30" font-weight="700" fill="#111111" font-family="%s">'
+
+# ── 这是什么：README 开头的原文，逐字搬上来（只在 URL 处用蓝色区分，不加字不改字）
+A('<rect x="%d" y="16" width="%d" height="122" rx="10" fill="#f6f7f9" stroke="#d5d9e0" stroke-width="1"/>'
+  % (PAD, W - PAD * 2))
+A('<text x="%d" y="46" font-size="19" font-weight="700" fill="#111111" font-family="%s">这是什么</text>'
+  % (PAD + 20, FONT))
+A('<text x="%d" y="75" font-size="16" fill="#222222" font-family="%s">'
+  '<tspan>在悟空大佬</tspan><tspan fill="#1a56c4">https://github.com/wukongdaily</tspan></text>'
+  % (PAD + 20, FONT))
+A('<text x="%d" y="101" font-size="16" fill="#222222" font-family="%s">'
+  '<tspan>项目</tspan><tspan fill="#1a56c4">https://github.com/wukongdaily/ImmortalWrt-ImageBuilder</tspan></text>'
+  % (PAD + 20, FONT))
+A('<text x="%d" y="127" font-size="16" fill="#222222" font-family="%s">'
+  '进行修改的全自动化的immortalwrt的自动编译项目。</text>' % (PAD + 20, FONT))
+
+# ── 主标题
+A('<text x="%d" y="184" font-size="30" font-weight="700" fill="#111111" font-family="%s">'
   'crowdsec-lxc-bootstrap.sh · 11 组 · 31 节点</text>' % (PAD, FONT))
-A('<text x="%d" y="76" font-size="17" fill="#666666" font-family="%s">'
+A('<text x="%d" y="214" font-size="17" fill="#666666" font-family="%s">'
   'v.180.113 · 组内每个节点都是「先验证现场，达标就零写入；不达标才构建」</text>' % (PAD, FONT))
 
 # 阶段图例
 lx = PAD
 for label, color in [("Ⅰ 网络", "#2f6fd0"), ("Ⅱ 容器", "#7b4fd0"),
                      ("Ⅲ smartdns", "#0e8a8a"), ("Ⅳ crowdsec", "#e67e22"), ("Ⅴ 检测+注册", "#2e7d32")]:
-    A('<rect x="%d" y="88" width="24" height="16" fit="" fill="%s"/>' % (lx, color))
-    A('<text x="%d" y="102" font-size="15" fill="#333333" font-family="%s">%s</text>'
-      % (lx + 30, FONT, esc(label)))
-    lx += 30 + len(label) * 16 + 26
+    A('<rect x="%d" y="226" width="16" height="16" fill="%s"/>' % (lx, color))
+    A('<text x="%d" y="240" font-size="15" fill="#333333" font-family="%s">%s</text>'
+      % (lx + 22, FONT, esc(label)))
+    lx += 22 + len(label) * 15 + 30
 
 y = TOP
 for idx, (name, phase, title, nodes, deps, note, color, h) in enumerate(GROUPS, 1):

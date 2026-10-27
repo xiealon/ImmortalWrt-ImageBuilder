@@ -56,6 +56,12 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-smartdns"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES dockerd luci-app-dockerman luci-i18n-dockerman-zh-cn"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES crowdsec-firewall-bouncer"
+# nftables-json /usr/sbin/nft 归属这个包（2026-10-27 真机核实）：bouncer 的 deny_action=drop
+# 走 nft JSON 接口，少了它 bouncer 起得来但一条拦截都下发不了 —— 全是「开着却不拦」。
+# bootstrap 里有 _rom_restore_tree nftables-json，所以**构建期必须随固件进 /rom**，
+# 否则那条恢复路径两边都空。
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES nftables-json"
+
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-app-crowdsec-firewall-bouncer"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES luci-i18n-crowdsec-firewall-bouncer-zh-cn"
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES xz tar ip-full"

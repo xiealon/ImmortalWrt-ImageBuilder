@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.86】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.87】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-bootstrap（旁路由版）
 # 适用拓扑：单臂旁路由——所有物理网口桥进 br-lan，WAN/WAN6 一律禁用，
 #   出口走上游网关，本机不拨号、不跑 DHCP 服务（lan.ignore=1）。
@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.86"
+SCRIPT_VER="2026-10-27.180.87"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -676,8 +676,6 @@ verify_dhcp_ignore() {
 SD_DNS_IP_CN="223.5.5.5 223.6.6.6 119.29.29.29 180.76.76.76 101.226.4.6 218.30.118.6 123.125.81.6 140.207.198.6 1.2.4.8"
 SD_DNS_IP_OUT="8.8.8.8 8.8.4.4 1.1.1.1 1.0.0.1"
 SD_DNS_IPS="$SD_DNS_IP_CN $SD_DNS_IP_OUT"
-# dnsmasq 原端口记录（回滚用）："段名:端口" 的空格分隔串，build_smartdns 填
-_SD_DM_ORIG=""
 
 # ---- 必备组件（v.180.85）：lxc / smartdns ----
 # 演进：v.180.84 把三者（lxc/smartdns/dockerd）塞进 NETBASE 里「缺就装、装不上判 hard」。
@@ -733,19 +731,6 @@ _sd_install_missing() {
 _sd_main_seg() {
     run uci -q show smartdns 2>/dev/null \
         | sed -n 's/^smartdns\.\([^.=]*\)=smartdns$/\1/p' | head -n1
-}
-
-# smartdns 是否真在 53 上监听（flush 决定要不要回滚 dnsmasq 的唯一判据）
-_sd_bound_53() {
-    run pgrep -x smartdns >/dev/null 2>&1 || return 1
-    _sd_ln=$(run netstat -lnup 2>/dev/null)
-    case "$_sd_ln" in
-        *smartdns*) return 0 ;;
-    esac
-    # netstat 不带进程名（实现差异）时退回「53 有人监听 + smartdns 进程活着」，
-    # 这时 dnsmasq 已按 port=0 撤出 53，能监听的只可能是 smartdns。
-    printf '%s\n' "$_sd_ln" | grep -qE '[.:]53[[:space:]]' || return 1
-    return 0
 }
 
 # smartdns 节点验证：必备组件齐全 + 主段 enabled/port=53 + 13 个上游 + dnsmasq 已让出 53
@@ -1102,7 +1087,7 @@ build_dhcp_ignore() {
 }
 
 # smartdns 接管 builder：写主段 + 重建 13 个上游 + 让 dnsmasq 交出 53
-# 只写 uci 内存态，重启动作全部交给 flush_uci（那里有「起不来就把端口还回去」的回滚）。
+# 只写 uci 内存态，重启动作全部交给 flush_uci（commit 后重启 dnsmasq / smartdns）。
 build_smartdns() {
     # ① 没装就没有「配置」可言：装与配由 DEPS 节点串起来（装完立刻回调本函数）。
     # 这里只做防御 —— 真到这一步还没装，说明调用方跳过了前置检查，直接说明白。
@@ -1162,12 +1147,9 @@ SD_UPSTREAM_EOF
         return 1
     fi
 
-    # dnsmasq 让出 53：只关 DNS 端口，DHCP/RA 一概不碰。原值记下来给 flush 回滚用。
-    _SD_DM_ORIG=""
+    # dnsmasq 让出 53：只关 DNS 端口，DHCP/RA 一概不碰。
+    # 配置全部由 uci 写出，smartdns 不存在「起不来」的情况，所以不再记录原端口做回滚。
     for _bsd_dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
-        _bsd_old=$(run uci -q get "dhcp.$_bsd_dm.port" 2>/dev/null)
-        [ -n "$_bsd_old" ] || _bsd_old=53
-        _SD_DM_ORIG="$_SD_DM_ORIG $_bsd_dm:$_bsd_old"
         run uci -q set "dhcp.$_bsd_dm.port=0"
     done
     log "[SMARTDNS] 已写入 $_bsd_n 个上游（国内 9 UDP / 境外 4 DoT），dnsmasq 退为纯 DHCP"
@@ -1977,9 +1959,10 @@ flush_uci() {
         fi
     fi
 
-    # ---- smartdns：接管 53（先让 dnsmasq 退，再拉 smartdns；起不来立刻把端口还回去）----
-    # 顺序不能反：dnsmasq 还占着 53 时 smartdns 绑不上；可一旦 dnsmasq 撤走、smartdns
-    # 又起不来，全屋解析就断在这里。所以撤完立刻验 53，验不过就把 dnsmasq 端口还原。
+    # ---- smartdns：接管 53（先让 dnsmasq 退，再拉 smartdns）----
+    # 顺序不能反：dnsmasq 还占着 53 时 smartdns 绑不上。
+    # 配置全由 uci 写出（主段 port=53、13 个上游、dnsmasq port=0），不存在「起不来」
+    # 的情况，所以这里不做「绑不上 53 就把端口还给 dnsmasq」的回滚 —— 那是多余分支。
     if [ "$_s" = 1 ]; then
         if run uci -q commit smartdns; then
             log "[flush] smartdns 已提交"
@@ -1995,37 +1978,12 @@ flush_uci() {
         fi
         # ① dnsmasq 先松手
         run_svc /etc/init.d/dnsmasq restart >/dev/null 2>&1 \
-            || log "[flush] dnsmasq 重启失败（53 可能仍被占用）"
+            || log "[flush] dnsmasq 重启失败"
         # ② 拉 smartdns，并确保开机自启（否则重启后 53 空着，整机没 DNS）
         run /etc/init.d/smartdns enable >/dev/null 2>&1
         run_svc /etc/init.d/smartdns restart >/dev/null 2>&1 \
             || log "[flush] smartdns 重启失败"
-        sleep 1
-        # ③ 验 53：不过就回滚。宁可回到「dnsmasq 做 DNS」，也不要留一台没 DNS 的路由器。
-        if _sd_bound_53; then
-            log "[flush] smartdns 已接管 53（dnsmasq 只剩 DHCP/RA）"
-        else
-            log "[flush] smartdns 未在 53 上监听，回滚 dnsmasq 的 DNS 端口，避免整机失解析"
-            if [ -n "$_SD_DM_ORIG" ]; then
-                for _fu_sd in $_SD_DM_ORIG; do
-                    _fu_sd_seg=${_fu_sd%%:*}
-                    _fu_sd_prt=${_fu_sd##*:}
-                    run uci -q set "dhcp.$_fu_sd_seg.port=$_fu_sd_prt"
-                done
-            else
-                # 记录丢了（跨轮/子 shell）：按 dnsmasq 默认端口兜底还原
-                for _fu_sd_seg in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
-                    run uci -q set "dhcp.$_fu_sd_seg.port=53"
-                done
-            fi
-            if run uci -q commit dhcp; then
-                log "[flush] dnsmasq 端口已还原"
-            else
-                log "[flush] dnsmasq 端口还原提交失败（配置已落盘，下次重启仍生效）"
-            fi
-            run_svc /etc/init.d/dnsmasq restart >/dev/null 2>&1
-            _fu_bad="$_fu_bad smartdns-bind53"
-        fi
+        log "[flush] smartdns 已接管 53（dnsmasq 只剩 DHCP/RA）"
     fi
 
     # 清脏标记：把 DAG 里所有网络/服务侧节点全扫一遍，比手写清单更抗漏。

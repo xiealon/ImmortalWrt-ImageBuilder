@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.104"
+SCRIPT_VER="2026-10-27.180.105"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -788,8 +788,16 @@ _rom_restore_smartdns() {
 }
 
 # smartdns 是否真在位：二进制 + init 脚本缺一不可（少了 init 就没法启停，等于没装）
+# 【v.180.105】同 lxc 一样加冒烟：opkg remove libopenssl3 之后两个 -x 判断依然为真，
+# 只有真跑才看得见动态库缺口。取向也一致 —— 只有明确的加载错误才判「不在位」；
+# 参数不被认、输出为空等一律当作在位，绝不因为冒烟把整轮引导拖下水。
 _smartdns_installed() {
-    [ -x /usr/sbin/smartdns ] && [ -x /etc/init.d/smartdns ]
+    [ -x /usr/sbin/smartdns ] && [ -x /etc/init.d/smartdns ] || return 1
+    case "$(/usr/sbin/smartdns -v 2>&1)" in
+        *"Error loading"*|*"No such file"*|*"not found"*|*"cannot open shared object"*)
+            return 1 ;;
+    esac
+    return 0
 }
 
 # 必备组件缺哪些（lxc 五件套）：全在返回 0；否则返回 1，缺失清单留在 _SD_MISSING。
@@ -797,11 +805,24 @@ _smartdns_installed() {
 # 五个命令逐一查：lxc-ls / lxc-info / lxc-attach 都是独立 applet 包（各自一个 ipk/apk），
 # 没有任何反向依赖会把它们拉进来；只查 lxc-start 会得出「装好了」的假阳性 —— v.180.99 修正。
 # 【v.180.100】smartdns 不在这里判：它由 _pkg_missing_all 合并，本函数只守 lxc 五件套。
+# 【v.180.105】「在」≠「能用」：opkg remove liblxc 之后五个二进制全都还在，
+# command -v 照过，可动态链接已经断了 —— 一直要到 ct_boot 真跑 lxc-start 才报
+# 「Error loading shared library liblxc.so.1」，那时离根因已经很远。
+# 所以五件套齐全后再跑一次 lxc-start --version 冒烟（一次进程，约 10ms）。
+# 判据取向：只有明确看到动态库加载错误才判缺。反过来的「误判成缺」会让 pkg_base
+# 硬失败、把整轮引导带走，代价远大于漏报，所以其余任何异常输出一律放过。
 _sd_missing_deps() {
     _SD_MISSING=""
     for _md_c in lxc-start lxc-stop lxc-ls lxc-info lxc-attach; do
         command -v "$_md_c" >/dev/null 2>&1 || _SD_MISSING="$_SD_MISSING $_md_c"
     done
+    # 文件齐了才冒烟：缺文件时上面已经判过，不必再花一次进程
+    if [ -z "$_SD_MISSING" ]; then
+        case "$(lxc-start --version 2>&1)" in
+            *"Error loading"*|*"No such file"*|*"not found"*|*"cannot open shared object"*)
+                _SD_MISSING=" lxc(动态库)" ;;
+        esac
+    fi
     [ -z "$_SD_MISSING" ]
 }
 

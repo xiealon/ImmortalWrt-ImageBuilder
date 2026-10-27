@@ -36,7 +36,7 @@ python3 - "$BS" \
     verify_smartdns verify_smartdns_main verify_smartdns_upstream \
     build_smartdns build_smartdns_main build_smartdns_upstream \
     _sd_main_seg _smartdns_installed _dnsmasq_release_53 \
-    _sd_missing_deps _sd_install_missing _net_ready verify_deps build_deps \
+    _sd_missing_deps _net_ready verify_deps build_deps \
     verify_docker_fw verify_lxc_zone verify_fwd_rules verify_snat verify_snat_rule _snat_sec \
     verify_ip_forward verify_bridge \
     build_wan_input build_lan_input build_br_lan_ports build_lan_static \

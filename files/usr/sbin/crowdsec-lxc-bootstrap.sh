@@ -44,7 +44,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.98"
+SCRIPT_VER="2026-10-27.180.99"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -688,10 +688,11 @@ SD_DNS_IPS="$SD_DNS_IP_CN $SD_DNS_IP_OUT"
 # 演进：v.180.84 把三者（lxc/smartdns/dockerd）塞进 NETBASE 里「缺就装、装不上判 hard」。
 # 真机上这是错的 —— 装机那一刻网络常常还没通（上游没起、拨号没完成），在这个位置 apk/opkg
 # 必然失败，一失败就 hard 终止，后面的容器流程一步都跑不到，连「等网络好了再装」都没机会。
-# 现在改成两段式：
-#   · NETBASE.smartdns —— 已装就把配置配对（配好即跳过）；没装则整体放行，什么都不做；
-#   · 末尾 DEPS 节点   —— lxc / smartdns 缺的统一收在这里：先探网络，通了才装，
-#                         装完立刻把 smartdns 配起来；不通/装不上只记日志，不中止引导。
+# 【v.180.99】脚本不再联网装包：
+#   · lxc / smartdns 由固件内置（构建期 PACKAGES 装进 /rom），装包这件事整个交给构建期；
+#   · pkg_base 退化为「必备组件在位验证」，并提到整条链第一个节点 ——
+#     缺包在第一步就停，不让后面十几步白跑；
+#   · NETBASE.smartdns 照旧：已装就配对配置，缺包就放行（此时 pkg_base 已拦在前）。
 # docker 不再必选：路由上跑不跑 docker 是用户的选择，缺 dockerd 时 docker_fw 自己豁免。
 _SD_MISSING=""
 
@@ -700,38 +701,17 @@ _smartdns_installed() {
     [ -x /usr/sbin/smartdns ] && [ -x /etc/init.d/smartdns ]
 }
 
-# 必备组件缺哪些（lxc + smartdns）：全在返回 0；否则返回 1，缺失清单留在 _SD_MISSING。
-# 只读不写 —— verify 侧也用它，别在这里动手。
+# 必备组件缺哪些（lxc 五件套 + smartdns）：全在返回 0；否则返回 1，缺失清单留在 _SD_MISSING。
+# 只读不写 —— verify / build 两侧都用它。
+# 五个命令逐一查：lxc-ls / lxc-info / lxc-attach 都是独立 applet 包（各自一个 ipk/apk），
+# 没有任何反向依赖会把它们拉进来；只查 lxc-start 会得出「装好了」的假阳性 —— v.180.99 修正。
 _sd_missing_deps() {
     _SD_MISSING=""
-    command -v lxc-start >/dev/null 2>&1 || _SD_MISSING="$_SD_MISSING lxc"
+    for _md_c in lxc-start lxc-stop lxc-ls lxc-info lxc-attach; do
+        command -v "$_md_c" >/dev/null 2>&1 || _SD_MISSING="$_SD_MISSING $_md_c"
+    done
     _smartdns_installed || _SD_MISSING="$_SD_MISSING smartdns"
     [ -z "$_SD_MISSING" ]
-}
-
-# 缺什么装什么：25.12 走 apk、24.10 走 opkg。装完再验一次，验不出就是真失败。
-# 只装最小可用集（lxc 的核心包 + lxc-auto），不碰 LuCI 那些壳。
-# 调用点只有 build_deps（网络确认可用之后），不再在 NETBASE 阶段被调用。
-_sd_install_missing() {
-    _sim_want="$1"
-    _sim_pkgs=""
-    case " $_sim_want " in
-        *" lxc "*)      _sim_pkgs="$_sim_pkgs lxc lxc-common lxc-auto" ;;
-    esac
-    case " $_sim_want " in
-        *" smartdns "*) _sim_pkgs="$_sim_pkgs smartdns" ;;
-    esac
-    [ -n "$_sim_pkgs" ] || return 0
-    log "[DEPS] 尝试补齐：$_sim_pkgs"
-    if command -v apk >/dev/null 2>&1; then
-        run_svc apk add --no-progress $_sim_pkgs >/dev/null 2>&1 || return 1
-    elif command -v opkg >/dev/null 2>&1; then
-        run_svc opkg install $_sim_pkgs >/dev/null 2>&1 || return 1
-    else
-        log "[DEPS] 本机没有 apk / opkg，无法补装"
-        return 1
-    fi
-    _sd_missing_deps
 }
 
 # smartdns 主配置段（config smartdns）的段名；没有则回空
@@ -1273,9 +1253,10 @@ SD_UPSTREAM_EOF
 }
 
 build_smartdns() {
-    # ① 没装就没有「配置」可言：装与配由 DEPS 节点串起来（装完立刻回调本函数）。
+    # ① 没装就没有「配置」可言：固件应自带 smartdns（custom-packages.sh 第 79 行），
+    #    缺包由最前面的 pkg_base 拦下；走到这里说明固件不合规。
     if ! _smartdns_installed; then
-        log "[SMARTDNS] smartdns 未安装，无法配置（由末尾 DEPS 节点安装后回调）"
+        log "[SMARTDNS] smartdns 未安装，无法配置（固件未内置该包）"
         return 1
     fi
     build_smartdns_main || return 1
@@ -1314,18 +1295,14 @@ _net_ready() {
 # 【v.180.98】DEPS 退化为「纯验证」：不装包、不写配置、不做任何落地改动。
 # 位置也从「网络基线之后」挪到「容器流程与 bouncer 校验之后、enroll 之前」——
 # 它是本轮的总闸门：网络通不通、lxc 与 smartdns 到底在不在，最后一次性交代清楚，
-# 然后才允许编 enroll。装包是本地动作，全部归 INSTALL 组的 pkg_base。
+# 然后才允许编 enroll。装包不再由脚本负责：固件自带，pkg_base 只做在位验证。
 verify_deps() {
     if ! _net_ready; then
         log "[DEPS] 网络不通（网关 / 公网 IP / DNS 至少一层没过）"
         return 1
     fi
-    if ! command -v lxc-start >/dev/null 2>&1; then
-        log "[DEPS] lxc 不在位（本节点不装包，装包在 INSTALL 的 pkg_base）"
-        return 1
-    fi
-    if ! _smartdns_installed; then
-        log "[DEPS] smartdns 不在位（本节点不装包，装包在 INSTALL 的 pkg_base）"
+    if ! _sd_missing_deps; then
+        log "[DEPS] 组件不在位：$_SD_MISSING（pkg_base 已在第一步拦过，这里不该出现）"
         return 1
     fi
     verify_smartdns_main || { log "[DEPS] smartdns 主段配置不符"; return 1; }
@@ -1342,50 +1319,26 @@ build_deps() {
     return 1
 }
 
-# ---- pkg_base：本地装包（INSTALL 组第一个节点，v.180.98 新增）----
-# 装包从 DEPS 挪到这里，落实「安装在本地完成」。排 INSTALL 组最前，
-# 后面的 rootfs / ct_config 才有 lxc-* 命令可用。
-# 只装不配：刚装上的 smartdns 只在末尾补写一次 uci（NETBASE 跑在装包之前，
-# 那时还没有包，verify 直接放行、什么都没写），commit/重启交给本轮末尾的 flush_uci。
+# ---- pkg_base：必备组件在位验证（v.180.99：从 INSTALL 组挪到整条链第一位）----
+# 为什么提到最前：lxc / smartdns 都由固件内置（构建期 PACKAGES 装进 /rom），
+# 脚本不再联网装包。缺包 = 固件不合规，在第一步就说清楚，不让后面十几步白跑。
+# 判据是「命令真能用」而不是「包名在列表里」：liblxc 在、lxc 壳在、applet 缺一个，
+# 一样跑不起来 —— 见 _sd_missing_deps 的五件套。
+# 只读不写：本节点不装包、不写 uci、不碰容器。
 verify_pkg_base() {
-    command -v lxc-start >/dev/null 2>&1 || return 1
-    _smartdns_installed || return 1
-    return 0
+    _sd_missing_deps
 }
 
 build_pkg_base() {
-    _pb_missing=""
-    command -v lxc-start >/dev/null 2>&1 || _pb_missing="$_pb_missing lxc"
-    _smartdns_installed || _pb_missing="$_pb_missing smartdns"
-    if [ -z "$_pb_missing" ]; then
-        log "[PKG] lxc 与 smartdns 均已就位"
+    if _sd_missing_deps; then
+        log "[PKG] lxc 五件套（start/stop/ls/info/attach）+ smartdns 均已就位（固件自带）"
         return 0
     fi
-    if ! _net_ready; then
-        log "[PKG] 网络不通，无法本地装包：$_pb_missing（下一次开机重试）"
-        return 1
-    fi
-    log "[PKG] 本地补齐：$_pb_missing"
-    for _pb_c in $_pb_missing; do
-        if _sd_install_missing "$_pb_c"; then
-            log "[PKG] $_pb_c 安装完成"
-            # 本轮刚把 lxc 补上：main 据此恢复完整组链，当场把容器装起来
-            [ "$_pb_c" = "lxc" ] && _LXC_INSTALLED_NOW=1
-        else
-            log "[PKG] $_pb_c 安装失败（下一次开机重试）"
-            return 1
-        fi
-    done
-    # 刚装上 smartdns：NETBASE 的 smartdns 节点跑在装包之前，配置还没写过，
-    # 这里补一次，否则本轮 53 一直留在 dnsmasq 手里。
-    if _smartdns_installed && ! verify_smartdns; then
-        if build_smartdns; then
-            log "[PKG] smartdns 配置已补写，随本轮 flush_uci 生效并接管 53"
-        else
-            log "[PKG] smartdns 配置写入失败，下一轮引导重试"
-        fi
-    fi
-    return 0
+    log "[PKG] 固件缺组件：$_SD_MISSING"
+    log "[PKG] 本脚本不装包 —— 请用内置 lxc/smartdns 的固件重刷："
+    log "[PKG]   24.10：shell/custom-packages.sh 第 41 行 + 第 79 行"
+    log "[PKG]   25.12：shell/apk-custom-packages.sh 第 10 行 + 第 79 行"
+    return 1
 }
 
 # ---- sd_serve：smartdns 运行态验证（SMARTCHK 组，v.180.98 新增）----
@@ -1675,7 +1628,7 @@ NODE_GROUP_bouncer_verify=BOUNCERVERIFY
 NODE_GROUP_capi_release=BOUNCERVERIFY
 NODE_GROUP_enroll=ENROLL
 NODE_GROUP_deps=DEPS
-NODE_GROUP_pkg_base=INSTALL
+NODE_GROUP_pkg_base=NETBASE
 NODE_GROUP_sd_serve=SMARTCHK
 
 # 层级拓扑排序（v.79）：先校验「每个小步骤都对应到某个组、组间依赖不倒置」，
@@ -5240,9 +5193,9 @@ _sc_wait_pull() {
 
 
 # 各组节点清单（由 NODE_GROUP_* 派生，供组级 verify/build 遍历；顺序即组内声明序）
-NETBASE_NODES="br_lan_ports lan_static dhcp_ignore bridge lxc_zone fwd_rules lan_input snat ip_forward lxc_auto smartdns svc_bind docker_fw"
+NETBASE_NODES="pkg_base br_lan_ports lan_static dhcp_ignore bridge lxc_zone fwd_rules lan_input snat ip_forward lxc_auto smartdns svc_bind docker_fw"
 PREP_NODES="ct_net cgroup_mount ct_bootlink ct_resolv"
-INSTALL_NODES="pkg_base img_migrate rootfs ct_config"
+INSTALL_NODES="img_migrate rootfs ct_config"
 CAPIBLOCK_NODES="capi_block"
 BOOT_NODES="ct_boot"
 LOGCONF_NODES="logconf"
@@ -5580,13 +5533,12 @@ main() {
     # 裁剪方式与 --net-only 同源：只改 GROUP_SEQ 不够，dag_order 会遍历整个 DAG_NODES
     # 并校验归属组是否在 GROUP_SEQ 里，所以 DAG_NODES 必须同步收窄。
     _LXC_READY=1
-    _LXC_INSTALLED_NOW=0
     _FULL_DAG=""
     _FULL_SEQ=""
     _FULL_NETBASE=""
     if [ "$NET_ONLY" != "1" ] && ! command -v lxc-start >/dev/null 2>&1; then
         _LXC_READY=0
-        # 完整组链留底：DEPS 现场把 lxc 装上之后要立刻恢复它，接着跑容器流程。
+        # 完整组链留底：万一运行期 lxc 被手工补上，末段还能恢复它接着跑容器流程。
         _FULL_DAG="$DAG_NODES"
         _FULL_SEQ="$GROUP_SEQ"
         _FULL_NETBASE="$NETBASE_NODES"
@@ -5594,17 +5546,14 @@ main() {
         for _lx_n in $DAG_NODES; do
             case "$(eval "echo \$NODE_GROUP_$_lx_n")" in
                 NETBASE)
-                    # lxc_auto 必须单独摘掉：它验的是 lxc-auto 包带来的服务脚本 + uci 段，
-                    # 包不在时 build 从 /rom 恢复也拿不到脚本 → return 1 → ensure hard exit。
-                    # 留着这一个节点，整个「lxc 缺失不硬失败」就等于没做。
-                    [ "$_lx_n" = "lxc_auto" ] && continue
+                    # lxc_auto 与 pkg_base 必须摘掉：
+                    #   · lxc_auto 验的是 lxc-auto 包带来的服务脚本，包不在时必然 return 1；
+                    #   · pkg_base 是必备组件在位验证，lxc 不在时必然 hard exit 1。
+                    # 留着任一个，「缺 lxc 不硬失败」就等于没做。
+                    case "$_lx_n" in
+                        lxc_auto|pkg_base) continue ;;
+                    esac
                     _lx_dag="$_lx_dag $_lx_n"
-                    ;;
-                INSTALL)
-                    # 【v.180.98】只留 pkg_base：它的活就是「本地把 lxc 装上」。
-                    # 镜像 / rootfs / config 交给「装好后恢复完整组链」的第二轮，
-                    # 免得没镜像的机器在这里退出、连 lxc 都补不上。
-                    [ "$_lx_n" = "pkg_base" ] && _lx_dag="$_lx_dag $_lx_n"
                     ;;
             esac
         done
@@ -5612,14 +5561,16 @@ main() {
         # 这里同步收窄，避免两处口径不一致（--net-only 也踩过同一个坑）。
         _lx_base=""
         for _lx_n in $NETBASE_NODES; do
-            [ "$_lx_n" = "lxc_auto" ] && continue
+            case "$_lx_n" in
+                lxc_auto|pkg_base) continue ;;
+            esac
             _lx_base="$_lx_base $_lx_n"
         done
         NETBASE_NODES="$_lx_base"
-        GROUP_SEQ="NETBASE INSTALL"
+        GROUP_SEQ="NETBASE"
         DAG_NODES="$_lx_dag"
-        log "[PKG] 未检测到 lxc（缺 lxc-start）：本轮只跑网络基线与本地装包（pkg_base），容器步骤整体跳过"
-        log "[PKG] 补齐后请再跑一次引导（开机自动），容器流程从 INSTALL 组接管"
+        log "[PKG] 未检测到 lxc（缺 lxc-start）：本轮只跑网络基线，容器步骤整体跳过"
+        log "[PKG] 固件应内置 lxc：请检查 custom-packages.sh / apk-custom-packages.sh 的 lxc 清单后重编"
     fi
 
     # 重装自愈持久状态：目录就位 + 退出记账 + 上次未完成重装先计数
@@ -5716,7 +5667,7 @@ if [ "$NET_ONLY" != "1" ] && [ ! -f "$TARBALL" ] && [ ! -f "$LEGACY_TARBALL" ] \
     # 去判失败（那会把「组件已补装成功」的机器记成失败，探针还会反复重跑）。
     # 网络基线与组件安装都已落盘（上面 flush 过），下次引导从 INSTALL 组正常接管。
     if [ "$_LXC_READY" = 0 ]; then
-        if [ "${_LXC_INSTALLED_NOW:-0}" = 1 ] || command -v lxc-start >/dev/null 2>&1; then
+        if command -v lxc-start >/dev/null 2>&1; then
             # 流程图 Ⅲ①：网络正常 → 不存在 lxc → 安装 lxc → 进行配置（含 enroll）→ last pull。
             # 这里恢复完整组链当场再跑一遍：NETBASE 各节点 verify 直接通过（无写入），
             # 真正干活的是 INSTALL → PREP → CAPIBLOCK → BOOT → … → ENROLL。

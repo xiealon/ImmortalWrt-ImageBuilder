@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-28.180.118"
+SCRIPT_VER="2026-10-28.180.119"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -111,6 +111,9 @@ _guard_run() {
         cp -f "/rom$GUARD" "$GUARD" 2>/dev/null
         chmod 755 "$GUARD" 2>/dev/null
     fi
+    # 【v.180.119】bootstrap 同口径复原：每轮查，与本函数的 guard 同一时机 ——
+    # tick 遇到 lock-busy 会提前返回，完整性检查不能跟着停摆。
+    _ensure_boot || :
     [ -x "$GUARD" ] && timeout "$PROBE_GUARD_MAX" "$GUARD" quiet
     return 0
 }
@@ -152,26 +155,37 @@ _lock_stale() {
 # 一旦它没了，三条修复通道（补印 / 停滞 / DNS）全部以 127 空转，
 # 日志只会一路「bootstrap 退出 127」，最后停在「需人工介入」—— 而 /rom 里其实有一份。
 #
-# 绝不能照抄上面 _guard_run 的「与 /rom 不一致就复原」：那个模式对 guard 成立，
-# 对 bootstrap 是灾难 —— /rom 里那份是**构建固件那一刻**的版本（例如 286834 B / 2026-04-22），
-# 运行副本才是迭代过的（343046 B）。照抄就是每轮把新版静默打回旧版，
-# 日志还只会说「已复原」，看不出逻辑退回了几个月。
-# 所以这里只判「在不在、能不能执行」：缺失才补，存在一律不碰。
+# 口径：与 _guard_run 一致 —— 与只读基座不一致就覆盖（v.180.119 起）。
+# 这个口径的安全前提是「更新只通过刷机完成」：刷机后 /rom 即当前版，
+# 两边内容相同 → 每轮零动作；只有运行副本被删或被改，才从 /rom 复原。
+#
+# ⚠ 部署顺序：**先刷机、后让新探针生效**。
+# 如果拿新探针跑在旧固件上（/rom 还是 2026-04-22 那版 286834 B），
+# 每轮都会把运行副本的 bootstrap 盖回旧版 —— 那时日志会连刷
+# 「与只读基座不一致，已按固件版复原」，看到这句就该刷机了。
 _ensure_boot() {
-    [ -x "$BOOT" ] && return 0
-    # 源路径默认就是「只读基座 + 同一路径」（生产环境 /rom/usr/sbin/...）。
-    # BOOT_SRC 单独留一个口子只为测试：Windows 上没有 /rom，拼不出来。
+    # 【v.180.119】口径与上一段 _guard_run 完全一致：**与只读基座不一致就覆盖**。
+    # 这个口径成立的前提只有一个 —— 更新只通过刷机完成：
+    # 刷机后 /rom 里就是当前版，两边 cmp 相同，本函数每轮都零动作。
+    # 代价（已知并接受）：不刷机、却在路由器上手动换掉运行副本的话，
+    # 下一轮就会被 /rom 那份盖回去。
     _eb_src="${BOOT_SRC:-$ROMDIR$BOOT}"
-    if [ -f "$_eb_src" ]; then
-        cp -f "$_eb_src" "$BOOT" 2>/dev/null
-        chmod 755 "$BOOT" 2>/dev/null
-        if [ -x "$BOOT" ]; then
-            plog "【脚本】$BOOT 缺失，已从只读基座恢复（$_eb_src）—— 恢复的是固件内置版本，可能落后于当前仓库，请尽快重刷固件"
-            return 0
-        fi
-    fi
-    plog "【脚本】$BOOT 缺失，且只读基座里也没有（$_eb_src）：自动修复通道已全部失效，请人工重刷固件或从仓库取回"
-    return 1
+    # 只读基座里没有可用版本 → 补不了，交给调用方记 78
+    [ -x "$_eb_src" ] || {
+        [ -x "$BOOT" ] && return 0
+        plog "【脚本】$BOOT 不可用，且只读基座里也没有（$_eb_src）：自动修复通道已失效，请重刷固件"
+        return 1
+    }
+    # 在位且与只读基座一致 → 零动作（这是刷机后的常态）
+    [ -x "$BOOT" ] && cmp -s "$_eb_src" "$BOOT" 2>/dev/null && return 0
+    cp -f "$_eb_src" "$BOOT" 2>/dev/null
+    chmod 755 "$BOOT" 2>/dev/null
+    [ -x "$BOOT" ] || {
+        plog "【脚本】$BOOT 无法复原（拷贝或改权限失败，源 $_eb_src）"
+        return 1
+    }
+    plog "【脚本】$BOOT 与只读基座不一致，已按固件版复原（$_eb_src）"
+    return 0
 }
 
 # ---- smartdns 53 体检（v.180.117）----

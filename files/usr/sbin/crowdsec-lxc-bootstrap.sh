@@ -3,9 +3,11 @@
 # crowdsec-lxc-bootstrap（旁路由版）
 # 适用拓扑：单臂旁路由——所有物理网口桥进 br-lan，WAN/WAN6 一律禁用，
 #   出口走上游网关，本机不拨号、不跑 DHCP 服务（lan.ignore=1）。
-# 八组链：PREP → INSTALL → CAPIBLOCK → BOOT → LOGCONF → LAPI → BOUNCERVERIFY → ENROLL，
+# 十一组链：NETBASE → INSTALL → PREP → CAPIBLOCK → BOOT → LOGCONF → LAPI →
+#   BOUNCERVERIFY → DEPS → SMARTCHK → ENROLL（顺序由 GROUP_SEQ 决定），
 #   每组执行前校验所有前置组已置位，全通才置位，失败不置位。
-#   唯一真实的硬顺序：PREP + INSTALL + CAPIBLOCK → BOOT → (LOGCONF | LAPI) → BOUNCERVERIFY → ENROLL
+#   唯一真实的硬顺序：NETBASE → INSTALL + PREP → CAPIBLOCK → BOOT →
+#   (LOGCONF | LAPI) → BOUNCERVERIFY → DEPS → SMARTCHK → ENROLL
 #   （config.yaml / acquis / resolv.conf / 网络文件都是 crowdsec 与 systemd 启动时读一次，
 #     所以「改静态配置」必须排在开机之前；LOGCONF 与 LAPI 之间没有依赖）。
 # 【网络侧：验证 + 修改】v.95 起，网络/防火墙节点不再"只验不写"：verify 不符就 build 改回来，
@@ -44,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-27.180.112"
+SCRIPT_VER="2026-10-27.180.113"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -818,8 +820,8 @@ _smartdns_installed() {
 # smartdns 的检查在 _smartdns_installed，由 _pkg_missing_all 单独调用。
 _lxc_missing_deps() {
     _LXC_MISSING=""
-    for _md_c in lxc-start lxc-stop lxc-ls lxc-info lxc-attach; do
-        command -v "$_md_c" >/dev/null 2>&1 || _LXC_MISSING="$_LXC_MISSING $_md_c"
+    for _lx_c in lxc-start lxc-stop lxc-ls lxc-info lxc-attach; do
+        command -v "$_lx_c" >/dev/null 2>&1 || _LXC_MISSING="$_LXC_MISSING $_lx_c"
     done
     # 文件齐了才冒烟：缺文件时上面已经判过，不必再花一次进程
     if [ -z "$_LXC_MISSING" ]; then
@@ -1329,43 +1331,43 @@ build_smartdns_main() {
 # 表与 verify_smartdns_upstream 里那份必须逐行一致（静态检查 S40 卡这条）。
 build_smartdns_upstream() {
     # 先建「ip=段名」索引，避免每条都重新扫一遍 uci show（13 条 × 13 段 = 169 次 fork）
-    _bsu_map=" "
-    for _bsu_s in $(run uci -q show smartdns 2>/dev/null | grep -E '=server$' | cut -d. -f2 | cut -d= -f1); do
-        _bsu_map="$_bsu_map$(run uci -q get "smartdns.$_bsu_s.ip" 2>/dev/null)=$_bsu_s "
+    _sdu_map=" "
+    for _sdu_s in $(run uci -q show smartdns 2>/dev/null | grep -E '=server$' | cut -d. -f2 | cut -d= -f1); do
+        _sdu_map="$_sdu_map$(run uci -q get "smartdns.$_sdu_s.ip" 2>/dev/null)=$_sdu_s "
     done
-    _bsu_n=0
-    while read -r _bsu_name _bsu_ip _bsu_tp _bsu_grp _bsu_host; do
-        [ -n "$_bsu_ip" ] || continue
-        _bsu_hit=""
-        _bsu_dup=""
-        for _bsu_p in $_bsu_map; do
-            [ "${_bsu_p%%=*}" = "$_bsu_ip" ] || continue
-            if [ -z "$_bsu_hit" ]; then
-                _bsu_hit=${_bsu_p#*=}
+    _sdu_n=0
+    while read -r _sdu_name _sdu_ip _sdu_tp _sdu_grp _sdu_host; do
+        [ -n "$_sdu_ip" ] || continue
+        _sdu_hit=""
+        _sdu_dup=""
+        for _sdu_p in $_sdu_map; do
+            [ "${_sdu_p%%=*}" = "$_sdu_ip" ] || continue
+            if [ -z "$_sdu_hit" ]; then
+                _sdu_hit=${_sdu_p#*=}
             else
-                _bsu_dup="$_bsu_dup ${_bsu_p#*=}"
+                _sdu_dup="$_sdu_dup ${_sdu_p#*=}"
             fi
         done
-        for _bsu_d in $_bsu_dup; do
-            run uci -q delete "smartdns.$_bsu_d" 2>/dev/null
+        for _sdu_d in $_sdu_dup; do
+            run uci -q delete "smartdns.$_sdu_d" 2>/dev/null
         done
-        if [ -z "$_bsu_hit" ]; then
+        if [ -z "$_sdu_hit" ]; then
             run uci -q add smartdns server >/dev/null 2>&1
-            _bsu_hit="@server[-1]"
+            _sdu_hit="@server[-1]"
         fi
-        run uci -q set "smartdns.$_bsu_hit.enabled=1"
-        run uci -q set "smartdns.$_bsu_hit.name=$_bsu_name"
-        run uci -q set "smartdns.$_bsu_hit.ip=$_bsu_ip"
-        run uci -q set "smartdns.$_bsu_hit.type=$_bsu_tp"
-        run uci -q set "smartdns.$_bsu_hit.server_group=$_bsu_grp"
+        run uci -q set "smartdns.$_sdu_hit.enabled=1"
+        run uci -q set "smartdns.$_sdu_hit.name=$_sdu_name"
+        run uci -q set "smartdns.$_sdu_hit.ip=$_sdu_ip"
+        run uci -q set "smartdns.$_sdu_hit.type=$_sdu_tp"
+        run uci -q set "smartdns.$_sdu_hit.server_group=$_sdu_grp"
         # DoT 必须带 SNI，否则证书主机名校验必然失败（8.8.8.8 的证书是 dns.google）
-        if [ "$_bsu_tp" = "tls" ] && [ "$_bsu_host" != "-" ]; then
-            run uci -q set "smartdns.$_bsu_hit.host_name=$_bsu_host"
+        if [ "$_sdu_tp" = "tls" ] && [ "$_sdu_host" != "-" ]; then
+            run uci -q set "smartdns.$_sdu_hit.host_name=$_sdu_host"
         else
             # UDP 段不该带 SNI：历史残留的 host_name 清掉，否则 verify 会一直判不符
-            run uci -q delete "smartdns.$_bsu_hit.host_name" 2>/dev/null
+            run uci -q delete "smartdns.$_sdu_hit.host_name" 2>/dev/null
         fi
-        _bsu_n=$((_bsu_n+1))
+        _sdu_n=$((_sdu_n+1))
     done <<'SD_UPSTREAM_EOF'
 alidns 223.5.5.5 udp Cn -
 alidns 223.6.6.6 udp Cn -
@@ -1381,7 +1383,7 @@ google 8.8.4.4 tls Out dns.google
 cloudflare 1.1.1.1 tls Out cloudflare-dns.com
 cloudflare 1.0.0.1 tls Out cloudflare-dns.com
 SD_UPSTREAM_EOF
-    [ "$_bsu_n" -eq 13 ] || { log "[SMARTDNS] 上游按表处理条数异常（$_bsu_n ≠ 13），不接管 DNS"; return 1; }
+    [ "$_sdu_n" -eq 13 ] || { log "[SMARTDNS] 上游按表处理条数异常（$_sdu_n ≠ 13），不接管 DNS"; return 1; }
     return 0
 }
 
@@ -2985,10 +2987,10 @@ _bouncer_missing_deps() {
     fi
     # 配置文件：init 脚本靠它生成 /var/etc 下的 yaml，缺了 bouncer 重启即起不来。
     # 【v.180.109】v.180.108 只查了三个可执行文件，漏了这一项 —— 结果配置被删时
-    # 判「依赖齐全」，整个恢复块被跳过，_rom_restore_bouncer 里那段特判永远跑不到。
+    # 判「依赖齐全」，整个恢复块被跳过，_bouncer_heal 里那段特判永远跑不到。
     # 真机实测：rm /etc/config/crowdsec 后 _bouncer_rule_sane 静默无输出、文件不回来。
     # 它必须单独判，不能指望 _rom_restore_pkg：那个函数对 /etc/config/* 与 conffiles
-    # 一律跳过（不覆盖用户改动），配置恢复只由 _rom_restore_bouncer 的特判负责。
+    # 一律跳过（不覆盖用户改动），配置恢复只由 _bouncer_heal 的特判负责。
     # 【v.180.111】判据升级：从「文件存在」改为「字段正确」。
     # 真机实测出厂版是 enabled='0' / api_key='' / api_url=localhost / interface=eth1，
     # 文件在、bouncer 却不会启动 —— 只查存在性会把这种情况当健康态放过去。
@@ -2996,6 +2998,9 @@ _bouncer_missing_deps() {
     [ -z "$_BOUNCER_MISSING" ]
 }
 
+# 【v.180.113】原名 _rom_restore_bouncer 已不符实：v.180.111 之后它除了从 /rom 补回
+# 二进制，还会重建配置（_bouncer_uci_apply）、给空 api_key 重签（_bouncer_register_once）。
+# 名字改成 _bouncer_heal —— 它做的是"把这层修到能用"，而不是"拷贝文件"。
 # 从只读基座恢复 bouncer 依赖。与 _rom_restore_pkg 的唯一差别是配置那一项：
 # .list 里含 /etc/config/crowdsec，而通用逻辑对 /etc/config/* 与 conffiles 一律跳过 ——
 # 那对「用户改过配置」是对的，但对「整个文件都没了」等于不修。
@@ -3013,7 +3018,7 @@ _bouncer_cfg_ok() {
     [ -n "$(run uci -q get "$_bco_sec.api_key" 2>/dev/null)" ] || return 1
     return 0
 }
-_rom_restore_bouncer() {
+_bouncer_heal() {
     _rom_restore_tree crowdsec-firewall-bouncer
     # nft 走递归：libnftables.so* 与 libnftnl11 在 Depends 里，一并补
     _rom_restore_tree nftables-json
@@ -3058,7 +3063,7 @@ _bouncer_rule_sane() {
     # 先保依赖：nft / bouncer / 配置缺任何一项，下面的结论都不可信
     if ! _bouncer_missing_deps; then
         log "[bouncer] ** 探针依赖不全：$_BOUNCER_MISSING —— 先试只读基座 $ROMDIR"
-        _rom_restore_bouncer
+        _bouncer_heal
         hash -r 2>/dev/null || true
         if ! _bouncer_missing_deps; then
             log "[bouncer] ** 自愈后仍缺：$_BOUNCER_MISSING（固件未内置，查 shell/custom-packages.sh）"
@@ -3070,23 +3075,23 @@ _bouncer_rule_sane() {
     # ① 结构探针：表不存在说明 bouncer 压根没建起来，那是 bouncer_exists 的职责，
     #    这里不重复报，直接跳过，避免同一件事刷两条日志。
     if nft list table ip crowdsec >/dev/null 2>&1; then
-        _bs_drop="$(nft list chain ip crowdsec crowdsec-chain-input 2>/dev/null | grep -c 'drop')"
-        case "$_bs_drop" in
-            ''|*[!0-9]*) _bs_drop=0 ;;
+        _brs_drop="$(nft list chain ip crowdsec crowdsec-chain-input 2>/dev/null | grep -c 'drop')"
+        case "$_brs_drop" in
+            ''|*[!0-9]*) _brs_drop=0 ;;
         esac
-        if [ "$_bs_drop" -eq 0 ]; then
+        if [ "$_brs_drop" -eq 0 ]; then
             log "[bouncer] ** 结构探针：crowdsec-chain-input 里没有任何 drop 规则（决策未下发到防火墙）"
             log "[bouncer] ** 排查：nft list chain ip crowdsec crowdsec-chain-input ；日志见 $_BC_LOG"
         fi
     fi
     # ② 错误探针：只读最后 200 行（约覆盖 2 天的 15 分钟心跳），轮转后读不到就放过
     if [ -f "$_BC_LOG" ] && [ -r "$_BC_LOG" ]; then
-        _bs_err="$(tail -n 200 "$_BC_LOG" 2>/dev/null | grep -c 'netlink receive: no such file or directory')"
-        case "$_bs_err" in
-            ''|*[!0-9]*) _bs_err=0 ;;
+        _brs_err="$(tail -n 200 "$_BC_LOG" 2>/dev/null | grep -c 'netlink receive: no such file or directory')"
+        case "$_brs_err" in
+            ''|*[!0-9]*) _brs_err=0 ;;
         esac
-        if [ "$_bs_err" -gt 0 ]; then
-            log "[bouncer] ** 错误探针：$_BC_LOG 近 200 行出现 $_bs_err 次 netlink ENOENT（进程实例已坏）"
+        if [ "$_brs_err" -gt 0 ]; then
+            log "[bouncer] ** 错误探针：$_BC_LOG 近 200 行出现 $_brs_err 次 netlink ENOENT（进程实例已坏）"
             log "[bouncer] ** 修复：/etc/init.d/crowdsec-firewall-bouncer restart（重启即恢复，配置无需改动）"
         fi
     fi

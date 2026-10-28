@@ -624,6 +624,17 @@ _dir_sig() {
 #                24.10.6 真机实证 copy_file: .../Packages.gz: No such file or directory）
 #   apk (25.12)：/etc/apk/repositories 里一行 "file://..."                  + packages.adb
 _pkgcache_feed_audit() {
+    # 【v.180.133】优先交给 pkg-cache-fix.sh（它按 源->索引 的顺序修，可单独跑）。
+    # 只在 ROOT 为空或 / 时调用：那个脚本写的是绝对路径，若 ROOT 指向某个
+    # 待改的 rootfs（离线修镜像），交给它就等于去改宿主机，静默改错地方。
+    case "${ROOT:-}" in
+    "" | "/")
+        if [ -x /usr/sbin/pkg-cache-fix.sh ] \
+            && /usr/sbin/pkg-cache-fix.sh >/dev/null 2>&1; then
+            return 0
+        fi
+        ;;
+    esac
     if command -v apk >/dev/null 2>&1; then
         _pfa_conf="$ROOT/etc/apk/repositories"
         _pfa_pat='^file://.*/(apk|pkg)-cache/?$'

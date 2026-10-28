@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-28.180.131"
+SCRIPT_VER="2026-10-29.180.157"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -261,6 +261,28 @@ _dns_selfheal() {
     return 1
 }
 
+# ---- 交给 smartdns 自己的脚本（v.180.157）----
+# bootstrap 已不再处理 smartdns：配置、服务、上游表全部移到 pkg-restore-smartdns.sh。
+# 所以「进程不在，且规则文件也补齐了仍起不来」这类故障，重跑引导已经修不动 ——
+# 引导只会重走网络与容器，一个字节都不会碰 /etc/config/smartdns。
+# 分工：
+#   · _dns_selfheal   只补 /etc/smartdns 下那 5 个规则文件，便宜、零副作用，先试；
+#   · _sd_script_repair（本函数）按 uci 重写主段 + 13 条上游再重启，有副作用，
+#     所以只在「连续 N 轮不可用 + 冷却闸门通过」之后才调，不会每分钟来一次。
+# --repair 与 --config 在脚本里等价，用 --repair 是为了调用点语义清楚。
+_SD_RESTORE="${CS_PROBE_SD_RESTORE:-/usr/sbin/pkg-restore-smartdns.sh}"
+
+_sd_script_repair() {
+    [ -x "$_SD_RESTORE" ] || return 1
+    _sr_out="$("$_SD_RESTORE" --repair 2>&1)"
+    _sr_rc=$?
+    # 脚本输出转进 syslog，与探针自己的日志分开打标签，排障时一眼能分清是谁说的
+    [ -n "$_sr_out" ] && printf '%s\n' "$_sr_out" | logger -t crowdsec-probe-sd 2>/dev/null
+    [ "$_sr_rc" = "0" ] || return 1
+    sleep "${CS_PROBE_SD_WAIT:-2}"
+    _dns_ok
+}
+
 # 持锁跑一轮 bootstrap，等它结束，回收锁。返回它的退出码；77 = 抢锁失败。
 # 抽出来是因为现在有两条通道要跑同一件事（last_pull 停滞 / DNS 不可用），
 # 各写一遍的话，「pid 写进锁」这类容易写错的细节迟早会分叉 ——
@@ -330,8 +352,19 @@ _dns_watch() {
     fi
     P_DNS_TRIG="$_dw_now"
     P_DNS_BAD=0
+    # 【v.180.157】先交 smartdns 自己的脚本修：bootstrap 已不再处理 smartdns，
+    # 重跑引导对「配置被写坏」这类故障已经无能为力（它只重走网络与容器）。
+    # 放在冷却闸门之后调，是因为 --repair 会重写 uci 并重启服务，不能每轮都来一次。
+    P_ACTION="dns-script-repair"
+    plog "【DNS】smartdns 连续 ${PROBE_STALL_ROUNDS} 轮不可用（$DNS_WHY），先交 pkg-restore-smartdns.sh --repair"
+    if _sd_script_repair; then
+        P_DNS_FIX=0
+        P_ACTION="dns-script-fixed"
+        plog "【DNS】脚本修复成功：smartdns 已恢复（bootstrap 未参与）"
+        return 0
+    fi
     P_ACTION="dns-trigger"
-    plog "【DNS】smartdns 连续 ${PROBE_STALL_ROUNDS} 轮不可用（$DNS_WHY），持锁重跑 $BOOT 复验/修复"
+    plog "【DNS】脚本未能修好（$DNS_WHY），持锁重跑 $BOOT 复验/修复"
     _run_fix
     _dw_rc=$?
     if [ "$_dw_rc" = 78 ]; then

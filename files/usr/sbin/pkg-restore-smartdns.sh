@@ -338,7 +338,8 @@ case "${1:-}" in
     exit $_rc
     ;;
 # --config 与 --repair 现在等价：_sd_config 内部已经按「缺包先装包」的顺序走完，
-# 保留两个名字是为了调用点语义清楚（bootstrap 用 --config，probe 用 --repair）。
+# 保留两个名字是为了调用点语义清楚（rc.local 开机配一次用 --config，
+# probe 在 53 连续不可用时兜底用 --repair。bootstrap 自 v.180.157 起不再调用本脚本）。
 --config|--repair)
     _sd_config && exit 0 || exit 1
     ;;

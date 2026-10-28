@@ -394,7 +394,19 @@ _ak_dl() {
 _ak_b=0
 _ak_miss=""
 if [ -n "$_AK_DL" ]; then
-    _ak_pat=$(printf '%s' "$_AK_WANT" | tr ' ' '|')
+    # 【v.180.133】_AK_WANT 是多行字符串，原来只 tr ' ' '|' 换空格，换行还在。
+    # 而 pattern 外面套的是 "(...)"：换行会把整个正则拆成 12 条残缺片段 ——
+    # 第一段只有左括号、最后一段只有右括号，grep 直接报 Unmatched 退出，
+    # stdout 空，退出码又被 2>/dev/null 吞掉。run #77 的真机表现就是
+    # 「1.4 秒、来源 B 0 个 apk、连一条 missing 都没有」。
+    # 先把所有空白压成单空格，再转 |，最后校验 pattern 里不能再有空白。
+    _ak_pat=$(printf '%s' "$_AK_WANT" | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//; s/ *$//' | tr ' ' '|')
+    case "$_ak_pat" in
+    "" | *[[:space:]]*)
+        echo "::error::白名单正则里还有空白（或为空），index.json 匹配必然失败"
+        exit 1
+        ;;
+    esac
     for _ak_fd in $_AK_FEEDS; do
         _ak_u="$_AK_BASE/$_ak_fd"
         _ak_jf="/tmp/akidx.json"

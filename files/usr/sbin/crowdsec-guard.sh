@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-28.180.127"
+SCRIPT_VER="2026-10-28.180.128"
 GUARD_FILES="${CS_GUARD_FILES:-
 /usr/sbin/crowdsec-lxc-bootstrap.sh
 /usr/sbin/crowdsec-lxc-probe.sh
@@ -613,6 +613,45 @@ _dir_sig() {
       done ) 2>/dev/null
 }
 
+# ---- 【v.180.128】本地包源守护：只清死源，不覆盖文件 ----
+# customfeeds.conf 刻意不进 GUARD_FILES：那是用户可能合法改动的文件（自己加第三方源），
+# 拿 /rom 基准盖回去等于删他的源。这里只做一件不越界的事 —— 把指向已不存在目录的
+# pkgcache 行摘掉。死源会让 `opkg update` 整体报错退出，用户装任何包都先撞这个错，
+# 而错误信息只说「某个源取不到」，看不出是本机缓存目录没了。
+_pkgcache_feed_audit() {
+    _pfa_conf="$ROOT/etc/opkg/customfeeds.conf"
+    [ -f "$_pfa_conf" ] || return 0
+    grep -q '^src/gz[[:space:]]*pkgcache[[:space:]]' "$_pfa_conf" 2>/dev/null || return 0
+    _pfa_live=""
+    for _pfa_d in "${PKG_CACHE_RO:-$ROM_DIR/root/pkg-cache}" "${PKG_CACHE:-$ROOT/root/pkg-cache}"; do
+        [ -n "$_pfa_d" ] || continue
+        [ -f "$_pfa_d/Packages" ] && { _pfa_live="$_pfa_d"; break; }
+    done
+    # 可用目录在、且已经挂着它：零动作（刷机后的常态，一分钟一轮也不写 flash）
+    if [ -n "$_pfa_live" ] && grep -qF "file://$_pfa_live" "$_pfa_conf" 2>/dev/null; then
+        return 0
+    fi
+    _pfa_tmp="$_pfa_conf.tmp.$$"
+    grep -v '^src/gz[[:space:]]*pkgcache[[:space:]]' "$_pfa_conf" > "$_pfa_tmp" 2>/dev/null
+    if [ ! -f "$_pfa_tmp" ]; then
+        return 0
+    fi
+    if [ -n "$_pfa_live" ]; then
+        printf 'src/gz pkgcache file://%s\n' "$_pfa_live" >> "$_pfa_tmp" 2>/dev/null
+    fi
+    if cat "$_pfa_tmp" > "$_pfa_conf" 2>/dev/null; then
+        if [ -n "$_pfa_live" ]; then
+            _glog "【包源】customfeeds.conf 的 pkgcache 源已校正为 $_pfa_live"
+        else
+            _glog "【包源】本地包库已不可用（$ROM_DIR/root/pkg-cache 与 overlay 都没有 Packages），已摘除死源 —— 被卸的包只能用 /rom 拷文件兜底"
+        fi
+    else
+        _glog "【包源】customfeeds.conf 校正失败（不可写）"
+    fi
+    rm -f "$_pfa_tmp"
+    return 0
+}
+
 _CT_LIST=""
 if [ "$_CT_OK" = "1" ]; then
     for _rel in $GUARD_CT_FILES; do
@@ -756,6 +795,9 @@ done
 
 [ "$_CT_OK" = "1" ] && _cs_cfg_audit
 [ "$_CT_OK" = "1" ] && _ovl_audit
+
+# 包源与容器无关：容器没起来时反而更需要它（靠它把包装回来）
+_pkgcache_feed_audit
 
 # LAPI 段自带降频（默认 300s），所以这里无条件调用；容器未就位时函数内部直接返回。
 _lapi_audit

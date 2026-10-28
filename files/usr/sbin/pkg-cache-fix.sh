@@ -47,7 +47,10 @@ _pcf_feed_ensure() {
         : > "$_pcf_tmp" || return 1
     fi
     if [ "$PKG_MGR" = "apk" ]; then
-        printf 'file://%s\n' "$PKG_CACHE_ACT" >> "$_pcf_tmp" || return 1
+        # 必须写成 ndx <索引文件>：只写目录的话 apk 会去 <目录>/<arch>/Packages.adb
+        # 找索引（apk-repositories(5) 的 repository 类型规则），而我们的索引
+        # 就在包目录里、没有 arch 子目录，结果就是「源挂着、索引读不到」。
+        printf 'ndx file://%s/packages.adb\n' "$PKG_CACHE_ACT" >> "$_pcf_tmp" || return 1
     else
         printf 'src/gz pkgcache file://%s\n' "$PKG_CACHE_ACT" >> "$_pcf_tmp" || return 1
     fi
@@ -73,12 +76,21 @@ _pcf_lists_ensure() {
         fi
         _pcf_n=$(ls "$PKG_CACHE_ACT"/*.apk 2>/dev/null | wc -l)
         [ "$_pcf_n" -gt 0 ] || return 1
-        # --allow-untrusted 是全局选项，必须放在 applet 前面
-        if ( cd "$PKG_CACHE_ACT" && "$APK_BIN" --allow-untrusted index -o packages.adb ./*.apk ) \
-                >/dev/null 2>&1 && [ -s "$_pcf_adb" ]; then
-            pcl_log "已重建依赖查询表：$_pcf_adb（$_pcf_n 个包）"
-            return 0
-        fi
+        # 【v.180.141】必须用 mkndx，不能用 index。
+        # apk 有两个建索引的 applet，作用完全不同（apk-mkndx(8) / apk-index(8)）：
+        #   index -> v2 的 APKINDEX.tar.gz，只吃 tar.gz 包
+        #   mkndx -> apkv3 的 packages.adb，25.12 要的就是这个
+        # 用 index 读 ADB 包，每个包都会报 "file format not supported
+        # (in this applet)" —— 构建脚本栽在这上面，删过 114 个包。
+        # 仍然两个都试：万一某个版本的 apk 只有 index，也别直接放弃。
+        # --allow-untrusted 是全局选项，必须放在 applet 前面。
+        for _pcf_ap in mkndx index; do
+            if ( cd "$PKG_CACHE_ACT" && "$APK_BIN" --allow-untrusted "$_pcf_ap" -o packages.adb ./*.apk ) \
+                    >/dev/null 2>&1 && [ -s "$_pcf_adb" ]; then
+                pcl_log "已重建依赖查询表：$_pcf_adb（$_pcf_n 个包，apk $_pcf_ap）"
+                return 0
+            fi
+        done
         pcl_log "依赖查询表重建失败（apk index 退出非 0）"
         return 1
     fi

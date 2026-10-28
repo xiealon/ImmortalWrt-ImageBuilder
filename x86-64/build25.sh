@@ -269,56 +269,11 @@ else
     echo "::warning::自检脚本一个都没铺进去，本镜像不含 crowdsec-tests（不阻断出镜像）"
 fi
 
-# ---- v.180.125：两遍 make image，把本次构建产出的全部 apk 收进固件 ----
-# 目的：固件自带完整本地包源。smartdns 这类包被 opkg 卸掉后，可以直接
-#   apk add --allow-untrusted --force-overwrite /root/pkg-cache/packages/smartdns-*.apk
-# 离线装回来 —— opkg 记账正确、LuCI 软件包页面也看得见，不必依赖 bootstrap 拷文件。
-# 为什么必须两遍：apk 只有第一遍 make image 跑完才落到 bin/packages 里，
-# 而 files/ 是在 rootfs 组装阶段合并的，同一个 make 进程里插不进这一步。
-# 分区大小由 ROOTFS_MB 决定（.config 里也同步成同值，传参优先）：
-# 300 MB 装不下上百兆的包缓存，这里给 2 GB。
-ROOTFS_MB="${ROOTFS_MB:-2048}"
-
-make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$ROOTFS_MB
+make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE
 
 if [ $? -ne 0 ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Error: Build failed!"
     exit 1
 fi
 
-# ---- 第一遍之后：把 bin/ 里的全部 apk 收进 files/root/pkg-cache/ ----
-_PKG_CACHE="files/root/pkg-cache"
-rm -rf "$_PKG_CACHE"
-mkdir -p "$_PKG_CACHE"
-_pc_n=0
-for _pc_d in base luci packages routing telephony; do
-    [ -d "bin/packages/x86_64/$_pc_d" ] || continue
-    mkdir -p "$_PKG_CACHE/$_pc_d"
-    cp -a "bin/packages/x86_64/$_pc_d"/*.apk "$_PKG_CACHE/$_pc_d/" 2>/dev/null || true
-    _pc_c=$(ls "$_PKG_CACHE/$_pc_d"/*.apk 2>/dev/null | wc -l)
-    _pc_n=$((_pc_n + _pc_c))
-    echo "==> 收包 $_pc_d: $_pc_c 个"
-done
-mkdir -p "$_PKG_CACHE/target"
-cp -a bin/targets/x86/64/packages/*.apk "$_PKG_CACHE/target/" 2>/dev/null || true
-_pc_c=$(ls "$_PKG_CACHE/target"/*.apk 2>/dev/null | wc -l)
-_pc_n=$((_pc_n + _pc_c))
-echo "==> 收包 target: $_pc_c 个"
-if [ "$_pc_n" -gt 0 ]; then
-    echo "==> 离线包缓存就位：$_pc_n 个 apk，合计 $(du -sh "$_PKG_CACHE" | cut -f1)"
-else
-    echo "::warning::离线包缓存为空，本次镜像不含本地源（卸载后无法离线装回，不阻断出镜像）"
-fi
-
-# ---- 第二遍：把缓存打进 rootfs ----
-make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$ROOTFS_MB
-
-if [ $? -ne 0 ]; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Error: Build failed (2nd pass: pkg-cache)!"
-    exit 1
-fi
-
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Build completed successfully."
-
-echo "==> 离线恢复示例（固件刷好后，包被卸载时）："
-echo "    apk add --allow-untrusted --force-overwrite /root/pkg-cache/packages/smartdns-*.apk"

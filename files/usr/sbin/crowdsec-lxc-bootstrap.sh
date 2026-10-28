@@ -1036,6 +1036,54 @@ _sd_restore() {
     /usr/sbin/pkg-restore-smartdns.sh "$@"
 }
 
+# 【v.180.153】引导开头的前置检查：应用在不在 → 容器文件正不正常。
+# 为什么不放探针：探针每 60 秒一轮，做应用/文件检查太重；它已有 last_pull 这根权威判据 ——
+# 容器拉不动自然会在这里暴露。本函数由每次引导开头付一次，判据全是 O(1)
+# （command -v / 文件可执行 / grep），只有真缺了才走包级装回。
+# 容器文件只判不建：建归 rootfs / ct_config 两个节点，这里抢着建会把 _recovering 提前置位，
+# 让后面的恢复记账错位 —— 那也是 v.180.149 起「不拷文件、只装包」这套口径的边界。
+_preflight() {
+    _pf_bad=""
+    _lxc_missing_deps || _pf_bad="$_pf_bad$_LXC_MISSING"
+    [ -x /usr/bin/cs-firewall-bouncer ] || _pf_bad="$_pf_bad cs-firewall-bouncer"
+    [ -x /etc/init.d/crowdsec-firewall-bouncer ] || _pf_bad="$_pf_bad init.d/crowdsec-firewall-bouncer"
+    [ -x /usr/sbin/nft ] || _pf_bad="$_pf_bad nft"
+    if [ -z "$_pf_bad" ]; then
+        log "[PRE] 应用在位：lxc 五件套 + crowdsec-firewall-bouncer + nft"
+    else
+        log "[PRE] 应用缺失：$_pf_bad —— 先从只读基座按包装回"
+        case "$_pf_bad" in
+        *lxc*) _rom_restore_lxc || log "[PRE] lxc 装回失败（固件未内置或包库不可用）" ;;
+        esac
+        case "$_pf_bad" in
+        *cs-firewall-bouncer* | *init.d/*) _rom_restore_pkg crowdsec-firewall-bouncer \
+            || log "[PRE] bouncer 装回失败" ;;
+        esac
+        case "$_pf_bad" in
+        *nft*) _rom_restore_pkg nftables-json || log "[PRE] nftables-json 装回失败" ;;
+        esac
+        hash -r 2>/dev/null || true
+        # 装完复判，别把「试过了」当「好了」
+        _pf_bad=""
+        _lxc_missing_deps || _pf_bad="$_pf_bad$_LXC_MISSING"
+        [ -x /usr/bin/cs-firewall-bouncer ] || _pf_bad="$_pf_bad cs-firewall-bouncer"
+        [ -x /etc/init.d/crowdsec-firewall-bouncer ] || _pf_bad="$_pf_bad init.d/crowdsec-firewall-bouncer"
+        [ -x /usr/sbin/nft ] || _pf_bad="$_pf_bad nft"
+        [ -z "$_pf_bad" ] || log "[PRE] 装回后仍缺：$_pf_bad"
+    fi
+    if verify_ct_config; then
+        log "[PRE] 容器 config 正常"
+    else
+        log "[PRE] 容器 config 不符 —— 交给 ct_config 节点重建"
+    fi
+    if verify_rootfs; then
+        log "[PRE] 容器 rootfs 正常"
+    else
+        log "[PRE] 容器 rootfs 不符 —— 交给 rootfs 节点重建"
+    fi
+    return 0
+}
+
 # luci-app-smartdns 界面是否可用（v.180.116）。
 # 与 _smartdns_installed 的区别在于「缺了之后谁承压」：
 #   · smartdns 本体是功能闸门 —— 缺了整轮引导就该停，走 _pkg_missing_all；
@@ -6162,6 +6210,11 @@ main() {
     # 已就位时零写入、零扫描。
     # 裁剪方式与 --net-only 同源：只改 GROUP_SEQ 不够，dag_order 会遍历整个 DAG_NODES
     # 并校验归属组是否在 GROUP_SEQ 里，所以 DAG_NODES 必须同步收窄。
+    # 【v.180.153】前置检查放在降级判定之前：先试从 /rom 包级装回，
+    # 装得回来就不用走下面「裁 DAG 只跑网络」的降级路径 —— 那本来就是兜底，不该是首选。
+    if [ "$NET_ONLY" != "1" ]; then
+        _preflight
+    fi
     _LXC_READY=1
     _FULL_DAG=""
     _FULL_SEQ=""

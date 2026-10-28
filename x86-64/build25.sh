@@ -555,13 +555,31 @@ if [ -n "$_AK_BIN" ]; then
         ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o packages.adb ./*.apk ) \
             >/tmp/apk-index.log 2>&1 || _ak_rc2=1
     done
+    # 【v.180.137】索引（packages.adb）就是这个包库的依赖查询表：
+    # 没有它，apk 不知道谁依赖谁，`apk add xxx` 只能退化成「按绝对路径单文件装」，
+    # LuCI 的软件包页也会显示空白。所以生成出来必须再验一遍，不能只看退出码。
+    _ak_idx_ok=0
     if [ "$_ak_rc2" = "0" ] && [ -s "$_AK_DIR/packages.adb" ]; then
-        echo "==> [apk-cache] 索引已生成：$(wc -c < "$_AK_DIR/packages.adb") 字节"
-        if [ "$_ak_round" -gt 0 ]; then
-            echo "==> [apk-cache] 重建 $_ak_round 轮后成功（被剔除的不是合法 apk，真机也装不上）"
+        _ak_sz=$(wc -c < "$_AK_DIR/packages.adb")
+        _ak_magic=$(od -An -tx1 -N3 "$_AK_DIR/packages.adb" | tr -d ' \n')
+        case "$_ak_magic" in
+        414442 | 1f8b*) _ak_idx_ok=1 ;;
+        *) echo "::error::packages.adb 头部异常（$_ak_magic），这份索引 apk 读不了" ;;
+        esac
+        if [ "$_ak_idx_ok" = "1" ]; then
+            echo "==> [apk-cache] 索引已生成：$_ak_sz 字节，头部=$_ak_magic"
+            if [ "$_ak_round" -gt 0 ]; then
+                echo "==> [apk-cache] 重建 $_ak_round 轮后成功（被剔除的不是合法 apk，真机也装不上）"
+            fi
         fi
-    else
-        echo "::warning::apk index 失败，本包库只能按绝对路径单文件装（依赖齐时可用）"
+    fi
+    if [ "$_ak_idx_ok" != "1" ]; then
+        # 用 error 而不是 warning：这份镜像刷上去以后，包库是「有包、查不了依赖」的
+        # 半残状态，用户装 ssr-plus/daed 这类带一串依赖的包会直接失败。
+        # 仍然不中断构建 —— 一次 40 分钟的构建不该因为几个 run 包里的畸形文件全废，
+        # 但必须让日志红到没人能忽略。
+        echo "::error::apk index 失败：本镜像没有可用的依赖查询表（packages.adb），包库只能按绝对路径单文件装"
+        echo "==> [apk-cache] 诊断：$(ls "$_AK_DIR"/*.apk 2>/dev/null | wc -l) 个 apk 未被索引"
         tail -6 /tmp/apk-index.log 2>/dev/null
     fi
 fi

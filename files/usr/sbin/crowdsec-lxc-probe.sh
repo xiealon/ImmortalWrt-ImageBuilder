@@ -220,7 +220,12 @@ _dns_ok() {
 # pkg-restore-<app>.sh，探针只探测 + 调它，不内联各自的修复动作。
 #
 # 探测项与覆盖关系（用户 2026-10-29 定）：
-#   · last_pull       → lxc（容器真在跑）+ bouncer（bouncer 真在拉 LAPI），见 _pull_watch
+#   · last_pull 一项覆盖三个项目：lxc 运行时、crowdsec-firewall-bouncer、
+#     容器里的 crowdsec。三者必须都正常且配置正确才会产生 LAPI 连接、
+#     刷新 last_pull —— 缺任何一个，这项立刻失效。
+#     所以它是三项的联合健康信号，不必再分别探三者的进程 / 端口；
+#     失效时直接拉 bootstrap，由它去验、去恢复这三项
+#     （lxc、bouncer、容器 正好是 bootstrap 六件事里的三件）。
 #   · smartdns 进程在不在（pidof）
 #   · 53/UDP 有没有人在听（netstat -lnu）
 #   其余应用（daed / ssrp / mosdns / clashoo）不搞进程/端口这一套，

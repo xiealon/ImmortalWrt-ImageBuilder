@@ -789,6 +789,32 @@ _rom_restore_smartdns() {
     return 0
 }
 
+# 【v.180.124】/etc/smartdns/ 下的规则文件缺失时，从只读基座补回。
+# 起因（2026-10-28 真机）：日志报
+#   smartdns: open config file '/etc/smartdns/address.conf' failed, No such file or directory
+#   smartdns: process config failed at '/var/etc/smartdns/smartdns.conf:32'
+# 然后 procd 记 crash loop 6 crashes，smartdns 一次都没起来，53 端口全空，
+# probe 判「进程不在」→ 重跑 bootstrap → 重启 smartdns → 再挂，死循环。
+# 实测 /rom/etc/smartdns/ 里 address.conf(824B)、blacklist-ip.conf(231B)、
+# custom.conf(97B)、domain-block.list(96B)、domain-forwarding.list(106B) 全在，
+# /etc/smartdns/ 里却一个都没有。
+# 根因：_rom_restore_pkg 对 conffiles 一律 continue。那条保护本意是「不覆盖用户配置」，
+# 但文件根本不存在时，它就退化成「永远不修」—— 刷多少次机都不会自己好。
+# 所以单独开一个口子，只补 /etc/smartdns/ 下这批规则文件，判据是「不存在才补」：
+# 存在就一律不动（哪怕被用户清成 0 字节，那也是他的选择），绝不碰 /etc/config/smartdns。
+_rom_restore_smartdns_conf() {
+    _rsc_n=0
+    for _rsc_f in address.conf blacklist-ip.conf custom.conf domain-block.list domain-forwarding.list; do
+        [ -e "$PKGROOT/etc/smartdns/$_rsc_f" ] && continue
+        [ -e "$ROMDIR/etc/smartdns/$_rsc_f" ] || continue
+        mkdir -p "$PKGROOT/etc/smartdns" 2>/dev/null
+        cp -a "$ROMDIR/etc/smartdns/$_rsc_f" "$PKGROOT/etc/smartdns/$_rsc_f" 2>/dev/null \
+            && _rsc_n=$((_rsc_n + 1))
+    done
+    [ "$_rsc_n" -gt 0 ] && log "[PKG] 从只读基座恢复 smartdns 规则文件：$_rsc_n 个（/etc/smartdns/）"
+    return 0
+}
+
 # luci-app-smartdns 界面是否可用（v.180.116）。
 # 与 _smartdns_installed 的区别在于「缺了之后谁承压」：
 #   · smartdns 本体是功能闸门 —— 缺了整轮引导就该停，走 _pkg_missing_all；
@@ -1439,6 +1465,10 @@ build_smartdns() {
         fi
         log "[SMARTDNS] 已从只读基座恢复，继续写配置"
     fi
+    # 【v.180.124】二进制在位不等于配置在位。/etc/smartdns/ 的规则文件被遮掉时，
+    # 生成的 conf 里 conf-file 指向不存在的文件，smartdns 解析失败直接退出、
+    # 进 crash loop，表现和「没装 smartdns」一模一样。所以写配置之前先补。
+    _rom_restore_smartdns_conf
     build_smartdns_main || return 1
     # 上游没铺满就不接管 DNS：此时 dnsmasq 仍留着 53，不会出现「53 让出去了却没人应答」
     build_smartdns_upstream || return 1

@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-28.180.120"
+SCRIPT_VER="2026-10-28.180.124"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -213,6 +213,54 @@ _dns_ok() {
     return 0
 }
 
+# ---- smartdns 规则文件自愈（v.180.124）----
+# 2026-10-28 真机事故：/rom/etc/smartdns/ 里 address.conf(824B)、blacklist-ip.conf(231B)、
+# custom.conf(97B)、domain-block.list(96B)、domain-forwarding.list(106B) 全在，
+# /etc/smartdns/ 里一个都没有。smartdns 解析 /var/etc/smartdns/smartdns.conf 第 32 行
+# 的 conf-file 时直接失败退出 → procd 判 crash loop → 53 端口全空 → probe 判
+# 「进程不在」→ 重跑整条 bootstrap → 重启 smartdns → 再挂，死循环。
+# 为什么 bootstrap 救不回来：_rom_restore_pkg 对 conffiles 一律 continue，而
+# smartdns.conffiles 正好就是 /etc/config/smartdns + 这 5 个文件。文件不存在时，
+# 那条「不覆盖用户配置」的保护就变成了「永远不修」。
+# bootstrap 侧的 _rom_restore_smartdns_conf 只在新固件里生效；这里再兜一层，
+# 让旧固件也能自愈。取向与 bootstrap 完全一致：
+#   · 只处理 /etc/smartdns/ 这 5 个文件，绝不碰 /etc/config/smartdns；
+#   · 只补「不存在」的，存在就一个字节不动（用户清成 0 字节也尊重）；
+#   · 文件齐了立即返回，不重启、不写日志 —— 所以每分钟调一次也是零动作。
+_DNS_CONF_FILES="address.conf blacklist-ip.conf custom.conf domain-block.list domain-forwarding.list"
+# 两个路径可被环境覆盖：生产环境走默认（真实 /etc/smartdns 与 /etc/init.d/smartdns），
+# 只在单元测试里替换成临时目录 —— 否则「文件缺失」这种情形没法在不动真机的前提下复现。
+_DNS_CONF_DIR="${CS_PROBE_SD_CONF:-/etc/smartdns}"
+_DNS_INIT="${CS_PROBE_SD_INIT:-/etc/init.d/smartdns}"
+# 只给测试用：换成 busybox 的 true / false 来模拟「重启后进程在 / 不在」。
+_DNS_PIDOF="${CS_PROBE_SD_PIDOF:-pidof}"
+
+_dns_conf_missing() {
+    for _dcm_f in $_DNS_CONF_FILES; do
+        [ -e "$_DNS_CONF_DIR/$_dcm_f" ] || return 0
+    done
+    return 1
+}
+
+# 返回 0 = 补了文件且重启后进程确实在；返回 1 = 没补（文件齐/源也没有）或补了没救回来。
+_dns_selfheal() {
+    _dns_conf_missing || return 1
+    _dsh_n=0
+    for _dsh_f in $_DNS_CONF_FILES; do
+        [ -e "$_DNS_CONF_DIR/$_dsh_f" ] && continue
+        [ -e "$ROMDIR/etc/smartdns/$_dsh_f" ] || continue
+        mkdir -p "$_DNS_CONF_DIR" 2>/dev/null
+        cp -a "$ROMDIR/etc/smartdns/$_dsh_f" "$_DNS_CONF_DIR/$_dsh_f" 2>/dev/null \
+            && _dsh_n=$((_dsh_n + 1))
+    done
+    [ "$_dsh_n" -gt 0 ] || return 1
+    plog "【DNS】【自愈】/etc/smartdns 缺 $_dsh_n 个规则文件，已从 $ROMDIR 补回，重启 smartdns"
+    "$_DNS_INIT" restart >/dev/null 2>&1
+    sleep "${CS_PROBE_SD_WAIT:-2}"
+    "$_DNS_PIDOF" smartdns >/dev/null 2>&1 && return 0
+    return 1
+}
+
 # 持锁跑一轮 bootstrap，等它结束，回收锁。返回它的退出码；77 = 抢锁失败。
 # 抽出来是因为现在有两条通道要跑同一件事（last_pull 停滞 / DNS 不可用），
 # 各写一遍的话，「pid 写进锁」这类容易写错的细节迟早会分叉 ——
@@ -251,6 +299,17 @@ _dns_watch() {
         P_DNS_BAD=0
         P_DNS_FIX=0
         return 0
+    fi
+    # 【v.180.124】进程不在时先分诊：是不是规则文件被遮掉了？
+    # 是 → 补文件 + 重启 smartdns，当场复验；救回来就别去跑整条 bootstrap。
+    # 否 → 一个字都不动，继续走原来的「计数 → 冷却 → 重跑引导」。
+    if [ "$DNS_WHY" = "进程不在" ] && _dns_selfheal; then
+        if _dns_ok; then
+            plog "【DNS】自愈成功：补回规则文件并重启 smartdns 后已恢复（此前不可用 ${P_DNS_BAD:-0} 轮）"
+            P_DNS_BAD=0
+            P_DNS_FIX=0
+            return 0
+        fi
     fi
     P_DNS_BAD=$((${P_DNS_BAD:-0} + 1))
     if [ "${P_HUMAN_DNS:-0}" = "1" ]; then

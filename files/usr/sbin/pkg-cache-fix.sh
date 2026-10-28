@@ -38,7 +38,11 @@ _pcf_feed_ensure() {
     mkdir -p "$_pcf_dir" 2>/dev/null
     _pcf_tmp="$PKG_CACHE_CONF.tmp.$$"
     if [ -f "$PKG_CACHE_CONF" ]; then
-        grep -vE "$PCR_PAT" "$PKG_CACHE_CONF" > "$_pcf_tmp" 2>/dev/null || return 1
+        # 不能用 `grep ... || return 1`：conf 里只有我们那一行时，过滤后无输出，
+        # grep 退出码就是 1，于是「挂源失败」—— 而这恰恰是最该成功的场景。
+        # 判据只看临时文件有没有产出，不看 grep 有没有匹配。
+        grep -vE "$PCR_PAT" "$PKG_CACHE_CONF" > "$_pcf_tmp" 2>/dev/null
+        [ -f "$_pcf_tmp" ] || return 1
     else
         : > "$_pcf_tmp" || return 1
     fi

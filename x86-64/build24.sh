@@ -515,7 +515,19 @@ fi
 # --- 生成本地 opkg 索引 ---
 # 没有 Packages 索引，opkg install 只认单个 ipk，一缺依赖就得联网；
 # 有了索引 + customfeeds.conf 里的 file:// 源，opkg 会自己从本地源补齐依赖。
-# 条目直接取自合并后的官方索引，只把 Filename 改成本地文件名。
+# 【v.180.133】四段式。少任何一段，真机上就有装不回来的包：
+#   ① 正向：从合并后的官方索引里筛出本地有的 ipk，只把 Filename 改成本地名
+#      （官方索引里的 Filename 带 feed 子目录前缀，不改 opkg 找不到文件）。
+#   ② 反向补：run 包的第三方版本【根本不在官方索引里】，只做①时 164 个 ipk
+#      只有 139 条索引 —— mosdns 的 r4、daed、clashoo、luci-app-ssr-plus 全没条目，
+#      `opkg install mosdns` 直接 not available from any configured src，
+#      只有绝对路径直装能活，LuCI 软件包页也看不到它们。
+#   ③ Packages.gz：opkg 的 file:// 源【只认 .gz】，给裸 Packages 一律报
+#      copy_file: ///rom/root/pkg-cache/Packages.gz: No such file or directory；
+#      而 update 一失败，opkg 就不为该源建 src 记录，之后按包名装全废。
+#   ④ Packages.sig：/etc/opkg.conf 默认带 option check_signature，全局验签开着
+#      时本地源还要签名，否则 update 同样必挂。用户手删那行只存在 overlay，
+#      重新刷机就失效 —— 所以必须让固件自带签名。
 if [ -s /tmp/pc-plan.txt ] && [ -s "$_idx_all" ]; then
     _pc_have=$(ls "$_PC_DIR" 2>/dev/null | grep '\.ipk$' | tr '\n' ' ')
     awk -v have="$_pc_have" '
@@ -546,14 +558,105 @@ if [ -s /tmp/pc-plan.txt ] && [ -s "$_idx_all" ]; then
             }
         }
     ' "$_idx_all" > "$_PC_DIR/Packages"
-    _pc_idx=$(grep -c '^Package: ' "$_PC_DIR/Packages" 2>/dev/null)
-    [ -n "$_pc_idx" ] || _pc_idx=0
-    echo "==> [pkg-cache] 本地索引：$_pc_idx 条 / $_pc_n 个 ipk"
-    if [ "$_pc_idx" -lt "$_pc_n" ]; then
-        echo "::warning::索引条目少于 ipk 数量（$_pc_idx < $_pc_n），部分包只能按单文件手动装"
-    fi
 else
-    echo "::warning::没有可用于生成本地索引的数据，opkg 无法从 pkg-cache 自动解依赖"
+    : > "$_PC_DIR/Packages"
+    echo "::warning::没有合并后的官方索引，本地 Packages 只能靠各 ipk 的 control 自解"
+fi
+
+# --- ② 反向补条目：官方索引里没有的 ipk，从 control 现生成 ---
+# 判据用 Filename 而不是包名：同名多版本要共存（本地 r1 + 官方 r1 + 本地 r4），
+# 按包名判会把高版本当"已收录"跳过，opkg 就永远选不到它。
+_pc_add=0
+for _f in "$_PC_DIR"/*.ipk; do
+    [ -f "$_f" ] || continue
+    _bn="${_f##*/}"
+    if grep -qF "Filename: $_bn" "$_PC_DIR/Packages" 2>/dev/null; then
+        continue
+    fi
+    # ipk = tar.gz 套 control.tar.gz；OpenWrt 打的是 ./control.tar.gz，
+    # 不同 tar 实现对前导 ./ 处理不一，两种都试
+    _ctl=$(tar -xzOf "$_f" ./control.tar.gz 2>/dev/null | tar -xzO ./control 2>/dev/null)
+    [ -n "$_ctl" ] || _ctl=$(tar -xzOf "$_f" control.tar.gz 2>/dev/null | tar -xzO control 2>/dev/null)
+    if [ -z "$_ctl" ]; then
+        echo "::warning::$_bn 读不出 control，跳过索引补录（该包只能绝对路径直装）"
+        continue
+    fi
+    {
+        echo "Package: $(printf '%s\n' "$_ctl" | sed -n 's/^Package: //p' | head -1)"
+        echo "Version: $(printf '%s\n' "$_ctl" | sed -n 's/^Version: //p' | head -1)"
+        _pc_v=$(printf '%s\n' "$_ctl" | sed -n 's/^Depends: //p' | head -1)
+        [ -n "$_pc_v" ] && echo "Depends: $_pc_v"
+        _pc_v=$(printf '%s\n' "$_ctl" | sed -n 's/^Architecture: //p' | head -1)
+        [ -n "$_pc_v" ] && echo "Architecture: $_pc_v"
+        echo "Filename: $_bn"
+        echo "Size: $(wc -c < "$_f" | tr -d ' ')"
+        _pc_v=$(printf '%s\n' "$_ctl" | sed -n 's/^Description: //p' | head -1)
+        [ -n "$_pc_v" ] && echo "Description: $_pc_v"
+        echo ""
+    } >> "$_PC_DIR/Packages"
+    _pc_add=$((_pc_add + 1))
+done
+echo "==> [pkg-cache] 反向补条目：$_pc_add 个（run 包三方版本，官方索引里没有）"
+
+_pc_idx=$(grep -c '^Package: ' "$_PC_DIR/Packages" 2>/dev/null)
+[ -n "$_pc_idx" ] || _pc_idx=0
+_pc_uniq=$(grep '^Package: ' "$_PC_DIR/Packages" 2>/dev/null | sort -u | wc -l | tr -d ' ')
+[ -n "$_pc_uniq" ] || _pc_uniq=0
+echo "==> [pkg-cache] 本地索引：$_pc_idx 条 / $_pc_uniq 个包名 / $_pc_n 个 ipk"
+# 判据用去重包名数，不用条目数：同名多版本会让条目数天然大于包数，
+# 按条目数比会天天误报（v.180.132 的 "139 < 164" 就是误报，实为同包去重）
+if [ "$_pc_uniq" -lt "$_pc_n" ]; then
+    echo "::warning::索引覆盖 $_pc_uniq 个包名 < $_pc_n 个 ipk，有 ipk 没进索引"
+fi
+
+# --- ③ Packages.gz ---
+# -n 不写时间戳：同一个 Packages 每次产出的 gz 字节一致，便于比对
+if [ -s "$_PC_DIR/Packages" ]; then
+    gzip -9 -n -c "$_PC_DIR/Packages" > "$_PC_DIR/Packages.gz" 2>/dev/null
+    if [ -s "$_PC_DIR/Packages.gz" ]; then
+        echo "==> [pkg-cache] Packages.gz：$(wc -c < "$_PC_DIR/Packages.gz" | tr -d ' ') 字节"
+    else
+        echo "::error::Packages.gz 生成失败，本地源在真机上必然 update 失败"
+        exit 1
+    fi
+fi
+
+# --- ④ 签名 Packages.sig ---
+# 用构建机自带的 usign 现场生成密钥对，同一构建内配对：
+# 私钥用完即删（不入库、不进固件），公钥按指纹命名写进 files/etc/opkg/keys/，
+# 随第二遍 make image 进 squashfs，重刷后仍然自洽。
+_PC_SIGNED=0
+_PC_USIGN=""
+if [ -x "staging_dir/host/bin/usign" ]; then
+    _PC_USIGN="staging_dir/host/bin/usign"
+fi
+[ -n "$_PC_USIGN" ] || _PC_USIGN=$(command -v usign 2>/dev/null)
+if [ -n "$_PC_USIGN" ] && [ -s "$_PC_DIR/Packages" ]; then
+    _pc_kd=$(mktemp -d 2>/dev/null)
+    [ -n "$_pc_kd" ] || _pc_kd="/tmp/pkgcache-keys.$$"
+    mkdir -p "$_pc_kd"
+    if "$_PC_USIGN" -G -s "$_pc_kd/k.sec" -p "$_pc_kd/k.pub" -c "pkgcache" >/dev/null 2>&1; then
+        _pc_fp=$("$_PC_USIGN" -F -p "$_pc_kd/k.pub" 2>/dev/null | cut -f1)
+        if [ -n "$_pc_fp" ] && "$_PC_USIGN" -S -m "$_PC_DIR/Packages" -s "$_pc_kd/k.sec" -x "$_PC_DIR/Packages.sig" >/dev/null 2>&1 && [ -s "$_PC_DIR/Packages.sig" ]; then
+            mkdir -p files/etc/opkg/keys
+            cp -f "$_pc_kd/k.pub" "files/etc/opkg/keys/$_pc_fp"
+            _PC_SIGNED=1
+            echo "==> [pkg-cache] 已签名 Packages.sig，公钥指纹 $_pc_fp 写入 /etc/opkg/keys/"
+        fi
+    fi
+    rm -rf "$_pc_kd"
+fi
+if [ "$_PC_SIGNED" = "0" ]; then
+    # 降级：写一份去掉 option check_signature 的 opkg.conf 覆盖件。
+    # 只在签不出 Packages.sig 时才降级，避免白白削弱所有源的验签强度。
+    echo "::warning::usign 不可用或签名失败，降级为关闭全局验签"
+    mkdir -p files/etc
+    {
+        echo "dest root /"
+        echo "dest ram /tmp"
+        echo "lists_dir ext /var/opkg-lists"
+        echo "option overlay_root /overlay"
+    } > files/etc/opkg.conf
 fi
 
 ls "$_PC_DIR" | head -n 40

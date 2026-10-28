@@ -10,7 +10,7 @@ LOCK=/tmp/.crowdsec-lxc-bootstrap.lock
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.159"
+SCRIPT_VER="2026-10-29.180.160"
 
 # ---- 阶段【完整性】：以只读分区为基准复原核心脚本，必须排在任何前置检查之前 ----
 # 顺序是硬要求：bootstrap 被删时下面的存在性检查会直接 exit 0，那样就再没有

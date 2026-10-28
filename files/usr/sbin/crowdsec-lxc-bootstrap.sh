@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-29.180.159"
+SCRIPT_VER="2026-10-29.180.160"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -1017,19 +1017,6 @@ _rom_restore_lxc() {
     return 1
 }
 
-# 【v.180.154】固件里那几个恢复脚本的统一入口。
-# 之前这里是个顶着应用名字的转发壳，虽然只有 6 行，读起来还是像 bootstrap 里养着一份
-# 该应用的逻辑 —— 实际上实现早就搬进各自的独立脚本了。改成通用转发：
-# 谁调谁传脚本名，bootstrap 侧不认识任何具体应用。
-_pkg_tool() {
-    _pt_bin="/usr/sbin/$1"
-    shift
-    [ -x "$_pt_bin" ] || {
-        log "[PKG] 固件里没有 $_pt_bin，无法恢复（$*）"
-        return 1
-    }
-    "$_pt_bin" "$@"
-}
 
 # 【v.180.153】引导开头的前置检查：应用在不在 → 容器文件正不正常。
 # 为什么不放探针：探针每 60 秒一轮，做应用/文件检查太重；它已有 last_pull 这根权威判据 ——
@@ -2336,7 +2323,7 @@ build_rootfs() {
     _recovering=true
 }
 # 容器内构建子步骤判定（v.93 起由 ct_net/ct_bootlink/ct_resolv/acquis 等节点各自闭环）：
-# 每一步独立 verify 就绪探测，供 ensure_sub 循环与整体快照判定共用，判定标准不变
+# 每一步独立 verify 就绪探测，供所在节点的 verify/build 与整体快照判定共用，判定标准不变
 verify_sub_ct_net() {
     _vs_dns="$(_container_dns)"
     if _is_minimal_init; then
@@ -2412,21 +2399,6 @@ verify_sub_cs_acquis() {
     # 我上次写的那份」。解析器少一个字节（注释被删、缩进被编辑器改）结构判据照样过，
     # 但规则可能已经不生效了 —— 那种失效不会报错，只会让日志解析悄悄变空。
     verify_cfg_sha || { log "[日志] 解析器/配置 sha 与基线不符（内容被改动）"; return 1; }
-}
-verify_sub_cs_listen() {
-    [ -f "$CROWDSEC_CFG" ] || return 1
-    grep -qE "^[[:space:]]*listen_uri:[[:space:]]*['\"]?0\\.0\\.0\\.0:${LAPI_PORT}" "$CROWDSEC_CFG" 2>/dev/null
-}
-verify_sub_cs_trusted() {
-    [ -n "$BRIDGE_IP" ] || return 1
-    printf '%s' "$BRIDGE_IP" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' || return 1
-    [ "${BRIDGE_IP%.*}" = "${CONTAINER_IP%.*}" ] || return 1
-    [ -f "$CROWDSEC_CFG" ] || return 1
-    grep -qE "^[[:space:]]*-[[:space:]]*${BRIDGE_IP}([[:space:]]|$)" "$CROWDSEC_CFG" 2>/dev/null || return 1
-    grep -qE "^[[:space:]]*listen_uri:[[:space:]]*['\"]?0\.0\.0\.0:${LAPI_PORT}" "$CROWDSEC_CFG" 2>/dev/null
-}
-verify_sub_ct_cfg() {
-    verify_ct_config                  # 与 install 类同基准：内容完整而非仅文件名
 }
 
 # ============================================================================
@@ -2840,10 +2812,10 @@ build_bouncer_fill() {
     # 不重启的话，紧接着的 BOUNCERVERIFY 会白等 60 秒再判 hard。
     _bouncer_service_restart
     # 首启补拉（首台真机 2026-10-22 现场确认的真 bug）：
-    #   全新固件第一轮里 bouncer 服务还没被 enable（enable 写在阶段 3 的 fix_B 里），
+    #   全新固件第一轮里 bouncer 服务还没被 enable（bouncer_fill 组只落 uci，不起服务），
     #   _bouncer_service_restart 见进程没跑就直接放行 → 紧接着的 BOUNCERVERIFY 必然
-    #   60 秒后软失败 → 不置位 → ENROLL 跳过 → 无 installed 标记 → 阶段 3 重跑整条 DAG，
-    #   现场表现就是引导日志里「LOGCONF → LAPI → BOUNCERVERIFY → 阶段 3」转圈。
+    #   60 秒后软失败 → 不置位 → ENROLL 跳过 → 无 installed 标记 → 下轮重跑整条 DAG，
+    #   现场表现就是引导日志里「LOGCONF → LAPI → BOUNCERVERIFY → 重跑」转圈。
     #   这里在写完 key 的当下就把服务拉起来（幂等：已在跑且 nft 表就绪则立即返回），
     #   让 BOUNCERVERIFY 第一次就有东西可验。不改 DAG 结构，只改动作。
     if ! cs_active_on_host; then
@@ -2975,7 +2947,7 @@ _bouncer_heal() {
     return 0
 }
 _bouncer_rule_sane() {
-    # verify 在阶段 A / 阶段 3 / build 循环里会被反复调用，这里保证一轮只查一次
+    # verify 在组链各节点 / build 循环里会被反复调用，这里保证一轮只查一次
     [ "$_BC_SANE" = "1" ] && return 0
     _BC_SANE=1
     # 先保依赖：nft / bouncer / 配置缺任何一项，下面的结论都不可信
@@ -3092,22 +3064,6 @@ build_capi_release() {
     return 0
 }
 
-# 构建子步骤 ensure + hard（v.79，与 ensure() 同构但不写 _done/_dirty/_failed：
-# 外层节点（rootfs / ct_config / acquis / ct_bootlink / ct_resolv …）自身还有两次机会，内层状态不得跨轮残留）——
-ensure_sub() {
-    _s_name="$1"; _s_verify="$2"; _s_build="$3"
-    log "[构建] $_s_name：效验"
-    if "$_s_verify" 2>/dev/null; then
-        log "[构建] $_s_name 就绪，跳过"
-        return 0
-    fi
-    if ! "$_s_build" 2>/dev/null; then
-        log "[构建] $_s_name 构建执行失败，hard 失败，引导终止"
-        exit 1
-    fi
-    log "[构建] $_s_name 已构建"
-    return 0
-}
 # 构建 crowdsec 全链：七步各自 ensure + hard（被各节点按需调用）：
 # 网络文件 → 自启软链/机器身份 → resolv.conf → 日志源/解析器 → listen_uri
 # → trusted_ips → 容器 config；enroll 不在此链。
@@ -3690,27 +3646,6 @@ rebuild_from_image() {
     [ -f "$CROWDSEC_CFG" ]
 }
 
-ensure_trusted_ip() {
-    [ -f "$CROWDSEC_CFG" ] || return 1
-    [ -n "$BRIDGE_IP" ] || return 1
-    grep -qE "^[[:space:]]*-[[:space:]]*${BRIDGE_IP}([[:space:]]|$)" "$CROWDSEC_CFG" 2>/dev/null \
-        && { log "[配置] trusted_ips 已含 $BRIDGE_IP"; return 0; }
-    awk -v tip="$BRIDGE_IP" '
-        BEGIN { in_ti=0; indent="      " }
-        /^[[:space:]]*trusted_ips:/ { in_ti=1; print; next }
-        in_ti && /^[[:space:]]*-[[:space:]]/ { print; next }
-        in_ti && /^[[:space:]]*#/ { print indent "- " tip; in_ti=0; print; next }
-        in_ti && /^[[:space:]]*$/ { print; next }
-        in_ti { print indent "- " tip; in_ti=0; print; next }
-        { print }
-        END { if (in_ti) print indent "- " tip }
-    ' "$CROWDSEC_CFG" > "$CROWDSEC_CFG.tmp" 2>/dev/null \
-        && mv -f "$CROWDSEC_CFG.tmp" "$CROWDSEC_CFG" 2>/dev/null \
-        && { log "[配置] trusted_ips 已补上 $BRIDGE_IP"; return 0; }
-    rm -f "$CROWDSEC_CFG.tmp" 2>/dev/null
-    log "[配置] 补 trusted_ips 失败"
-    return 1
-}
 
 _container_dns() {
     _dns=""
@@ -4138,8 +4073,8 @@ _BP_PULL_INTERVAL=10
 _BP_PULL_MISS=6
 _BP_DEFAULT_MAX_AGE=$((_BP_PULL_INTERVAL * _BP_PULL_MISS))
 
-# 同一句日志不重复刷屏：_sc_wait_pull 每 5 秒调一次 bouncer_pulling，
-# 原实现会让「last_pull 停滞」在 60 秒窗口里原样打 12 遍，把真正有用的信息埋掉。
+# 同一句日志不重复刷屏：探针与等待窗口都会反复调 bouncer_pulling，
+# 让它把「last_pull 停滞」在窗口里原样打十几遍，会埋掉真正有用的信息。
 _bp_say() {
     [ "$1" = "${_bp_last_msg:-}" ] && return 0
     _bp_last_msg="$1"
@@ -5288,51 +5223,6 @@ _ct_revive() {
     return 1
 }
 
-# ---- 阶段 3 服务链（v.81 A/B/C 步骤化：A 容器内配置 → B crowdsec 配置+bouncer 链路 → C last_pull）----
-# 与 DAG ensure 同构但只修一次（v.81）：安装顺序保证前置已就绪，修一次不过即 hard——
-phase3_step() {
-    _p3_title="$1"
-    _p3_verify="$2"
-    _p3_fix="$3"
-    log "[服务链] $_p3_title：查验"
-    if "$_p3_verify" 2>/dev/null; then
-        log "[服务链] $_p3_title 就绪，跳过"
-        return 0
-    fi
-    # 一次修复（v.81）：不符 → 修复一次 → 复核，不过即 hard，不等第二次
-    log "[服务链] $_p3_title 未就绪，执行修复（一次）"
-    if ! "$_p3_fix" 2>/dev/null; then
-        log "[服务链] $_p3_title 修复执行失败，hard 失败，引导终止"
-        exit 1
-    fi
-    if "$_p3_verify" 2>/dev/null; then
-        log "[服务链] $_p3_title 修复后复核通过"
-        return 0
-    fi
-    log "[服务链] $_p3_title 一次修复未通过复核，hard 失败，引导终止"
-    exit 1
-}
-
-# enroll 专用效验步（保留之前做法，不纳入修复循环）：fix（re_enroll）内部已自带终态判定——
-# 「enroll 命令成功但 10 秒内未显示 Enrolled（等网站人工 Accept）」是合法中间态，
-# 不能靠事后复核判失败；fix 返 0 即过、返 1 即 hard
-phase3_step_enroll() {
-    _p3_title="$1"
-    _p3_verify="$2"
-    _p3_fix="$3"
-    log "[服务链] $_p3_title：查验"
-    if "$_p3_verify" 2>/dev/null; then
-        log "[阶段3] $_p3_title 就绪，跳过"
-        return 0
-    fi
-    log "[阶段3] $_p3_title 未就绪，执行修复"
-    if "$_p3_fix" 2>/dev/null; then
-        log "[阶段3] $_p3_title 修复完成（fix 自带终态判定，未终止等待亦算过）"
-        return 0
-    fi
-    log "[阶段3] $_p3_title 修复失败，引导终止（重跑亦同，需人工介入）"
-    exit 1
-}
 
 verify_online_client_off() {
     [ -f "$CROWDSEC_CFG" ] || return 1
@@ -5345,97 +5235,13 @@ verify_online_client_on() {
 }
 
 # LAPI 可达性判定（容器在运行 + cscli bouncers list 有回显）：
-# verify_B 的注册态分支与「等 LAPI 就绪」的判据共用——注意它只判「LAPI 活着」，
+# bouncer_verify 的注册态分支与「等 LAPI 就绪」的判据共用——注意它只判「LAPI 活着」，
 # 不判 last_pull（那是 bouncer_verify 与探针的职责），也不夹带任何修复动作
 verify_lapi_ready() {
     ct_running || return 1
     _ct_env "$CSCLI bouncers list -o json" >/dev/null 2>&1
 }
 
-# ---- 步骤 A：宿主机→容器日志转发链路（v.83 起收窄）----
-# 文件级容器配置（网络文件/自启软链/resolv/acquis/listen/trusted/ct_config）
-verify_A() {
-    verify_log_forward
-}
-
-fix_A() {
-    if verify_log_forward; then
-        log "[步骤A] 宿主机日志转发已就绪，跳过"
-        return 0
-    fi
-    log "[步骤A] 宿主机日志转发缺项，补写"
-    setup_log_forward || return 1
-    return 0
-}
-
-# ---- 步骤 B：crowdsec bouncer 服务链路（v.83 起收窄）----
-# 文件级配置（listen_uri/trusted_ips/ct_config）已由阶段 1+2 保证，此处不再复核；
-verify_B() {
-    cs_active_on_host && nft_table_ready || return 1
-    if verify_lapi_ready; then
-        bouncer_exists || return 1
-    else
-        log "[步骤B] LAPI 不可达，注册态无法查验（return 0，交由步骤 C 判定）"
-    fi
-    return 0
-}
-
-fix_B() {
-    if verify_B; then
-        log "[步骤B] 服务链路已就绪，跳过链路修复"
-        return 0
-    fi
-    # 文件级判据（listen/trusted/ct_config）已由 PREP/INSTALL 组各节点保证，
-    # 此处只修复阶段 3 独有的服务链路：屏蔽 CAPI → 应用 bouncer UCI → 等 LAPI →
-    # 注册 → 起宿主机服务 → 等 nft 表就位
-    log "[步骤B] 屏蔽 online_client 并修复 bouncer 服务链路"
-    ensure_online_client_off || true
-    _bouncer_uci_apply || return 1
-    _wait_lapi_ready 90 || log "[步骤B] LAPI 90 秒未就绪，仍尝试注册"
-    _bouncer_register_once || { log "[步骤B] bouncer 注册失败（拿不到 key）"; return 1; }
-    _ensure_bouncer_service
-    _fb_i=0
-    while [ "$_fb_i" -lt 12 ]; do
-        _fb_i=$((_fb_i+1))
-        nft_table_ready && break
-        sleep 1
-    done
-    return 0
-}
-
-# ---- 步骤 C：LAPI 可达 + last_pull（v.106 职责切分后，只验不重装）----
-# 【v.106 改动缘由】用户现场口径：
-#   「如果错误了还是按照脚本的方式去修；如果脚本修复不了这个错误，就说明脚本
-#     已经损坏了，就没必要去重装了。」「探针只探 last_pull 的状态，其他不探。」
-# 即修复动作就是脚本的全部能力，所以「修不好」等于「修复能力/资产失效」——此时
-# 重装用同一套脚本、同一份镜像只会把同样的失败再走一遍，还会先抹掉现场证据；
-# 叠加探针周期性地触发修复，就退化成「每小时抹一次盘」，正是 v.103 之前的老毛病。
-# 因此 v.106 起 last_pull 的持续监视整体移交运行期探针（crowdsec-lxc-probe.sh）：
-#   探针 60s 一轮判 last_pull → 连续 3 轮停滞 → 重跑本脚本（幂等修复）→ 修不好
-#   就报「脚本修复能力失效，需人工介入」，仍然不重装。
-# 本函数只回答一个问题：「装完/修完这一次，链路通不通」，不通就 hard 退出。
-#   ① LAPI 可达（bouncer 绑定后的必备探测，保留）：容器在跑 + cscli 有回显
-#   ② last_pull 在等待窗口内刷新（只观察，不作为重装依据）
-#   ③ 拉不到时复验 A/B 要素并修一次，修完再等一个窗口
-# 自动重装的唯一入口不在这里，见 _structurally_broken()（只认结构性损坏）。
-
-# last_pull 纯等待窗口（默认 12×5s=60s）：只观察不改状态
-# 两个调用点都不传参，走默认 60s；形参留着的意义是测试能把它调成 1 轮跑快些。
-_sc_wait_pull() {
-    _sw_max="${1:-12}"
-    _sw_i=0
-    log "[步骤C] 进入 last_pull 拉取窗口（最多 ${_sw_max}×5s，只观察不修复）"
-    while [ "$_sw_i" -lt "$_sw_max" ]; do
-        _sw_i=$((_sw_i+1))
-        sleep 5
-        if bouncer_pulling; then
-            log "[步骤C] last_pull 已刷新（等待 ${_sw_i}×5s）"
-            return 0
-        fi
-        [ $(( _sw_i % 4 )) -eq 0 ] && log "[步骤C] last_pull 仍未刷新，继续等待（${_sw_i}/${_sw_max}）"
-    done
-    return 1
-}
 
 
 

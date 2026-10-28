@@ -38,10 +38,8 @@ python3 - "$BS" \
     build_wan_input build_lan_input build_br_lan_ports build_lan_static \
     build_dhcp_ignore build_wan_removed build_dns_domain build_svc_bind \
     build_docker_fw build_lxc_zone_fwd build_snat build_lxc_zone build_fwd_rules \
-    phase3_step phase3_step_enroll \
     verify_online_client_off verify_online_client_on \
     verify_lapi_ready verify_log_forward _system_section \
-    verify_A fix_A verify_B fix_B step_C _sc_wait_pull \
     console_enroll_ok bouncer_pulling bouncer_exists \
     setup_log_forward ensure_online_client_on ensure_online_client_off \
     _bouncer_uci_apply _wait_lapi_ready _bouncer_register_once _ensure_bouncer_service \

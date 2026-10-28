@@ -119,6 +119,15 @@ _pr_tree() {
 #      版本号必须从尾部按 -<数字...>-r<name> 正则剥：lxc-auto-6.0.5-r1.apk 的
 #      包名自己就带连字符，按最后一段截会得到 "lxc"（见 build25.sh 的同款提醒）。
 #      剥完 lxc-6.0.5-r1 → lxc，主包也一并覆盖，不再依赖 _pr_tree 兜。
+#      文件名格式已实测（2026-10-29，官方 25.12.2 源 packages/x86_64/packages/）：
+#        lxc-6.0.5-r1.apk            200
+#        lxc-auto-6.0.5-r1.apk       200
+#        liblxc-6.0.5-r1.apk         200
+#        lxc-6.0.5-r1.x86_64.apk     404  ← 不带架构后缀
+#      即 index.json 里的 "包名":"版本" 直接拼成 包名-版本.apk，与 build25.sh
+#      来源 B 的拼法一致。
+#      不在覆盖范围：rpcd-mod-lxc（不以 lxc- 开头，是 LuCI 的 rpcd 模块，
+#      不是 lxc 运行时；opkg 侧的 lxc-*.list 同样扫不到它）。
 _pr_lxc_names() {
     for _pl_l in "$ROMDIR"/usr/lib/opkg/info/lxc-*.list; do
         [ -f "$_pl_l" ] || continue

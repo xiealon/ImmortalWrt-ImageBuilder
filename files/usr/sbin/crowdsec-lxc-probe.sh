@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-28.180.127"
+SCRIPT_VER="2026-10-28.180.128"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -557,6 +557,58 @@ probe_tick() {
     return 0
 }
 
+# ---- 【v.180.128】本地包源自检 ----
+# pkg-cache 是固件自带的离线包库，被 opkg 卸掉的包靠它装回来。
+# 它坏掉不影响路由转发，所以不能像 last_pull 那样触发修复；但也不能一声不吭 ——
+# 等到真要用（ssrp/clashoo 被卸）才发现装不回来，那时人已经在救火了。
+# 这里只做「看一眼、异常才说话」：状态变化时才写日志，防止每分钟刷一条。
+PKG_CACHE_RO_P="${PKG_CACHE_RO:-$ROMDIR/root/pkg-cache}"
+PKG_CACHE_P="${PKG_CACHE:-/root/pkg-cache}"
+PKG_STATE="${CS_PROBE_PKG_STATE:-/tmp/crowdsec-probe.pkgcache}"
+# CS_PROBE_PKG_CONF 只给夹具用：生产环境为空，读的仍是 /etc/opkg/customfeeds.conf
+PKG_CF="${CS_PROBE_PKG_CONF:-/etc/opkg/customfeeds.conf}"
+
+_pkgcache_probe() {
+    _pk_msg=""
+    _pk_dir=""
+    for _pk_d in "$PKG_CACHE_RO_P" "$PKG_CACHE_P"; do
+        [ -n "$_pk_d" ] || continue
+        [ -f "$_pk_d/Packages" ] || continue
+        _pk_dir="$_pk_d"
+        break
+    done
+    if [ -z "$_pk_dir" ]; then
+        _pk_msg="本地包源不可用：$PKG_CACHE_RO_P 与 $PKG_CACHE_P 都没有 Packages 索引，被卸的包只能拷文件兜底（opkg 记账不会恢复）"
+    else
+        _pk_n=$(ls "$_pk_dir"/*.ipk 2>/dev/null | wc -l)
+        [ "$_pk_n" -gt 0 ] 2>/dev/null || _pk_msg="本地包源 $_pk_dir 有索引但 0 个 ipk，opkg 装不上任何包"
+        if [ -z "$_pk_msg" ] && [ -f "$PKG_CF" ]; then
+            while IFS= read -r _pk_l; do
+                case "$_pk_l" in
+                *pkgcache*file://*)
+                    _pk_t=${_pk_l##*file://}
+                    _pk_t=${_pk_t%%[!0-9A-Za-z/._:-]*}
+                    if [ -n "$_pk_t" ] && [ ! -d "$_pk_t" ]; then
+                        _pk_msg="customfeeds.conf 存在死源 file://$_pk_t（目录不存在），opkg update 会整体报错"
+                        break
+                    fi
+                    ;;
+                esac
+            done < "$PKG_CF"
+        fi
+    fi
+    _pk_prev=""
+    [ -s "$PKG_STATE" ] && _pk_prev=$(cat "$PKG_STATE" 2>/dev/null)
+    [ "$_pk_msg" = "$_pk_prev" ] && return 0
+    printf '%s\n' "$_pk_msg" > "$PKG_STATE" 2>/dev/null
+    if [ -n "$_pk_msg" ]; then
+        plog "【包源】$_pk_msg"
+    elif [ -n "$_pk_prev" ]; then
+        plog "【包源】已恢复正常（$_pk_dir，$(ls "$_pk_dir"/*.ipk 2>/dev/null | wc -l) 个 ipk）"
+    fi
+    return 0
+}
+
 # ---- 状态落盘 / 恢复：让停滞轮数、冷却、失败计数跨重启仍然准确 ----
 _probe_save() {
     # 【v.180.117】四个 dns* 键的命名是被 sed 逼出来的：_probe_load 用
@@ -620,5 +672,6 @@ while true; do
     _guard_run
     probe_tick
     _probe_save
+    _pkgcache_probe
     sleep "$PROBE_INTERVAL"
 done

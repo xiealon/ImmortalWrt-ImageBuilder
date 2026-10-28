@@ -339,11 +339,28 @@ fi
 # 来源 B：官方源。apk fetch --recursive 自己解依赖闭包 ——
 # 这是 apk 比 opkg 省事的地方：不用手写 BFS、不会漏，也不会把依赖装半残。
 # 同包名不同版本（run 包里的更新）会共存，apk 安装时自己选最高版本。
+#
+# 【v.180.131】apk 二进制不一定在 PATH 里：ImageBuilder 容器是 Ubuntu 底子，
+# 给 rootfs 装包用的 apk 是 ImageBuilder 自己带的那份（staging_dir/host/bin/apk），
+# 直接写 command -v apk 很可能找不到，于是官方源那部分一个包都收不到、还不报错。
+# 所以按「自带优先、PATH 兜底」探一遍，把结果固定到 _AK_BIN 后面统一用。
+_AK_BIN=""
+for _c in "$(pwd)/staging_dir/host/bin/apk" "$(pwd)/staging_dir/host/bin/apk.static"; do
+    if [ -x "$_c" ]; then
+        _AK_BIN="$_c"
+        break
+    fi
+done
+if [ -z "$_AK_BIN" ]; then
+    _AK_BIN=$(command -v apk 2>/dev/null)
+fi
+[ -n "$_AK_BIN" ] && echo "==> [apk-cache] apk 用：$_AK_BIN"
+
 _ak_b=0
-if command -v apk >/dev/null 2>&1; then
-    apk update >/dev/null 2>&1 || echo "::warning::apk update 失败，沿用容器里已有索引"
+if [ -n "$_AK_BIN" ]; then
+    "$_AK_BIN" update >/dev/null 2>&1 || echo "::warning::apk update 失败，沿用容器里已有索引"
     _ak_before=$(ls "$_AK_DIR" 2>/dev/null | wc -l)
-    apk fetch --recursive --output-dir "$_AK_DIR" $_AK_WANT >/tmp/apk-fetch.log 2>&1
+    "$_AK_BIN" fetch --recursive --output-dir "$_AK_DIR" $_AK_WANT >/tmp/apk-fetch.log 2>&1
     _ak_rc=$?
     _ak_after=$(ls "$_AK_DIR" 2>/dev/null | wc -l)
     _ak_b=$((_ak_after - _ak_before))
@@ -353,7 +370,7 @@ if command -v apk >/dev/null 2>&1; then
         tail -8 /tmp/apk-fetch.log 2>/dev/null
     fi
 else
-    echo "::warning::容器里没有 apk 命令，跳过官方源收包（只会有 run 包那部分）"
+    echo "::warning::没找到 apk 二进制（staging_dir/host/bin/apk 与 PATH 都没有），跳过官方源收包"
 fi
 
 _ak_n=$(ls "$_AK_DIR"/*.apk 2>/dev/null | wc -l)
@@ -370,12 +387,12 @@ fi
 # apk 的索引是 packages.adb（二进制 ADB 格式），手写不出来，必须用它自己的命令。
 # opkg 那套「拼 Packages 纯文本」在这里完全不适用。
 # 失败不中断构建：没有索引时仍能按绝对路径单文件装（依赖齐的常态够用）。
-if command -v apk >/dev/null 2>&1; then
+if [ -n "$_AK_BIN" ]; then
     _ak_rc2=0
-    ( cd "$_AK_DIR" && apk index -o packages.adb --description "offline pkg cache" ./*.apk ) \
+    ( cd "$_AK_DIR" && "$_AK_BIN" index -o packages.adb --description "offline pkg cache" ./*.apk ) \
         >/tmp/apk-index.log 2>&1 || _ak_rc2=1
     if [ "$_ak_rc2" != "0" ]; then
-        ( cd "$_AK_DIR" && apk index -o packages.adb ./*.apk ) >>/tmp/apk-index.log 2>&1 || _ak_rc2=2
+        ( cd "$_AK_DIR" && "$_AK_BIN" index -o packages.adb ./*.apk ) >>/tmp/apk-index.log 2>&1 || _ak_rc2=2
     fi
     if [ "$_ak_rc2" != "2" ] && [ -s "$_AK_DIR/packages.adb" ]; then
         echo "==> [apk-cache] 索引已生成：$(wc -c < "$_AK_DIR/packages.adb") 字节"

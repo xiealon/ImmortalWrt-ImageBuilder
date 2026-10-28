@@ -315,7 +315,7 @@ mkdir -p "$_PC_DIR"
 # v2ray-geo*）会记进 miss，由来源 A（packages/ 里的 run 包）补上。
 # 白名单，按应用分组列。依据是 run 包实解内容 + 官方 feed 索引核实：
 #   ssrp_x86_64.run        -> luci-app-ssr-plus / luci-i18n-ssr-plus-zh-cn（mihomo 版，不带 ssr-libev）
-#   mosdns_x86_64.run      -> mosdns / luci-app-mosdns / luci-i18n-mosdns-zh-cn / v2ray-geo* / geo2txt
+#   mosdns_x86_64.run      -> mosdns / luci-app-mosdns / luci-i18n-mosdns-zh-cn / v2ray-geo*
 #   clashoo_x86_64.run     -> clashoo / luci-app-clashoo / luci-i18n-clashoo-zh-cn
 #   luci-app-dead_x86_64.run（文件名是 dead，里面是 daed）-> daed / luci-app-daed /
 #                             luci-i18n-daed-zh-cn / v2ray-geo* / vmlinux-btf
@@ -332,7 +332,7 @@ lxc-snapshot lxc-start lxc-stop lxc-templates lxc-top lxc-unfreeze lxc-unprivile
 lxc-unshare lxc-user-nic lxc-usernsexec lxc-wait liblxc rpcd-mod-lxc
 luci-app-lxc luci-i18n-lxc-zh-cn
 smartdns smartdns-ui luci-app-smartdns luci-i18n-smartdns-zh-cn
-mosdns luci-app-mosdns luci-i18n-mosdns-zh-cn v2ray-geoip v2ray-geosite geo2txt
+mosdns luci-app-mosdns luci-i18n-mosdns-zh-cn v2ray-geoip v2ray-geosite
 daed daed-geoip daed-geosite luci-app-daed luci-i18n-daed-zh-cn vmlinux-btf
 dae dae-geoip dae-geosite luci-app-dae luci-i18n-dae-zh-cn
 crowdsec crowdsec-firewall-bouncer luci-app-crowdsec-firewall-bouncer
@@ -640,10 +640,14 @@ echo "==> [pkg-cache] 本地索引：$_pc_idx 条 / $_pc_uniq 个包名 / $_pc_n
 if [ "$_pc_uniq" -lt 1 ]; then
     echo "::error::本地索引 0 条：$_pc_n 个 ipk 一个都没进 Packages，真机上本地源是空源"
 fi
-# 判据用去重包名数，不用条目数：同名多版本会让条目数天然大于包数，
-# 按条目数比会天天误报（v.180.132 的 "139 < 164" 就是误报，实为同包去重）
-if [ "$_pc_uniq" -lt "$_pc_n" ]; then
-    echo "::warning::索引覆盖 $_pc_uniq 个包名 < $_pc_n 个 ipk，有 ipk 没进索引"
+# 【v.180.142】判据改成「条目数 vs ipk 数」。
+# 原来比「去重包名数 vs ipk 数」，同名多版本（daed、hysteria、mosdns、xray-core…）
+# 天然让包名数小于 ipk 数：实测 164 条 / 150 包名 / 164 ipk 时天天喊
+# 「有 ipk 没进索引」，而 164 条恰好等于 164 个 ipk —— 一个都没漏，纯误报。
+# 告警天天误报的下场是没人再看告警，真漏包时也一起被忽略。
+# 真判据：每条索引对应一个 Filename，条目数 < ipk 数才说明有包被跳过（读不出 control）。
+if [ "$_pc_idx" -lt "$_pc_n" ]; then
+    echo "::warning::索引 $_pc_idx 条 < $_pc_n 个 ipk，有 ipk 没进索引"
 fi
 
 # --- ③ Packages.gz ---

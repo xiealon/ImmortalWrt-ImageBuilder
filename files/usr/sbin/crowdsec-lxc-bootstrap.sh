@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-29.180.158"
+SCRIPT_VER="2026-10-29.180.159"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -1004,19 +1004,17 @@ _rom_restore_pkg() {
 # lxc 全家桶：/rom 里装了哪些 lxc-* 就恢复哪些（applet 是独立包，不会互相拉）
 _rom_restore_lxc() {
     # 【v.180.146】lxc 全家桶扫描搬到 pkg-restore.sh --lxc，这里只做委托。
+    # 【v.180.159】删掉内置的第二份枚举：它和 pkg-restore.sh 的 _pr_lxc 是同一套逻辑
+    #   两处实现（都在扫 /usr/lib/opkg/info/lxc-*.list），加一处漏一处；而且在 apk
+    #   固件上那段扫描恒为空，等于一段永远不会生效的兜底。判据只留 pkg-restore.sh 一处
+    #   （那边已改成 opkg 清单 + apk 包库双来源）。pkg-restore.sh 与本脚本同目录出厂，
+    #   缺它就说明固件不完整，直接判失败。
     if [ -x /usr/sbin/pkg-restore.sh ]; then
         /usr/sbin/pkg-restore.sh --lxc && return 0
+        return 1
     fi
-    _rl_any=0
-    for _rl_l in "$ROMDIR"/usr/lib/opkg/info/lxc-*.list; do
-        [ -f "$_rl_l" ] || continue
-        _rl_p="${_rl_l##*/}"
-        _rom_restore_pkg "${_rl_p%.list}"
-        _rl_any=1
-    done
-    [ "$_rl_any" = 1 ] || return 1
-    _rom_restore_pkg liblxc
-    return 0
+    log "[PKG] 缺少 /usr/sbin/pkg-restore.sh，无法恢复 lxc 全家桶"
+    return 1
 }
 
 # 【v.180.154】固件里那几个恢复脚本的统一入口。

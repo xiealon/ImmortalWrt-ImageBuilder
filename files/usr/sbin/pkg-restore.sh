@@ -108,19 +108,40 @@ _pr_tree() {
     return 0
 }
 
-# lxc 全家桶：/rom 里装了哪些 lxc-* 就恢复哪些。
-# 注意 lxc 主包（名字就是 lxc，没有连字符）扫不到，靠最后 _pr_tree liblxc 的
-# Depends 递归兜住 —— 两条路互补，不能只留一条。
+# lxc 全家桶：/rom 里装了哪些 lxc-* 就恢复哪些（applet 是独立包，不会互相拉）
+#
+# 【v.180.159】枚举改成双来源，否则 apk（25.12）上一个都扫不到：
+#   ① opkg 安装清单 /rom/usr/lib/opkg/info/lxc-*.list —— 24.10
+#   ② apk 包库 /rom/root/apk-cache/lxc-*.apk + liblxc*.apk —— 25.12
+#      apk-tools 3.x 的已安装信息是二进制 installed.adb，没有文本清单可扫，
+#      所以退回「基座自带包库里有谁」。多列出来的只是候选：_pr_pkg 自带
+#      --installed 判据，已经装着的直接跳过，不会重复装。
+#      版本号必须从尾部按 -<数字...>-r<name> 正则剥：lxc-auto-6.0.5-r1.apk 的
+#      包名自己就带连字符，按最后一段截会得到 "lxc"（见 build25.sh 的同款提醒）。
+#      剥完 lxc-6.0.5-r1 → lxc，主包也一并覆盖，不再依赖 _pr_tree 兜。
+_pr_lxc_names() {
+    for _pl_l in "$ROMDIR"/usr/lib/opkg/info/lxc-*.list; do
+        [ -f "$_pl_l" ] || continue
+        _pl_n="${_pl_l##*/}"
+        printf '%s\n' "${_pl_n%.list}"
+    done
+    for _pl_a in "$ROMDIR"/root/apk-cache/lxc-*.apk "$ROMDIR"/root/apk-cache/liblxc*.apk; do
+        [ -f "$_pl_a" ] || continue
+        _pl_n="${_pl_a##*/}"
+        _pl_n="${_pl_n%.apk}"
+        printf '%s\n' "$_pl_n" | sed -n 's/-[0-9][0-9.]*-r[0-9][0-9]*$//p'
+    done
+}
+
 _pr_lxc() {
     _rl_any=0
-    for _rl_l in "$ROMDIR"/usr/lib/opkg/info/lxc-*.list; do
-        [ -f "$_rl_l" ] || continue
-        _rl_p="${_rl_l##*/}"
-        _pr_pkg "${_rl_p%.list}"
+    for _rl_p in $(_pr_lxc_names | sort -u); do
+        [ -n "$_rl_p" ] || continue
+        _pr_pkg "$_rl_p"
         _rl_any=1
     done
     [ "$_rl_any" = 1 ] || {
-        log "只读基座里没有 lxc-*.list（$ROMDIR/usr/lib/opkg/info/）"
+        log "只读基座里既没有 lxc-*.list 也没有 apk-cache 里的 lxc 包（$ROMDIR）"
         return 1
     }
     _pr_tree liblxc

@@ -117,15 +117,27 @@ _sd_conf() {
     return 0
 }
 
-# 界面是否可用。固件压根没编界面（只读基座里没安装清单）算「本来就没有」，
-# 返回 0 不报警 —— 老固件就是这个情形，每轮白恢复一次没有意义。
+# 界面是否可用。三段判据，都不碰包管理器（apk / opkg 通用）：
+#   ① 运行期在位                                   → 0
+#   ② 只读基座里有、运行期没有（该有却没有）        → 1，要恢复
+#   ③ 基座里也没有（固件压根没编界面）             → 0，不报警
+# ③ 是为老固件留的：它本来就没界面，每轮白恢复一次没有意义。
+#
+# 【v.180.159】② 原来判的是 /usr/lib/opkg/info/luci-app-smartdns.list，
+# 那是 opkg 的安装清单。25.12 换 apk 后该路径永远不存在，于是那一行
+# `|| return 0` 恒触发 → 本函数恒返 0（静默通过）→ 界面真丢了也漏报，
+# 而且 _sd_luci 永远不跑。这不是误报，是漏报 + 永不恢复。
+# 换成判基座里的两个界面文件，跨包管理器，且与 _sd_luci 的恢复来源同一份东西。
 _sd_luci_ok() {
     if [ -f "$PKGROOT/usr/share/luci/menu.d/luci-app-smartdns.json" ] \
        && [ -f "$PKGROOT/usr/libexec/smartdns-call" ]; then
         return 0
     fi
-    [ -f "$ROMDIR/usr/lib/opkg/info/luci-app-smartdns.list" ] || return 0
-    return 1
+    if [ -f "$ROMDIR/usr/share/luci/menu.d/luci-app-smartdns.json" ] \
+       && [ -f "$ROMDIR/usr/libexec/smartdns-call" ]; then
+        return 1
+    fi
+    return 0
 }
 
 _sd_luci() {

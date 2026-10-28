@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-28.180.128"
+SCRIPT_VER="2026-10-28.180.129"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -804,7 +804,31 @@ _pkgcache_lists() {
     return 0
 }
 
-# 从本地源装回一个包（依赖由 opkg 自己解）。成功返回 0。
+# 本地包源自愈：索引文件可能被 `opkg update` 清掉（/var 是 tmpfs，重启也清空），
+# 而 opkg update 会把本地 file:// 源判为「签名缺失」直接丢弃该源的索引。
+# 所以每轮检查一次，缺了就从包库重新铺 —— 成本是一次 cp，换的是「永远可用」。
+_pkgcache_lists_ensure() {
+    if [ -n "${PKG_CACHE_LISTS:-}" ]; then
+        _ple_dir="$PKG_CACHE_LISTS"
+    else
+        _ple_dir=$(sed -n 's/^lists_dir[[:space:]]*[a-z]*[[:space:]]*\(.*\)/\1/p' /etc/opkg.conf 2>/dev/null | head -n1)
+        [ -n "$_ple_dir" ] || _ple_dir=/var/opkg-lists
+    fi
+    [ -f "$_ple_dir/pkgcache_Packages" ] && return 0
+    _pkgcache_lists
+}
+
+# 从本地包库装回一个包。成功返回 0。两条路，都刻意避开「源签名」和「联网」：
+#
+# ① 绝对路径直装 —— opkg 把本地 ipk 当文件处理，不走源、不读索引签名、不联网。
+#    固件里的依赖通常齐（包是被单独卸掉的），一步就够，也是绝大多数情形。
+#
+# ② 走本地源装 —— 只有依赖也缺时才需要（让 opkg 自己解依赖）。这条路必须加
+#    --no-check-signature：本机 /etc/opkg.conf 开着 option check_signature，
+#    而本地 file:// 源不可能带 Packages.sig（那是官方源用 usign 私钥签的），
+#    不跳过就是 signature verification failed，一个包都装不上。
+#    参数支持与否先探测一次；老版本 opkg 没这开关就不带，别为个参数把整条路堵死。
+_PKG_SIGOPT=""
 _pkgcache_install() {
     _pci_pkg="$1"
     _pkgcache_ready || return 1
@@ -813,9 +837,32 @@ _pkgcache_install() {
     if "$OPKG_BIN" list-installed 2>/dev/null | grep -q "^$_pci_pkg "; then
         return 0
     fi
+    # ① 绝对路径直装。用 ls 匹配而不是猜文件名：版本号里带 r 修订，猜不准
+    _pci_ipk=$(ls "$_PKG_CACHE_ACT/${_pci_pkg}"_*.ipk 2>/dev/null | head -n1)
+    if [ -n "$_pci_ipk" ]; then
+        if "$OPKG_BIN" install --force-reinstall "$_pci_ipk" >/dev/null 2>&1; then
+            log "[PKG] 本地 ipk 直装成功：$_pci_pkg（记账正确，LuCI 可见）"
+            return 0
+        fi
+        log "[PKG] 本地 ipk 直装失败（依赖缺失？）：$_pci_pkg，改走本地源"
+    fi
+    # ② 走本地源，依赖由 opkg 自己解
     _pkgcache_feed_ensure || return 1
-    _pkgcache_lists || log "[PKG] 本地索引铺设失败，改用 opkg update 拉取"
-    if "$OPKG_BIN" install --force-reinstall "$_pci_pkg" >/dev/null 2>&1; then
+    _pkgcache_lists_ensure || log "[PKG] 本地索引铺设失败，改用 opkg update 拉取"
+    if [ -z "$_PKG_SIGOPT" ]; then
+        if "$OPKG_BIN" --help 2>&1 | grep -q 'no-check-signature'; then
+            _PKG_SIGOPT="--no-check-signature"
+        else
+            _PKG_SIGOPT="unsupported"
+        fi
+    fi
+    _pci_rc=0
+    if [ "$_PKG_SIGOPT" = "unsupported" ]; then
+        "$OPKG_BIN" install --force-reinstall "$_pci_pkg" >/dev/null 2>&1 || _pci_rc=1
+    else
+        "$OPKG_BIN" "$_PKG_SIGOPT" install --force-reinstall "$_pci_pkg" >/dev/null 2>&1 || _pci_rc=1
+    fi
+    if [ "$_pci_rc" = "0" ]; then
         log "[PKG] 本地包源装回成功：$_pci_pkg（记账正确，LuCI 可见）"
         return 0
     fi

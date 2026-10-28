@@ -469,6 +469,17 @@ if [ -n "$_AK_BIN" ]; then
     fi
 fi
 
+# --- manifest.txt：pkg-cache-restore.sh --all 的比对基准 ---
+# apk 文件名是 <包名>-<版本>.apk，版本一定以数字开头，所以从「-数字」处截断。
+# 不能按最后一段截：lxc-auto-6.0.5-r1.apk 的包名自己带连字符。
+# 不含容器内组件的原因同 24 版：crowdsec 跑在 LXC 容器里，宿主机没有这个包。
+_ak_man=$(ls "$_AK_DIR"/*.apk 2>/dev/null \
+    | sed -E 's#.*/##; s/\.apk$//; s/-[0-9][0-9A-Za-z._-]*$//' \
+    | grep -v '^$' | sort -u)
+printf '%s\n' "$_ak_man" > "$_AK_DIR/manifest.txt"
+_ak_mn=$(printf '%s\n' "$_ak_man" | grep -c .)
+echo "==> [apk-cache] manifest.txt：$_ak_mn 个包名（供 restore --all 比对）"
+
 ls "$_AK_DIR" | head -n 20
 
 # ---- 第二遍：把包库打进 rootfs ----

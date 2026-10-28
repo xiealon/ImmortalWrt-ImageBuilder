@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-28.180.129"
+SCRIPT_VER="2026-10-28.180.130"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -728,7 +728,33 @@ PKGROOT="${PKGROOT:-}"
 #   · conffiles 由包管理器恢复 —— 正是 v.180.124 那次 smartdns 事故的根因
 #     （拷文件那套对 conffiles 一律 continue，缺了永远补不上）。
 # 拷文件那套保留当兜底：opkg 因签名/源问题失败时仍然能把文件补回去。
-PKG_CACHE="${PKG_CACHE:-/root/pkg-cache}"
+# 【v.180.130】一份脚本同时服务 24.10(opkg) 与 25.12(apk)。
+# 25.12 起 OpenWrt 全面换成 apk：包是 .apk、索引是 packages.adb、命令行是 apk，
+# 和 opkg 那套（.ipk / Packages 纯文本 / opkg）没有任何兼容性。但「被卸的包用
+# 固件自带的装回来」两条线是同一个需求，所以不拆成两份脚本 —— 只在这里分流一次，
+# 其余逻辑（/rom 优先解析、死源清理、guard/probe 守护）完全共用，改一处两边都受益。
+_PKG_MGR=""
+if command -v apk >/dev/null 2>&1; then
+    _PKG_MGR="apk"
+elif command -v opkg >/dev/null 2>&1; then
+    _PKG_MGR="opkg"
+fi
+case "$_PKG_MGR" in
+apk)
+    _PKG_DEF_OV=/root/apk-cache
+    _PKG_DEF_RO=/rom/root/apk-cache
+    _PKG_IDX=packages.adb
+    _PKG_EXT=apk
+    ;;
+*)
+    _PKG_DEF_OV=/root/pkg-cache
+    _PKG_DEF_RO=/rom/root/pkg-cache
+    _PKG_IDX=Packages
+    _PKG_EXT=ipk
+    ;;
+esac
+
+PKG_CACHE="${PKG_CACHE:-$_PKG_DEF_OV}"
 # 【v.180.128】只读基座副本，解析时优先于 overlay。
 # 构建时 ipk 收在 files/root/pkg-cache/，铺进镜像后就在 squashfs 里，
 # 刷机后是 /rom/root/pkg-cache。而 /root/pkg-cache 走的是 overlay 合并视图：
@@ -738,7 +764,7 @@ PKG_CACHE="${PKG_CACHE:-/root/pkg-cache}"
 #   · 删不掉：whiteout 只遮 overlay 路径，遮不住 /rom 挂载点本身；
 #   · 不占 overlay：2G 分区里这几百兆很贵，包里不该再存一份；
 #   · 同版：不会出现「overlay 里是旧固件留下的旧 ipk」这种跨版本混装。
-PKG_CACHE_RO="${PKG_CACHE_RO:-/rom/root/pkg-cache}"
+PKG_CACHE_RO="${PKG_CACHE_RO:-$_PKG_DEF_RO}"
 _PKG_CACHE_ACT=""
 
 # 解析实际可用的包库目录到 _PKG_CACHE_ACT；两处都不可用返回 1。
@@ -746,7 +772,7 @@ _PKG_CACHE_ACT=""
 _pkgcache_resolve() {
     for _pr_d in "$PKG_CACHE_RO" "$PKG_CACHE"; do
         [ -n "$_pr_d" ] || continue
-        [ -f "$_pr_d/Packages" ] || continue
+        [ -f "$_pr_d/$_PKG_IDX" ] || continue
         _PKG_CACHE_ACT="$_pr_d"
         return 0
     done
@@ -756,7 +782,7 @@ _pkgcache_resolve() {
 
 _pkgcache_ready() {
     _pkgcache_resolve || return 1
-    ls "$_PKG_CACHE_ACT"/*.ipk >/dev/null 2>&1 || return 1
+    ls "$_PKG_CACHE_ACT"/*."$_PKG_EXT" >/dev/null 2>&1 || return 1
     return 0
 }
 
@@ -769,6 +795,28 @@ _pkgcache_ready() {
 # 当前真正可用的目录。
 _pkgcache_feed_ensure() {
     _pkgcache_resolve || return 1
+    # apk 的源列表是 /etc/apk/repositories，一行一个 URL，没有 "src/gz 名字" 前缀。
+    # 清理只删自己那条（以 file:// 开头且含 apk-cache 的整行），别动官方源。
+    if [ "$_PKG_MGR" = "apk" ]; then
+        _pcf_conf="${PKG_CACHE_CONF:-/etc/apk/repositories}"
+        _pcf_dir="${_pcf_conf%/*}"
+        _pcf_tmp="$_pcf_conf.tmp.$$"
+        mkdir -p "$_pcf_dir" 2>/dev/null
+        if [ -f "$_pcf_conf" ]; then
+            # 只认「目录名以 apk-cache / pkg-cache 结尾」的 file:// 行：
+            # 不靠路径里出现字样（PKG_CACHE 一改路径就会漏删、越挂越多），
+            # 也不无脑删所有 file://（用户自己挂 /mnt/usb/pkgs 那种源不该被清）。
+            grep -vE '^file://.*/(apk|pkg)-cache/?$' "$_pcf_conf" > "$_pcf_tmp" 2>/dev/null
+            [ -f "$_pcf_tmp" ] || return 1
+        else
+            : > "$_pcf_tmp" 2>/dev/null || return 1
+        fi
+        printf 'file://%s\n' "$_PKG_CACHE_ACT" >> "$_pcf_tmp" 2>/dev/null || return 1
+        cat "$_pcf_tmp" > "$_pcf_conf" 2>/dev/null || { rm -f "$_pcf_tmp"; return 1; }
+        rm -f "$_pcf_tmp"
+        log "[PKG] 已挂载本地 apk 源：file://$_PKG_CACHE_ACT"
+        return 0
+    fi
     # PKG_CACHE_CONF 只给夹具用：生产环境为空，写的仍是 /etc/opkg/customfeeds.conf
     _pcf_conf="${PKG_CACHE_CONF:-/etc/opkg/customfeeds.conf}"
     _pcf_dir="${_pcf_conf%/*}"
@@ -791,6 +839,9 @@ _pkgcache_feed_ensure() {
 # 让 opkg 认识这个源。优先直接铺索引到 lists 目录 —— opkg update 会去连所有
 # 远程源，离线时白等几十秒，而本地索引根本不需要联网。
 _pkgcache_lists() {
+    # apk 不需要铺索引：它直接读源目录里的 packages.adb，没有 opkg 那种
+    # /var/opkg-lists 中间层，也就不存在「被 opkg update 清掉」的问题。
+    [ "$_PKG_MGR" = "apk" ] && return 0
     # PKG_CACHE_LISTS 只给夹具用：生产环境为空，仍按 /etc/opkg.conf 的 lists_dir 走
     if [ -n "${PKG_CACHE_LISTS:-}" ]; then
         _pcl_dir="$PKG_CACHE_LISTS"
@@ -808,6 +859,7 @@ _pkgcache_lists() {
 # 而 opkg update 会把本地 file:// 源判为「签名缺失」直接丢弃该源的索引。
 # 所以每轮检查一次，缺了就从包库重新铺 —— 成本是一次 cp，换的是「永远可用」。
 _pkgcache_lists_ensure() {
+    [ "$_PKG_MGR" = "apk" ] && return 0
     if [ -n "${PKG_CACHE_LISTS:-}" ]; then
         _ple_dir="$PKG_CACHE_LISTS"
     else
@@ -829,7 +881,45 @@ _pkgcache_lists_ensure() {
 #    不跳过就是 signature verification failed，一个包都装不上。
 #    参数支持与否先探测一次；老版本 opkg 没这开关就不带，别为个参数把整条路堵死。
 _PKG_SIGOPT=""
+
+# apk 侧装回。与 opkg 侧最大的区别是 --no-network：
+# 它把「这次操作会不会联网」变成显式约束，而不是靠「不跑 update」间接保证。
+# 两种包管理器的记账位置也不同（apk 写 /etc/apk/world），但对外效果一样：
+# 包管理器认这个包是装着的，LuCI 软件包页面看得见。
+_pkgcache_install_apk() {
+    _pci_pkg="$1"
+    _pkgcache_ready || return 1
+    command -v apk >/dev/null 2>&1 || return 1
+    # 已装就跳过：没坏的东西不该重装一遍
+    if apk info -e "$_pci_pkg" >/dev/null 2>&1; then
+        return 0
+    fi
+    # ① 绝对路径直装。glob 用 [0-9] 卡住版本号起点：
+    #    lxc-6.0.5-r1.apk 能命中，lxc-attach-6.0.5-r1.apk 不会误命中
+    _pci_apk=$(ls "$_PKG_CACHE_ACT/${_pci_pkg}"-[0-9]*.apk 2>/dev/null | head -n1)
+    if [ -n "$_pci_apk" ]; then
+        if apk add --allow-untrusted --no-network "$_pci_apk" >/dev/null 2>&1; then
+            log "[PKG] 本地 apk 直装成功：$_pci_pkg（/etc/apk/world 记账正确，LuCI 可见）"
+            return 0
+        fi
+        log "[PKG] 本地 apk 直装失败（依赖缺失？）：$_pci_pkg，改走本地源"
+    fi
+    # ② 走本地 apk 源，依赖由 apk 自己解
+    _pkgcache_feed_ensure || return 1
+    if apk add --allow-untrusted --no-network \
+            --repository "file://$_PKG_CACHE_ACT" "$_pci_pkg" >/dev/null 2>&1; then
+        log "[PKG] 本地 apk 源装回成功：$_pci_pkg"
+        return 0
+    fi
+    log "[PKG] 本地 apk 源装不回 $_pci_pkg，回退 /rom 拷文件"
+    return 1
+}
+
 _pkgcache_install() {
+    if [ "$_PKG_MGR" = "apk" ]; then
+        _pkgcache_install_apk "$1"
+        return $?
+    fi
     _pci_pkg="$1"
     _pkgcache_ready || return 1
     command -v "$OPKG_BIN" >/dev/null 2>&1 || return 1
@@ -841,7 +931,7 @@ _pkgcache_install() {
     _pci_ipk=$(ls "$_PKG_CACHE_ACT/${_pci_pkg}"_*.ipk 2>/dev/null | head -n1)
     if [ -n "$_pci_ipk" ]; then
         if "$OPKG_BIN" install --force-reinstall "$_pci_ipk" >/dev/null 2>&1; then
-            log "[PKG] 本地 ipk 直装成功：$_pci_pkg（记账正确，LuCI 可见）"
+            log "[PKG] 本地 ipk 直装成功：$_pci_pkg（opkg 记账正确，LuCI 可见）"
             return 0
         fi
         log "[PKG] 本地 ipk 直装失败（依赖缺失？）：$_pci_pkg，改走本地源"

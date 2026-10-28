@@ -3,13 +3,17 @@
 # crowdsec-lxc-bootstrap（旁路由版）
 # 适用拓扑：单臂旁路由——所有物理网口桥进 br-lan，WAN/WAN6 一律禁用，
 #   出口走上游网关，本机不拨号、不跑 DHCP 服务（lan.ignore=1）。
-# 十一组链：NETBASE → INSTALL → PREP → CAPIBLOCK → BOOT → LOGCONF → LAPI →
-#   BOUNCERVERIFY → DEPS → SMARTCHK → ENROLL（顺序由 GROUP_SEQ 决定），
+# 八组链：NETBASE → INSTALL → PREP → CAPIBLOCK → BOOT → LOGCONF → LAPI →
+#   BOUNCERVERIFY → ENROLL（顺序由 GROUP_SEQ 决定），
 #   每组执行前校验所有前置组已置位，全通才置位，失败不置位。
 #   唯一真实的硬顺序：NETBASE → INSTALL + PREP → CAPIBLOCK → BOOT →
-#   (LOGCONF | LAPI) → BOUNCERVERIFY → DEPS → SMARTCHK → ENROLL
+#   (LOGCONF | LAPI) → BOUNCERVERIFY → ENROLL
 #   （config.yaml / acquis / resolv.conf / 网络文件都是 crowdsec 与 systemd 启动时读一次，
 #     所以「改静态配置」必须排在开机之前；LOGCONF 与 LAPI 之间没有依赖）。
+# 【职责边界 v.180.157】本脚本只做六件事：网络配置（含防火墙）、网桥配置、
+#   容器网络配置、lxc 与 bouncer 恢复、crowdsec 容器恢复、crowdsec 与 bouncer 的本地联动配置。
+#   smartdns 整套移出 —— 恢复 / 配置 / 状态验证归 pkg-restore-smartdns.sh
+#   （--config / --repair）与 crowdsec-lxc-probe.sh，本脚本一行都不碰。
 # 【网络侧：验证 + 修改】v.95 起，网络/防火墙节点不再"只验不写"：verify 不符就 build 改回来，
 #   然后 uci commit + 按组 reload 让改动真正生效（commit 只落盘，reload 才生效）。
 #   不设回滚：改完复核仍不过 → ensure 判 hard，引导终止。
@@ -18,12 +22,8 @@
 #   脚本会写的东西（按配置面分）：
 #     · /etc/config/network   桥端口 / lan 静态地址 / 删 wan+wan6 段 / lxcbr0 段与地址
 #     · /etc/config/dhcp      lan.ignore（关 DHCP / RA / authoritative）
-#                             + 所有 dnsmasq 段 port=0（DNS 让给 smartdns）+ bind_device=0（全接口监听）
-#     · 必备组件            lxc / smartdns：NETBASE 里只配不装；缺的收在末尾 DEPS 节点，
-#                             先探网络（网关/公网/DNS），通了才 apk/opkg 安装，装完立刻把
-#                             smartdns 配好；不通只记日志，下次引导重试（柔性，不中止）
-#     · /etc/config/smartdns  主段 enabled/port=53/cache_size/serve_expired/prefetch_domain；13 个上游
-#                             （国内 9 UDP 走 Cn 组、境外 4 DoT 走 Out 组）
+#     · 必备组件            lxc：pkg_base 只判不装，缺则从只读基座 /rom 装回
+#                             （不联网：包在 /rom/root/pkg-cache，走 file:// 本地源）
 #     · /etc/config/firewall  lxc zone + 3 条 forwarding / wan·lan input / SNAT /
 #                             docker zone + 3 条 rule（仅装了 dockerd 时）
 #     · /proc/sys/net/ipv4/ip_forward  置 1（写完必须回读，读不回来判失败）
@@ -143,7 +143,7 @@ L3_GAP="${CS_BOOTSTRAP_L3_GAP:-21600}"
 #   【v.108.49】enroll 加进来：它是「网站侧人工 Accept」这一段外部流程，本地只能
 #   把注册码交上去，是否 authenticated 由用户在 console 里点确认决定。注册码错的
 #   时候不该让整轮引导死掉、连 installed 都不写（那会让探针每 5 分钟重跑全量）。
-SOFT_NODES="${CS_BOOTSTRAP_SOFT_NODES:-bouncer_verify enroll deps}"
+SOFT_NODES="${CS_BOOTSTRAP_SOFT_NODES:-bouncer_verify enroll}"
 # 【v.108.33】本轮 build 过的节点（flush 清脏标记前记一笔），收尾复核要用。
 _built_nodes=""
 _BS_FIRST_RUN=0
@@ -1081,43 +1081,7 @@ _preflight() {
     return 0
 }
 
-# luci-app-smartdns 界面是否可用（v.180.116）。
-# 与 _smartdns_installed 的区别在于「缺了之后谁承压」：
-#   · smartdns 本体是功能闸门 —— 缺了整轮引导就该停，走 _pkg_missing_all；
-#   · 界面只是可看可点 —— 脚本一行都不依赖它（只用 uci + /usr/sbin/smartdns + init.d），
-#     所以进不了 _pkg_missing_all，否则「界面被卸」会把 pkg_base 判成硬失败、
-#     经 _structurally_broken 一路把引导带走，代价和收益完全不成比例。
-# 判据取向（关键）：
-#   · 固件压根没编界面（$ROMDIR 里没有安装清单）→ 算「本来就没有」，返回 0，
-#     不判缺、不尝试恢复、不报警。老固件（如 2026-04-22 那版）就是这个情形，
-#     换成新固件之前本函数必须静默通过，否则每轮都白恢复一次。
-#   · 固件编了、现在没了 → 返回 1，交给 build_pkg_base 第 ③ 段从只读基座补回。
-# 两个文件一起判：menu.d 决定菜单出不出现，smartdns-call 是界面按钮的实际后端，
-# 少任何一个界面都是残的（能点开、点了没反应，比没菜单更误导）。
-# 路径带 $PKGROOT 前缀：生产环境它为空串（判的就是真实 /usr/...），
-# 只在 tests/luci_restore.sh 里被替换成临时目录 —— 否则「界面缺失」这种情形
-# 没法在不动真机的前提下复现。
-_luci_smartdns_ok() {
-    if [ -f "$PKGROOT/usr/share/luci/menu.d/luci-app-smartdns.json" ] \
-       && [ -f "$PKGROOT/usr/libexec/smartdns-call" ]; then
-        return 0
-    fi
-    [ -f "$ROMDIR/usr/lib/opkg/info/luci-app-smartdns.list" ] || return 0
-    return 1
-}
 
-# smartdns 是否真在位：二进制 + init 脚本缺一不可（少了 init 就没法启停，等于没装）
-# 【v.180.105】同 lxc 一样加冒烟：opkg remove libopenssl3 之后两个 -x 判断依然为真，
-# 只有真跑才看得见动态库缺口。取向也一致 —— 只有明确的加载错误才判「不在位」；
-# 参数不被认、输出为空等一律当作在位，绝不因为冒烟把整轮引导拖下水。
-_smartdns_installed() {
-    [ -x /usr/sbin/smartdns ] && [ -x /etc/init.d/smartdns ] || return 1
-    case "$(/usr/sbin/smartdns -v 2>&1)" in
-        *"Error loading"*|*"No such file"*|*"not found"*|*"cannot open shared object"*)
-            return 1 ;;
-    esac
-    return 0
-}
 
 # 必备组件缺哪些（lxc 五件套）：全在返回 0；否则返回 1，缺失清单留在 _LXC_MISSING。
 # 【v.180.112】只管 lxc，不含 smartdns —— 后者见 _smartdns_installed。
@@ -1150,139 +1114,20 @@ _lxc_missing_deps() {
     [ -z "$_LXC_MISSING" ]
 }
 
-# 必备组件总闸门（v.180.102）：lxc 五件套 + smartdns，全齐返回 0；否则返回 1，
-# 合并清单留在 _PKG_MISSING（如 "lxc-ls smartdns"）。只读不写，verify / build 共用。
-# 为什么合成一个函数而不是在两个地方各判一次：
-#   pkg_base 是 Ⅱ 阶段的唯一判据，它要回答的是「这台机器的固件到底合不合规」——
-#   只答一半会让「lxc 齐了但 smartdns 没了」的机器一路跑到 smartdns 节点才炸，
-#   那一节点已经是 Ⅲ（配置），届时缺的是二进制而不是配置，报错会指向错误的方向。
+# 必备组件总闸门（v.180.102，v.180.157 收窄为只管 lxc）：lxc 五件套齐全返回 0，
+# 否则返回 1，缺失清单留在 _PKG_MISSING。只读不写，verify / build 共用。
+# 【v.180.157】smartdns 已整套移出 bootstrap（归 pkg-restore-smartdns.sh + 探针），
+# 本闸门恢复成「只守 lxc」—— 它的全部意义就是保证 pkg_base 之后容器起得来。
 _pkg_missing_all() {
     _PKG_MISSING=""
     _lxc_missing_deps || _PKG_MISSING="$_LXC_MISSING"
-    # 判据复用 _smartdns_installed（二进制 + init 两个都要可执行），不另立一套口径
-    if ! _smartdns_installed; then
-        _PKG_MISSING="${_PKG_MISSING:+$_PKG_MISSING }smartdns"
-    fi
     [ -z "$_PKG_MISSING" ]
 }
 
-# smartdns 主配置段（config smartdns）的段名；没有则回空
-_sd_main_seg() {
-    run uci -q show smartdns 2>/dev/null \
-        | sed -n 's/^smartdns\.\([^.=]*\)=smartdns$/\1/p' | head -n1
-}
 
-# 让 dnsmasq 只做 DHCP、不做 DNS：所有 dnsmasq 段写 port=0（OpenWrt 官方「禁用 DNS」写法）。
-# 幂等：已经是 0 也照写一遍，uci 不产生实际改动，可反复调用。
-# 两个调用点：① DHCP 让权节点（smartdns 已就绪时顺手让位）② smartdns 配好之后（装完即配）。
-# 段名不写死：@dnsmasq[0] 的内部名（cfg01411c 之类）重建配置就会变，一律遍历。
-_dnsmasq_release_53() {
-    _dr5_n=0
-    for _dr5_dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
-        run uci -q set "dhcp.$_dr5_dm.port=0" || return 1
-        _dr5_n=$((_dr5_n+1))
-    done
-    [ "$_dr5_n" -gt 0 ] || log "[DNS] 没有 dnsmasq 段，53 无需让出"
-    return 0
-}
 
-# smartdns 校验入口：主段（verify_smartdns_main）+ 上游表（verify_smartdns_upstream）+ dnsmasq 已让出 53
-# smartdns 校验拆成两件事：① 「服务本身」（主段 + dnsmasq 让出 53）② 「上游服务器表」。
-# 为什么要拆（v.180.92）：混在一个函数里时上游只比了 ip 和条数，type / server_group /
-# host_name 被改坏也不会重建 —— DoT 掉成明文、Cn/Out 分组失效、SNI 丢失，全是「照样能解析」
-# 的静默退化，日志里看不出来。
-verify_smartdns_main() {
-    _vsm_seg=$(_sd_main_seg)
-    [ -n "$_vsm_seg" ] || return 1
-    [ "$(run uci -q get "smartdns.$_vsm_seg.enabled" 2>/dev/null)" = "1" ] || return 1
-    [ "$(run uci -q get "smartdns.$_vsm_seg.port" 2>/dev/null)" = "53" ] || return 1
-    [ "$(run uci -q get "smartdns.$_vsm_seg.cache_size" 2>/dev/null)" = "32768" ] || return 1
-    # serve_expired / prefetch_domain：过期照回 + 后台预取，build 里写死为 1，这里必须校验，
-    # 否则设备上若是 0，verify 直接判就绪、不进 build，开关永远纠正不过来。
-    [ "$(run uci -q get "smartdns.$_vsm_seg.serve_expired" 2>/dev/null)" = "1" ] || return 1
-    [ "$(run uci -q get "smartdns.$_vsm_seg.prefetch_domain" 2>/dev/null)" = "1" ] || return 1
-    # bind_device 只认「空」或「0」：空 = init 的默认 0，等价全接口；写成 1 时 init 会生成
-    # `bind [::]:53@br-lan` + `@lo`（SO_BINDTODEVICE 只收这两张网卡），容器拿 lxcbr0 的地址
-    # 来查就被丢掉 —— 端口看着是 53，实际一半来源不可达。
-    _vsm_bd=$(run uci -q get "smartdns.$_vsm_seg.bind_device" 2>/dev/null)
-    case "$_vsm_bd" in
-        ""|0) ;;
-        *) log "[SMARTDNS] bind_device=$_vsm_bd：监听被绑到具体网卡，容器/其他网段收不到"
-           return 1 ;;
-    esac
-    return 0
-}
 
-# 上游表核对：这 13 条必须**都在，且逐项吻合**（ip / type / server_group / host_name / enabled）。
-# 只判「缺」和「错」，不判「多」—— 自己额外加的上游允许留着，不会被当成异常。
-# 缺一条或任一项不符 → 判「未就绪」→ build_smartdns_upstream 按表补齐/纠正（不动你加的那些）。
-verify_smartdns_upstream() {
-    _vsu_cnt=0
-    _vsu_dump="|"
-    # 先把现场所有 server 段打折成 "ip;type;组;host_name;enabled|" 串，后面纯字符串比对，
-    # 不再逐条 fork uci（13 段 × 5 字段只取一轮）。
-    for _vsu_s in $(run uci -q show smartdns 2>/dev/null | grep -E '=server$' | cut -d. -f2 | cut -d= -f1); do
-        _vsu_cnt=$((_vsu_cnt+1))
-        _vsu_dump="$_vsu_dump$(run uci -q get "smartdns.$_vsu_s.ip" 2>/dev/null);$(run uci -q get "smartdns.$_vsu_s.type" 2>/dev/null);$(run uci -q get "smartdns.$_vsu_s.server_group" 2>/dev/null);$(run uci -q get "smartdns.$_vsu_s.host_name" 2>/dev/null);$(run uci -q get "smartdns.$_vsu_s.enabled" 2>/dev/null)|"
-    done
-    [ "$_vsu_cnt" -ge 13 ] || return 1
-    while read -r _vsu_name _vsu_ip _vsu_tp _vsu_grp _vsu_host; do
-        [ -n "$_vsu_ip" ] || continue
-        # 表里 "-" 表示该上游不需要 SNI，对应 uci 里就不该有 host_name（get 为空串）
-        _vsu_sni=""
-        [ "$_vsu_tp" = "tls" ] && [ "$_vsu_host" != "-" ] && _vsu_sni="$_vsu_host"
-        case "$_vsu_dump" in
-            *"|$_vsu_ip;$_vsu_tp;$_vsu_grp;$_vsu_sni;1|"*) ;;
-            *) log "[SMARTDNS] 上游与表不符：$_vsu_name $_vsu_ip（期望 $_vsu_tp/$_vsu_grp/${_vsu_sni:-无SNI}，enabled=1）"
-               return 1 ;;
-        esac
-    done <<'SD_UPSTREAM_EOF'
-alidns 223.5.5.5 udp Cn -
-alidns 223.6.6.6 udp Cn -
-dnspod 119.29.29.29 udp Cn -
-baidu 180.76.76.76 udp Cn -
-360dns 101.226.4.6 udp Cn -
-360dns 218.30.118.6 udp Cn -
-360dns 123.125.81.6 udp Cn -
-360dns 140.207.198.6 udp Cn -
-cnnic 1.2.4.8 udp Cn -
-google 8.8.8.8 tls Out dns.google
-google 8.8.4.4 tls Out dns.google
-cloudflare 1.1.1.1 tls Out cloudflare-dns.com
-cloudflare 1.0.0.1 tls Out cloudflare-dns.com
-SD_UPSTREAM_EOF
-    return 0
-}
 
-verify_smartdns() {
-    # ① 固件自带 smartdns（构建期 PACKAGES 内置），本节点只负责「把配置写对」。
-    # 【v.180.100】不再「未装就放行」：缺二进制说明固件不合规，直接判未就绪，
-    # 让 build_smartdns 打出明确日志后硬失败，问题当场暴露，不拖到末尾 sd_serve。
-    _smartdns_installed || return 1
-    verify_smartdns_main || return 1
-    verify_smartdns_upstream || return 1
-    # dnsmasq 必须已经让出 53：port=0 是 OpenWrt 官方的「禁用 DNS」写法
-    for _vsd_dm in $(run uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
-        [ "$(run uci -q get "dhcp.$_vsd_dm.port" 2>/dev/null)" = "0" ] || return 1
-    done
-    # 运行态复核：uci 说 port=53 不等于真在 53 上听。init 把 uci 翻译成
-    #   /var/etc/smartdns/smartdns.conf，bind 行才是最终监听参数：
-    #       全接口 → bind [::]:53 / bind-tcp [::]:53
-    #       绑网卡 → bind [::]:53@br-lan / @lo
-    # 所以这里直接看生成物。conf 还没生成（从没启动过）时放行，交给 build 走一轮。
-    _vsd_conf=/var/etc/smartdns/smartdns.conf
-    if [ -f "$_vsd_conf" ]; then
-        run grep -qE '^bind(-tcp|-tls|-https)? ' "$_vsd_conf" 2>/dev/null || {
-            log "[SMARTDNS] 生成的 conf 里没有任何 bind 行"
-            return 1
-        }
-        if run grep -E '^bind(-tcp|-tls|-https)? ' "$_vsd_conf" 2>/dev/null | grep -q '@'; then
-            log "[SMARTDNS] conf 里 bind 带 @device（只绑具体网卡），容器/其他网段收不到"
-            return 1
-        fi
-    fi
-    return 0
-}
 
 # 探测 network.wan / network.wan6 段是否仍存在，存在则回显段名。
 # 用 uci show 而不是 uci get network.wan：后者依赖"段存在但无 option 时的返回"，
@@ -1617,271 +1462,52 @@ build_dhcp_ignore() {
     return 0
 }
 
-# smartdns 配置入口：主段（build_smartdns_main）+ 上游表（build_smartdns_upstream）+ dnsmasq 让位
-# 只写 uci 内存态，重启动作全部交给 flush_uci（commit 后重启 dnsmasq / smartdns）。
-# smartdns 配置拆成两件事：① 「服务本身」（主段）② 「上游服务器表」，dnsmasq 让位留在外层。
-# 只写 uci 内存态，重启动作全部交给 flush_uci（commit 后重启 dnsmasq / smartdns）。
-build_smartdns_main() {
-    _bsm_seg=$(_sd_main_seg)
-    if [ -z "$_bsm_seg" ]; then
-        run uci -q add smartdns >/dev/null 2>&1
-        _bsm_seg=$(_sd_main_seg)
-        [ -n "$_bsm_seg" ] || { log "[SMARTDNS] 无法创建主配置段"; return 1; }
-    fi
-    run uci -q set "smartdns.$_bsm_seg.enabled=1"
-    run uci -q set "smartdns.$_bsm_seg.port=53"
-    # bind 不是 UCI 选项：init 脚本只读 port / bind_device，历史残留的 bind 不生效，
-    # 只会让人误以为在控制监听地址，顺手清掉。
-    run uci -q delete "smartdns.$_bsm_seg.bind" 2>/dev/null
-    # 监听全部接口：init 只在 bind_device=1 时才把 bind_device_name（默认 br-lan）拼进
-    # bind 行，还额外追加 lo。设 0 后 devices 为空 → 只生成 `bind [::]:53` /
-    # `bind-tcp [::]:53`，br-lan / lxcbr0 / docker0 一律可达。
-    run uci -q set "smartdns.$_bsm_seg.bind_device=0"
-    run uci -q set "smartdns.$_bsm_seg.cache_size=32768"
-    run uci -q set "smartdns.$_bsm_seg.serve_expired=1"
-    run uci -q set "smartdns.$_bsm_seg.prefetch_domain=1"
-    return 0
-}
 
-# 上游按表补齐/纠正，不清空：逐条按 ip 定位段 —— 有就修正字段，没有就新建；
-# 同一 ip 若存在多个重复段，只保留第一个、其余删掉。你额外加的上游（ip 不在表里）原样保留。
-# 表与 verify_smartdns_upstream 里那份必须逐行一致（静态检查 S40 卡这条）。
-build_smartdns_upstream() {
-    # 先建「ip=段名」索引，避免每条都重新扫一遍 uci show（13 条 × 13 段 = 169 次 fork）
-    _sdu_map=" "
-    for _sdu_s in $(run uci -q show smartdns 2>/dev/null | grep -E '=server$' | cut -d. -f2 | cut -d= -f1); do
-        _sdu_map="$_sdu_map$(run uci -q get "smartdns.$_sdu_s.ip" 2>/dev/null)=$_sdu_s "
-    done
-    _sdu_n=0
-    while read -r _sdu_name _sdu_ip _sdu_tp _sdu_grp _sdu_host; do
-        [ -n "$_sdu_ip" ] || continue
-        _sdu_hit=""
-        _sdu_dup=""
-        for _sdu_p in $_sdu_map; do
-            [ "${_sdu_p%%=*}" = "$_sdu_ip" ] || continue
-            if [ -z "$_sdu_hit" ]; then
-                _sdu_hit=${_sdu_p#*=}
-            else
-                _sdu_dup="$_sdu_dup ${_sdu_p#*=}"
-            fi
-        done
-        for _sdu_d in $_sdu_dup; do
-            run uci -q delete "smartdns.$_sdu_d" 2>/dev/null
-        done
-        if [ -z "$_sdu_hit" ]; then
-            run uci -q add smartdns server >/dev/null 2>&1
-            _sdu_hit="@server[-1]"
-        fi
-        run uci -q set "smartdns.$_sdu_hit.enabled=1"
-        run uci -q set "smartdns.$_sdu_hit.name=$_sdu_name"
-        run uci -q set "smartdns.$_sdu_hit.ip=$_sdu_ip"
-        run uci -q set "smartdns.$_sdu_hit.type=$_sdu_tp"
-        run uci -q set "smartdns.$_sdu_hit.server_group=$_sdu_grp"
-        # DoT 必须带 SNI，否则证书主机名校验必然失败（8.8.8.8 的证书是 dns.google）
-        if [ "$_sdu_tp" = "tls" ] && [ "$_sdu_host" != "-" ]; then
-            run uci -q set "smartdns.$_sdu_hit.host_name=$_sdu_host"
-        else
-            # UDP 段不该带 SNI：历史残留的 host_name 清掉，否则 verify 会一直判不符
-            run uci -q delete "smartdns.$_sdu_hit.host_name" 2>/dev/null
-        fi
-        _sdu_n=$((_sdu_n+1))
-    done <<'SD_UPSTREAM_EOF'
-alidns 223.5.5.5 udp Cn -
-alidns 223.6.6.6 udp Cn -
-dnspod 119.29.29.29 udp Cn -
-baidu 180.76.76.76 udp Cn -
-360dns 101.226.4.6 udp Cn -
-360dns 218.30.118.6 udp Cn -
-360dns 123.125.81.6 udp Cn -
-360dns 140.207.198.6 udp Cn -
-cnnic 1.2.4.8 udp Cn -
-google 8.8.8.8 tls Out dns.google
-google 8.8.4.4 tls Out dns.google
-cloudflare 1.1.1.1 tls Out cloudflare-dns.com
-cloudflare 1.0.0.1 tls Out cloudflare-dns.com
-SD_UPSTREAM_EOF
-    [ "$_sdu_n" -eq 13 ] || { log "[SMARTDNS] 上游按表处理条数异常（$_sdu_n ≠ 13），不接管 DNS"; return 1; }
-    return 0
-}
 
-build_smartdns() {
-    # ① 配置之前先确保二进制在位：固件自带；万一被 opkg remove 遮掉了，
-    #    从只读基座拷回来（不联网、不装包、不碰 opkg 数据库），然后照常写配置。
-    # 【v.180.102】pkg_base 已把 smartdns 纳入第 1 步闸门，正常路径到这里必然在位；
-    # 这段是二次兜底（中途被手工摘掉、或本节点被单独调用时），统一走 _pkg_tool pkg-restore-smartdns.sh --pkg。
-    if ! _smartdns_installed; then
-        log "[SMARTDNS] smartdns 不在位，先试只读基座 $ROMDIR"
-        _pkg_tool pkg-restore-smartdns.sh --pkg
-        hash -r 2>/dev/null || true
-        if ! _smartdns_installed; then
-            log "[SMARTDNS] 只读基座也没有 smartdns：固件未内置该包（查 shell/custom-packages.sh 24.10 / shell/apk-custom-packages.sh 25.12 的 CUSTOM_PACKAGES）"
-            return 1
-        fi
-        log "[SMARTDNS] 已从只读基座恢复，继续写配置"
-    fi
-    # 【v.180.124】二进制在位不等于配置在位。/etc/smartdns/ 的规则文件被遮掉时，
-    # 生成的 conf 里 conf-file 指向不存在的文件，smartdns 解析失败直接退出、
-    # 进 crash loop，表现和「没装 smartdns」一模一样。所以写配置之前先补。
-    _pkg_tool pkg-restore-smartdns.sh --conf
-    build_smartdns_main || return 1
-    # 上游没铺满就不接管 DNS：此时 dnsmasq 仍留着 53，不会出现「53 让出去了却没人应答」
-    build_smartdns_upstream || return 1
-    # dnsmasq 让出 53：只关 DNS 端口，DHCP/RA 一概不碰。
-    # 与 DHCP 让权节点共用 _dnsmasq_release_53（v.180.95），这里保留调用是因为
-    # 「刚装完 smartdns」这一刻 DHCP 节点早已跑过，只能由本函数当场让位。
-    _dnsmasq_release_53 || return 1
-    log "[SMARTDNS] 已写入 13 个上游（国内 9 UDP / 境外 4 DoT），dnsmasq 退为纯 DHCP"
-    return 0
-}
 
-# ---- 必备组件收尾节点（v.180.85）：缺了就等网络好了再装，装完立刻配 ----
-# 为什么要单独一个节点、还放在最末：装机那一刻网络常常还没通，在 NETBASE 里硬装必然失败。
-# 语义是「软到达」——网络通就装并配好，不通就只记日志，下次引导自动重来。
-# 与 enroll / bouncer_verify 同一档柔性（SOFT_NODES），绝不中止引导。
-#
-# 三层探测，任一不通就算「现在不能装」：
-#   ① 网关    —— 本地链路是否通（lan 静态网关，取不到就退回默认路由的 next-hop）
-#   ② 公网 IP —— 出口/NAT 是否通（223.5.5.5 阿里 DNS 的 IP，先不依赖 DNS）
-#   ③ 域名    —— DNS 是否可用（www.baidu.com 能解析才算真通）
-# 只看退出码不看输出：busybox ping / nslookup 的文案各版本差异太大。
-_net_ready() {
-    _nr_gw=$(run uci -q get network.lan.gateway 2>/dev/null)
-    [ -n "$_nr_gw" ] || _nr_gw=$(run ip route 2>/dev/null | sed -n 's/^default via \([0-9.]*\) .*/\1/p' | head -n1)
-    if [ -n "$_nr_gw" ]; then
-        run ping -c 2 -W 2 "$_nr_gw" >/dev/null 2>&1 || return 1
-    fi
-    run ping -c 2 -W 2 223.5.5.5 >/dev/null 2>&1 || return 1
-    run nslookup www.baidu.com >/dev/null 2>&1 || return 1
-    return 0
-}
 
-# 就绪判据：lxc 与 smartdns 都在位。缺任何一个 → 未就绪，交给 build_deps 去装。
-# 【v.180.98】DEPS 退化为「纯验证」：不装包、不写配置、不做任何落地改动。
-# 位置也从「网络基线之后」挪到「容器流程与 bouncer 校验之后、enroll 之前」——
-# 它是本轮的总闸门：网络通不通、lxc 与 smartdns 到底在不在，最后一次性交代清楚，
-# 然后才允许编 enroll。装包不再由脚本负责：固件自带，pkg_base（Ⅱ 阶段）只做在位验证。
-# 【v.180.103】本节点属 Ⅴ 阶段：它判的是「现在能不能真的够到 crowdsec」，所以网络三层是主体，
-# lxc 那 5 次 command -v 只是 enroll 前的断言式兜底（见下方日志括号里的说明）。
-verify_deps() {
-    if ! _net_ready; then
-        log "[DEPS] 网络不通（网关 / 公网 IP / DNS 至少一层没过）"
-        return 1
-    fi
-    if ! _lxc_missing_deps; then
-        log "[DEPS] lxc 命令不在位：$_LXC_MISSING（pkg_base 已在 Ⅱ 阶段拦过，这里出现说明中途被摘）"
-        return 1
-    fi
-    verify_smartdns_main || { log "[DEPS] smartdns 主段配置不符"; return 1; }
-    verify_smartdns_upstream || { log "[DEPS] smartdns 上游表不符"; return 1; }
-    log "[DEPS] 网络可用、lxc 与 smartdns 均已就位、smartdns 配置吻合"
-    return 0
-}
 
-# 只验证不安装：修不了就记账（deps 在 SOFT_NODES，不中止引导），
-# enroll 因 GROUP_DEP_ENROLL=SMARTCHK 整组跳过，下次开机重来。
-build_deps() {
-    log "[DEPS] 本节点只做验证，不落地任何改动（装包 / 改配置都不在这里）"
-    log "[DEPS] 本轮 enroll 跳过，缺的项由下一次开机重试"
-    return 1
-}
 
 # ---- pkg_base：必备组件在位验证 = Ⅱ 阶段（v.180.103 起排在网络基线之后）----
-# 位置口径（用户定的五阶段）：Ⅰ 配网桥/接口/防火墙 → Ⅱ 查 lxc+smartdns（缺则从 /rom 恢复）
-#   → Ⅲ smartdns 配置 → Ⅳ crowdsec 构建 → Ⅴ 网络连通检测 + enroll。
-# 所以本节点必须在 lxc_zone / fwd_rules / snat 等网络节点之后、lxc_auto 与 smartdns 之前：
+# 位置口径：Ⅰ 配网桥/接口/防火墙 → Ⅱ 查 lxc（缺则从 /rom 恢复）→ Ⅲ crowdsec 构建 → Ⅳ enroll。
 #   · 前面：网络配置一步都不需要 lxc，把它排在链首会让「先配网」这条前提不成立；
-#   · 后面：lxc_auto 要 lxc-auto 的服务脚本，smartdns 要二进制，都得等本节点恢复完。
+#   · 后面：lxc_auto 要 lxc-auto 的服务脚本，得等本节点恢复完。
 # 包的来源只有一处：固件内置（构建期 PACKAGES 装进 /rom）。脚本不联网装包。
 # 判据是「命令/文件真能用」而不是「包名在列表里」：liblxc 在、lxc 壳在、applet 缺一个，
 # 一样跑不起来 —— 见 _lxc_missing_deps 的五件套。
-# 【v.180.102】闸门扩到 smartdns：判据 _pkg_missing_all（lxc 五件套 + smartdns 二进制/init），
-# 两项都要，缺哪项就在日志里点名哪项。
-# 【v.180.116】再叠一层 luci-app-smartdns，但**不是闸门**：它缺了本节点一样算过，
-# 只是顺手补回（见 _luci_smartdns_ok 的取向说明）。功能闸门仍然只有前两项。
+# 【v.180.157】smartdns 整套（含 luci-app-smartdns 界面）已移出 bootstrap：
+# 本节点只管 lxc。smartdns 的恢复 / 配置 / 状态验证归 pkg-restore-smartdns.sh + 探针。
 # 只读不写：本节点不装包、不写 uci、不碰容器。
 verify_pkg_base() {
-    _pkg_missing_all || return 1
-    _luci_smartdns_ok
+    _pkg_missing_all
 }
 
-# 缺件才动，缺什么补什么：lxc 走全家桶通配，smartdns 走单包递归，互不连坐。
+# 缺件才动，缺什么补什么：lxc 走全家桶通配。
 # 【v.180.150】改成走本地包安装：/rom 是只读、不可修改的可信层，包库里的 ipk/apk
 # 就是固件原样内容，opkg/apk 装出来的结果与拷文件等价，但记账同步、依赖可解。
 # 不再有「包级装不上就拷文件」这层兜底 —— 兜底只会留下能跑但半残的状态。
 build_pkg_base() {
     if _pkg_missing_all; then
-        log "[PKG] 必备组件齐备：lxc 五件套（start/stop/ls/info/attach）+ smartdns（固件自带）"
-        if ! _luci_smartdns_ok; then
-            log "[PKG] 界面 luci-app-smartdns 缺失（固件里有、现在没了）—— 单独补，不影响上面两项"
-            _pkg_tool pkg-restore-smartdns.sh --luci \
-                || log "[PKG] 只读基座里没有 luci-app-smartdns 的安装清单，界面不恢复（不影响引导）"
-        fi
+        log "[PKG] 必备组件齐备：lxc 五件套（start/stop/ls/info/attach）"
         return 0
     fi
     log "[PKG] 必备组件缺失：$_PKG_MISSING —— 先试只读基座 $ROMDIR"
-    # ① lxc：applet 是各自独立的包，必须扫 lxc-*.list 全量恢复，再补 liblxc 依赖树
+    # lxc：applet 是各自独立的包，必须扫 lxc-*.list 全量恢复，再补 liblxc 依赖树
     if ! _lxc_missing_deps; then
         _rom_restore_lxc \
             || log "[PKG] 只读基座里没有 lxc 的安装清单（$ROMDIR/usr/lib/opkg/info/lxc-*.list）"
     fi
-    # ② smartdns：二进制 + init + 依赖（libopenssl3 等）；.list 不在就没救
-    if ! _smartdns_installed; then
-        _pkg_tool pkg-restore-smartdns.sh --pkg \
-            || log "[PKG] 只读基座里没有 smartdns 的安装清单（$ROMDIR/usr/lib/opkg/info/smartdns.list）"
-    fi
-    # ③ luci-app-smartdns：界面，可选件。补不上只记一条，绝不影响本节点成败
-    if ! _luci_smartdns_ok; then
-        _pkg_tool pkg-restore-smartdns.sh --luci \
-            || log "[PKG] 只读基座里没有 luci-app-smartdns 的安装清单，界面不恢复（不影响引导）"
-    fi
     hash -r 2>/dev/null || true
     if _pkg_missing_all; then
         log "[PKG] 已从只读基座恢复，必备组件齐全"
-        _luci_smartdns_ok || log "[PKG] 提示：LuCI 界面仍未恢复（只影响网页配置，不影响引导与自愈）"
         return 0
     fi
     log "[PKG] 恢复后仍缺：$_PKG_MISSING"
-    log "[PKG] 固件未内置：查 shell/custom-packages.sh（24.10）/ shell/apk-custom-packages.sh（25.12）里的 CUSTOM_PACKAGES —— lxc 全家桶、smartdns、luci-app-smartdns 都必须随固件进 /rom"
+    log "[PKG] 固件未内置：查 shell/custom-packages.sh（24.10）/ shell/apk-custom-packages.sh（25.12）里的 CUSTOM_PACKAGES —— lxc 全家桶必须随固件进 /rom"
     return 1
 }
 
-# ---- sd_serve：smartdns 运行态验证（SMARTCHK 组，v.180.98 新增）----
-# 单独一组、排在 BOOT 与 BOUNCERVERIFY 之后：容器没起来之前谈「DNS 是否真的在服务」
-# 没有意义，口径就是「先跑完 lxc，再验证 smart」。只读不写；不通过时 build 只做
-# 「按已写好的 uci 重启一次」，绝不重装、不改配置。
-verify_sd_serve() {
-    # 【v.180.106】判据用 pidof，不用 pgrep -x：busybox 的 pgrep -x 拿 argv[0]
-    # 整串比对，进程实际是 "/usr/sbin/smartdns -f -c ..."，与 "smartdns" 不相等。
-    # 真机实测 pgrep -x 恒空、pidof 直接给 PID —— 原判据让本节点每轮必失败，
-    # SMARTCHK 永不置位，enroll 整组被跳过，crowdsec 也就是永远注册不上。
-    run pidof smartdns >/dev/null 2>&1 || {
-        log "[SMARTCHK] smartdns 进程不在"
-        return 1
-    }
-    run netstat -lnu 2>/dev/null | grep -qE ':53[[:space:]]' || {
-        log "[SMARTCHK] 53 没有在监听（UDP）"
-        return 1
-    }
-    verify_smartdns_upstream || return 1
-    if ct_running; then
-        run lxc-attach -n "$LXC_NAME" -- nslookup www.baidu.com >/dev/null 2>&1 || {
-            log "[SMARTCHK] 容器内解析失败（容器 DNS 指不到 smartdns）"
-            return 1
-        }
-        log "[SMARTCHK] 53 在服务，容器内解析正常"
-    else
-        log "[SMARTCHK] 53 在服务（容器未运行，跳过容器内解析）"
-    fi
-    return 0
-}
 
-build_sd_serve() {
-    log "[SMARTCHK] 按已写好的 uci 重启 smartdns（不重装、不改配置）"
-    run /etc/init.d/smartdns enable >/dev/null 2>&1
-    run /etc/init.d/smartdns restart >/dev/null 2>&1 || return 1
-    sleep "${SD_SETTLE:-2}"
-    return 0
-}
 
 # ---- lxc_zone：只写 zone 段 ----
 # 【v.180.115】拆开：原来 zone 与 4 条转发规则共用 build_lxc_zone_fwd，任一处不符就
@@ -1983,10 +1609,12 @@ build_lan_input() {
 # re_enroll / console_enroll_ok / 注册码保管（v.108.52 起为 _park_enroll_key）一次都没被调用过（死代码）。
 # 真机证据（24.10，2026-10-22）：/etc/config/crowdsec_enroll_key.txt 26 字节一直在，
 # 全量日志 grep 不到「已删除注册码文件」，而 cscli console status 是 not registered。
-# [v.180.91] NETBASE 组内顺序：网桥/lxc 链（bridge → lxc_zone → fwd_rules → lan_input →
-#   snat → ip_forward → lxc_auto）排在 smartdns 之前——先把容器网络铺起来，再配 DNS。
-#   dag_order 的组内次序就是取本行里同组节点的相对出现顺序。
-DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink svc_bind docker_fw pkg_base lxc_auto smartdns ct_resolv capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll deps sd_serve"
+# [v.180.157] smartdns 整套（配置 / 服务 / 验证）已移出 bootstrap：
+#   归 pkg-restore-smartdns.sh（--config / --repair）+ 探针负责。
+#   bootstrap 只保留六件事：网络配置（含防火墙）、网桥配置、容器网络配置、
+#   lxc 与 bouncer 恢复、crowdsec 容器恢复、crowdsec 与 bouncer 的本地联动配置。
+#   dag_order 的组内次序仍取本行里同组节点的相对出现顺序。
+DAG_NODES="img_migrate rootfs ct_config br_lan_ports lan_static dhcp_ignore bridge ct_net lxc_zone fwd_rules lan_input snat ip_forward cgroup_mount ct_bootlink svc_bind docker_fw pkg_base lxc_auto ct_resolv capi_block ct_boot logconf lapi_fetch bouncer_fill bouncer_verify capi_release enroll"
 
 # ---- 网络基线模式（--net-only）----
 # 适用场景：镜像没进固件（v.107.7 起不再有 Include Crowdsec 开关，容器恒内置，
@@ -2022,9 +1650,6 @@ DEP_rootfs="img_migrate"
 DEP_br_lan_ports=""
 DEP_lan_static="br_lan_ports"
 DEP_dhcp_ignore=""
-# smartdns 与 dhcp_ignore 都碰 /etc/config/dhcp，但字段不重叠（ignore/ra vs port）：
-# 谁先谁后都不冲突，故不声明相互依赖。它也不依赖 LAN 地址（监听 0.0.0.0:53）。
-DEP_smartdns=""
 DEP_bridge="lan_static"
 # ct_net / ct_bootlink / ct_resolv 写的是容器 rootfs 里的文件（10-eth0.network、
 # 自启软链、resolv.conf），显式依赖 rootfs。rootfs 属 INSTALL 组，而 INSTALL 排在
@@ -2073,21 +1698,16 @@ DEP_capi_release="bouncer_verify"
 # ---- ENROLL：console 注册（v.108.49 补的节点，之前这一组是空壳）----
 # 依赖 capi_release：capi_block 在容器启动前把 online_client 注释掉，bouncer 验证通过
 # 后由 capi_release 放回来；注册要连中央 API，必须等它放出来之后再做。
-# 【v.180.86】再加 deps 依赖：注册要连中央 API，网络必须真的通、必备组件必须齐。
-# 流程图里 enroll 就排在「检查网络」之后 —— 网络异常时 DEPS 组不置位，enroll 自动跳过。
-DEP_enroll="capi_release deps"
-# ---- DEPS：网络检查 + 必备组件补齐（v.180.85，v.180.86 提到 ENROLL 之前）----
-# 故意不依赖任何组：前置组失败了它也要跑 —— 「网络好了就把 lxc/smartdns 装上」这件事
-# 与容器流程成功与否无关。
-# 位置按流程图定：容器流程之后、enroll 之前。enroll 要靠它联网注册，所以它是 enroll 的前置；
-# 网络异常时本组不置位 → enroll 整组跳过 → 本轮就此结束（不判失败）。
-DEP_deps=""
+# 【v.180.157】DEP_enroll 不再挂 deps —— DEPS 组已随 smartdns 一起删除。
+# 注册要连中央 API、网络必须通，这一点由 enroll 自己的失败体现：它是 SOFT 节点，
+# 失败只记日志、不中止引导，下一轮自动重试。
+DEP_enroll="capi_release"
 
 # INSTALL 排第一：rootfs 解压是 ct_net / ct_bootlink / ct_resolv（写容器内文件）
 # 以及 capi_block / ct_boot 的硬前置。放在 PREP 之后时，PREP 里那些节点拿不到
 # rootfs → 失败 → hard 终止 → INSTALL 永不执行 → rootfs 永不解压（自锁）。
-GROUP_SEQ="NETBASE INSTALL PREP CAPIBLOCK BOOT LOGCONF LAPI BOUNCERVERIFY DEPS SMARTCHK ENROLL"
-GROUP_TITLE_NETBASE="网络基线（br-lan / lxcbr0 双网桥 + 防火墙 zone 与转发规则 + smartdns 接管 53），最优先执行，不依赖 rootfs"
+GROUP_SEQ="NETBASE INSTALL PREP CAPIBLOCK BOOT LOGCONF LAPI BOUNCERVERIFY ENROLL"
+GROUP_TITLE_NETBASE="网络基线（br-lan / lxcbr0 双网桥 + 防火墙 zone 与转发规则），最优先执行，不依赖 rootfs"
 GROUP_TITLE_INSTALL="安装容器（迁移校验镜像 / 解压 rootfs / 写 config）"
 GROUP_TITLE_PREP="容器启动前的全部静态准备（路由器网桥 / 容器网络 / cgroup）"
 GROUP_TITLE_CAPIBLOCK="屏蔽 CAPI（容器内 online_client 停用）"
@@ -2096,8 +1716,6 @@ GROUP_TITLE_LOGCONF="日志链路与对外监听（宿主推送 + 容器采集 +
 GROUP_TITLE_LAPI="获取 LAPI 并填入路由器 bouncer"
 GROUP_TITLE_BOUNCERVERIFY="验证 bouncer 列表生效并解开 CAPI"
 GROUP_TITLE_ENROLL="Console Enroll"
-GROUP_TITLE_DEPS="只验证不安装（网络是否通 / lxc 与 smartdns 是否就位）——排在容器流程与 bouncer 校验之后、enroll 之前；未就绪则 enroll 跳过"
-GROUP_TITLE_SMARTCHK="smartdns 运行态验证（容器跑起来之后再看 53 是否真在服务、容器内能否解析）"
 # 组间强依赖只有一条主线：容器启动前必须先备好网桥/容器网络/cgroup，
 # 启动后才有运行态可言。其余组按功能细分，依赖如实声明（不强加线性）。
 GROUP_DEP_INSTALL=""
@@ -2108,16 +1726,15 @@ GROUP_DEP_BOOT="NETBASE PREP INSTALL CAPIBLOCK"
 GROUP_DEP_LOGCONF="BOOT"
 GROUP_DEP_LAPI="BOOT"
 GROUP_DEP_BOUNCERVERIFY="LOGCONF LAPI"
-GROUP_DEP_ENROLL="SMARTCHK"
-GROUP_DEP_DEPS="BOUNCERVERIFY"
-GROUP_DEP_SMARTCHK="DEPS"
+# 【v.180.157】ENROLL 改为依赖 BOUNCERVERIFY：原先的 SMARTCHK → DEPS → ENROLL
+# 两跳链随之消失（smartdns 已移出 bootstrap，这两个组不存在了）。
+GROUP_DEP_ENROLL="BOUNCERVERIFY"
 NODE_GROUP_img_migrate=INSTALL
 NODE_GROUP_rootfs=INSTALL
 NODE_GROUP_ct_config=INSTALL
 NODE_GROUP_br_lan_ports=NETBASE
 NODE_GROUP_lan_static=NETBASE
 NODE_GROUP_dhcp_ignore=NETBASE
-NODE_GROUP_smartdns=NETBASE
 NODE_GROUP_bridge=NETBASE
 NODE_GROUP_ct_net=PREP
 NODE_GROUP_cgroup_mount=PREP
@@ -2139,9 +1756,7 @@ NODE_GROUP_bouncer_fill=LAPI
 NODE_GROUP_bouncer_verify=BOUNCERVERIFY
 NODE_GROUP_capi_release=BOUNCERVERIFY
 NODE_GROUP_enroll=ENROLL
-NODE_GROUP_deps=DEPS
 NODE_GROUP_pkg_base=NETBASE
-NODE_GROUP_sd_serve=SMARTCHK
 
 # 层级拓扑排序（v.79）：先校验「每个小步骤都对应到某个组、组间依赖不倒置」，
 # 再按 GROUP_SEQ 分段，段内 Kahn 变体迭代排序（无递归，天然检测环/缺失/跨组依赖倒置）
@@ -2538,7 +2153,7 @@ _nft_fw_report() {
 # 每组至多一次。commit 只把内存改动落到 /etc/config/*，reload 才让运行中的进程读到新值，
 # 两者必须成对：
 flush_uci() {
-    _n=0; _d=0; _f=0; _s=0
+    _n=0; _d=0; _f=0
     _fu_bad=""
     # 判「脏」即「非空」：值现在是 B:<时间戳>，不再是 1
     for _o in br_lan_ports lan_static bridge; do
@@ -2546,11 +2161,6 @@ flush_uci() {
     done
     for _o in dhcp_ignore; do
         _bs_flag_on "_dirty_$_o" && _d=1
-    done
-    # smartdns 单独一档：它要 commit 两份配置（smartdns + dhcp），还要「先让 dnsmasq
-    # 放 53、再拉 smartdns、起不来就还回去」，跟单纯的 commit+reload 不是一回事。
-    for _o in smartdns; do
-        _bs_flag_on "_dirty_$_o" && _s=1
     done
     for _o in lxc_zone fwd_rules lan_input snat docker_fw; do
         _bs_flag_on "_dirty_$_o" && _f=1
@@ -2611,38 +2221,6 @@ flush_uci() {
             _fu_bad="$_fu_bad firewall-reload"
             log "[flush] firewall 重载失败（配置已落盘，下次重载/重启仍生效）"
         fi
-    fi
-
-    # ---- smartdns：接管 53（先让 dnsmasq 退，再拉 smartdns）----
-    # 顺序不能反：dnsmasq 还占着 53 时 smartdns 绑不上。
-    # 配置全由 uci 写出（主段 port=53、13 个上游、dnsmasq port=0），不存在「起不来」
-    # 的情况，所以这里不做「绑不上 53 就把端口还给 dnsmasq」的回滚 —— 那是多余分支。
-    if [ "$_s" = 1 ]; then
-        if run uci -q commit smartdns; then
-            log "[flush] smartdns 已提交"
-        else
-            _fu_bad="$_fu_bad smartdns-commit"
-            log "[flush] smartdns 提交失败：改动只在内存里，重启即丢"
-        fi
-        if run uci -q commit dhcp; then
-            log "[flush] dhcp 已提交（dnsmasq 的 DNS 端口置 0）"
-        else
-            _fu_bad="$_fu_bad dhcp-commit"
-            log "[flush] dhcp 提交失败：改动只在内存里，重启即丢"
-        fi
-        # ① dnsmasq 先松手（给它 1 秒真正放开 53，别让 smartdns 撞端口）
-        run_svc /etc/init.d/dnsmasq restart >/dev/null 2>&1 \
-            || log "[flush] dnsmasq 重启失败"
-        sleep "${SD_RELEASE:-1}"
-        # ② 拉 smartdns，并确保开机自启（否则重启后 53 空着，整机没 DNS）
-        run /etc/init.d/smartdns enable >/dev/null 2>&1
-        run_svc /etc/init.d/smartdns restart >/dev/null 2>&1 \
-            || log "[flush] smartdns 重启失败"
-        # ③ 等服务真正把 53 接下来。删掉的是「绑不上就回滚」那段，不是这里的等待 ——
-        #    紧接着的收尾复核（_post_verify）会重放 verify_smartdns，太早读只能读到
-        #    「进程刚 fork、还没 listen」。默认 2 秒，可用 SD_SETTLE 覆盖。
-        sleep "${SD_SETTLE:-2}"
-        log "[flush] smartdns 已接管 53（dnsmasq 只剩 DHCP/RA）"
     fi
 
     # 清脏标记：把 DAG 里所有网络/服务侧节点全扫一遍，比手写清单更抗漏。
@@ -5864,7 +5442,7 @@ _sc_wait_pull() {
 
 
 # 各组节点清单（由 NODE_GROUP_* 派生，供组级 verify/build 遍历；顺序即组内声明序）
-NETBASE_NODES="br_lan_ports lan_static dhcp_ignore bridge lxc_zone fwd_rules lan_input snat ip_forward svc_bind docker_fw pkg_base lxc_auto smartdns"
+NETBASE_NODES="br_lan_ports lan_static dhcp_ignore bridge lxc_zone fwd_rules lan_input snat ip_forward svc_bind docker_fw pkg_base lxc_auto"
 PREP_NODES="ct_net cgroup_mount ct_bootlink ct_resolv"
 INSTALL_NODES="img_migrate rootfs ct_config"
 CAPIBLOCK_NODES="capi_block"
@@ -5873,8 +5451,6 @@ LOGCONF_NODES="logconf"
 LAPI_NODES="lapi_fetch bouncer_fill"
 BOUNCERVERIFY_NODES="bouncer_verify capi_release"
 ENROLL_NODES="enroll"
-DEPS_NODES="deps"
-SMARTCHK_NODES="sd_serve"
 # ---- 8 组组级 verify/build（v.93 按功能切分，组内小步骤各自 ensure）----
 # 组级 verify = 组内节点全部内容一致；组级 build = 组内节点逐个 ensure（各自两次闭环）。
 # 组与组之间只保留一条真实存在的硬顺序：静态准备/安装/屏蔽 CAPI → 启动容器 → 其余。
@@ -6057,10 +5633,6 @@ build_enroll() {
 }
 verify_ENROLL() { verify_enroll; }
 build_ENROLL() { build_enroll; }
-# DEPS：末尾的必备组件补齐（v.180.85）。与其它组不同，这里的 build 本身是柔性的
-# （网络不通/装不上都只记日志返回 0），绝不能让「组件没装上」变成整轮引导的失败。
-verify_DEPS() { verify_deps; }
-build_DEPS() { build_deps; }
 
 # 单步：verify 内容一致 → 置位跳过；否则 build 一次（不再复核）
 rg_step() {
@@ -6229,11 +5801,11 @@ main() {
         for _lx_n in $DAG_NODES; do
             case "$(eval "echo \$NODE_GROUP_$_lx_n")" in
                 NETBASE)
-                    # lxc_auto / smartdns 必须摘掉：它们要 lxc-auto 的服务脚本和
-                    # smartdns 二进制，Ⅱ 恢复成功之前跑必然失败（成功后由末段重跑完整链补上）。
+                    # lxc_auto 必须摘掉：它要 lxc-auto 的服务脚本，Ⅱ 恢复成功之前跑
+                    # 必然失败（成功后由末段重跑完整链补上）。
                     # pkg_base 必须保留 —— 它正是 Ⅱ「从 /rom 装回」的执行者，剔掉它 Ⅱ 永远没机会跑。
                     case "$_lx_n" in
-                        lxc_auto|smartdns) continue ;;
+                        lxc_auto) continue ;;
                     esac
                     _lx_dag="$_lx_dag $_lx_n"
                     ;;
@@ -6244,7 +5816,7 @@ main() {
         _lx_base=""
         for _lx_n in $NETBASE_NODES; do
             case "$_lx_n" in
-                lxc_auto|smartdns) continue ;;
+                lxc_auto) continue ;;
             esac
             _lx_base="$_lx_base $_lx_n"
         done
@@ -6356,11 +5928,10 @@ if [ "$NET_ONLY" != "1" ] && [ ! -f "$TARBALL" ] && [ ! -f "$LEGACY_TARBALL" ] \
             GROUP_SEQ="$_FULL_SEQ"
             DAG_NODES="$_FULL_DAG"
             NETBASE_NODES="$_FULL_NETBASE"
-            # deps 上一轮记的失败要抹掉，否则 enroll 会被「依赖 deps 失败」拦住；
-            # 它自己的置位也要清，重跑时重新判定。
+            # 【v.180.157】原来这里还要抹 deps 的失败/置位（enroll 曾依赖 deps）。
+            # DEPS 组已随 smartdns 移出 bootstrap，enroll 现在只依赖 BOUNCERVERIFY，
+            # 这两行成了对不存在节点的空操作，删除。
             _failed=""
-            _bs_flag_clear "_done_deps"
-            _bs_flag_clear "_dirty_deps"
             _LXC_READY=1
             dag_order
             log "[PKG] lxc 已就位：恢复完整组链，继续容器安装配置与 enroll"
@@ -6372,14 +5943,6 @@ if [ "$NET_ONLY" != "1" ] && [ ! -f "$TARBALL" ] && [ ! -f "$LEGACY_TARBALL" ] \
             log "[PKG] 本轮容器流程已跳过（lxc 仍不在位）：网络基线与本地装包已完成，下次引导继续"
             exit 0
         fi
-    fi
-
-    # 【v.180.98】DEPS 只管验证，且已挪到容器流程与 bouncer 校验之后、enroll 之前：
-    # 未置位 = 网络 / lxc / smartdns 至少一项没到位。容器该建的已经建完，
-    # 不拿它去判整轮失败（那会把「组件缺一点」记成安装失败、探针反复重跑），
-    # 只交代清楚「enroll 会被跳过」；installed 是否写由后面的 flush 与落地复核决定。
-    if ! _bs_flag_on "GSET_DEPS"; then
-        log "[DEPS] 未就绪（网络 / lxc / smartdns 至少一项不符）：本轮 enroll 跳过，下次开机重试"
     fi
 
     # 前置组（INSTALL / PREP / CAPIBLOCK / BOOT）任一未置位 → 容器内服务链无从谈起

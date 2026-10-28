@@ -728,7 +728,7 @@ PKGROOT="${PKGROOT:-}"
 #   · conffiles 由包管理器恢复 —— 正是 v.180.124 那次 smartdns 事故的根因
 #     （拷文件那套对 conffiles 一律 continue，缺了永远补不上）。
 # 装不上就明确报错，不再拷文件兜底：拷回来的包记不上账，是能跑但半残。
-# 唯一例外是 crowdsec 体系（bouncer），见 _bouncer_restore_files。
+# v.180.150 起 bootstrap 里已无任何文件恢复路径，连 bouncer 也走本地包安装。
 # 【v.180.130】一份脚本同时服务 24.10(opkg) 与 25.12(apk)。
 # 25.12 起 OpenWrt 全面换成 apk：包是 .apk、索引是 packages.adb、命令行是 apk，
 # 和 opkg 那套（.ipk / Packages 纯文本 / opkg）没有任何兼容性。但「被卸的包用
@@ -991,46 +991,15 @@ _rom_restore_pkg() {
     #   ① 拷文件修不了 opkg/apk 记账 —— 装回来的包 LuCI 看不见、依赖解不开、
     #      下次升级会乱，属于「能跑但半残」；
     #   ② 文件清单随包版本漂，判据越写越复杂，迟早出错。
-    # 拷文件只留给 _bouncer_restore_files（crowdsec 体系），理由见那里。
+    # 老固件没有本地包库时也无法恢复 —— 装不上就报错，不再补一个半残状态。
     _pkgcache_install "$1"
 }
 
-# 【v.180.149】crowdsec 体系专用的文件级恢复 —— 整个固件只剩这一处还拷文件。
-# 为什么它例外：crowdsec 本体跑在 LXC 容器里，宿主机只装 bouncer 这个附加组件
-# （它要操作宿主机的 nftables，所以在外不在内）。它既不进固件的包清单、
-# 也不该进 opkg 记账 —— 走包级会让软件包页凭空多一个东西，而它本来就该由
-# crowdsec 自己的部署流程管。除它以外（lxc 全家桶 / smartdns / LuCI 界面）
-# 一律走本地包安装，记账同步、依赖可解。
-# 递归仍限三层，libc / busybox / kernel / kmod-* 一律跳过：动它们不是恢复是砸系统。
-_bouncer_restore_files() {
-    _brf_d="${2:-0}"
-    [ "$_brf_d" -le 2 ] || return 0
-    _brf_p="$1"
-    _brf_base="$ROMDIR/usr/lib/opkg/info"
-    if [ -f "$_brf_base/$_brf_p.list" ]; then
-        while IFS= read -r _brf_f; do
-            case "$_brf_f" in
-                /etc/config/*) continue ;;
-                /?*) ;;
-                *) continue ;;
-            esac
-            [ -e "$PKGROOT$_brf_f" ] && continue
-            [ -e "$ROMDIR$_brf_f" ] || continue
-            mkdir -p "$PKGROOT${_brf_f%/*}" 2>/dev/null
-            cp -a "$ROMDIR$_brf_f" "$PKGROOT$_brf_f" 2>/dev/null
-        done < "$_brf_base/$_brf_p.list"
-    fi
-    _brf_ctl="$_brf_base/$_brf_p.control"
-    [ -f "$_brf_ctl" ] || return 0
-    for _brf_x in $(sed -n 's/^Depends:[[:space:]]*//p' "$_brf_ctl" 2>/dev/null | head -n1 | tr ',' ' '); do
-        case "$_brf_x" in
-            libc|libpthread|libgcc*|librt|libm|kernel|kmod-*|busybox*) continue ;;
-        esac
-        [ -f "$_brf_base/$_brf_x.list" ] || continue
-        _bouncer_restore_files "$_brf_x" $((_brf_d + 1))
-    done
-    return 0
-}
+# 【v.180.150】bouncer 不再单独拷文件 —— 和 lxc 一样走本地包安装。
+# /rom 是只读、不可修改的可信层，包库里的 ipk/apk 就是固件原样内容，
+# opkg install 出来的结果与拷文件完全等价，而且记账同步（LuCI 可见、依赖可解）。
+# 既然源头可信，就不需要「包级装不上再拷文件」这层兜底 —— 兜底只会制造
+# 「能跑但半残」的状态：文件在、记账没有，下次升级或卸载时出问题。
 
 # lxc 全家桶：/rom 里装了哪些 lxc-* 就恢复哪些（applet 是独立包，不会互相拉）
 _rom_restore_lxc() {
@@ -1081,20 +1050,10 @@ _rom_restore_smartdns() {
 # 所以单独开一个口子，只补 /etc/smartdns/ 下这批规则文件，判据是「不存在才补」：
 # 存在就一律不动（哪怕被用户清成 0 字节，那也是他的选择），绝不碰 /etc/config/smartdns。
 _rom_restore_smartdns_conf() {
-    # 【v.180.146】规则文件清单与判据都搬进 pkg-restore-smartdns.sh --conf。
-    if [ -x /usr/sbin/pkg-restore-smartdns.sh ]; then
-        /usr/sbin/pkg-restore-smartdns.sh --conf && return 0
-    fi
-    _rsc_n=0
-    for _rsc_f in address.conf blacklist-ip.conf custom.conf domain-block.list domain-forwarding.list; do
-        [ -e "$PKGROOT/etc/smartdns/$_rsc_f" ] && continue
-        [ -e "$ROMDIR/etc/smartdns/$_rsc_f" ] || continue
-        mkdir -p "$PKGROOT/etc/smartdns" 2>/dev/null
-        cp -a "$ROMDIR/etc/smartdns/$_rsc_f" "$PKGROOT/etc/smartdns/$_rsc_f" 2>/dev/null \
-            && _rsc_n=$((_rsc_n + 1))
-    done
-    [ "$_rsc_n" -gt 0 ] && log "[PKG] 从只读基座恢复 smartdns 规则文件：$_rsc_n 个（/etc/smartdns/）"
-    return 0
+    # 【v.180.150】内联实现已删 —— 规则文件补回只在 pkg-restore-smartdns.sh --conf 里，
+    # 那份清单和判据跟 bootstrap 没有第二份拷贝，改一处就够。
+    [ -x /usr/sbin/pkg-restore-smartdns.sh ] || return 1
+    /usr/sbin/pkg-restore-smartdns.sh --conf
 }
 
 # luci-app-smartdns 界面是否可用（v.180.116）。
@@ -1837,7 +1796,9 @@ verify_pkg_base() {
 }
 
 # 缺件才动，缺什么补什么：lxc 走全家桶通配，smartdns 走单包递归，互不连坐。
-# 全程只从 /rom 拷文件：不联网、不 opkg/apk、不碰 opkg 数据库、不覆盖 /etc/config。
+# 【v.180.150】改成走本地包安装：/rom 是只读、不可修改的可信层，包库里的 ipk/apk
+# 就是固件原样内容，opkg/apk 装出来的结果与拷文件等价，但记账同步、依赖可解。
+# 不再有「包级装不上就拷文件」这层兜底 —— 兜底只会留下能跑但半残的状态。
 build_pkg_base() {
     if _pkg_missing_all; then
         log "[PKG] 必备组件齐备：lxc 五件套（start/stop/ls/info/attach）+ smartdns（固件自带）"
@@ -3372,9 +3333,9 @@ _bouncer_missing_deps() {
 # 【v.180.115】原名 _rom_restore_bouncer 已不符实：v.180.111 之后它除了从 /rom 补回
 # 二进制，还会重建配置（_bouncer_uci_apply）、给空 api_key 重签（_bouncer_register_once）。
 # 名字改成 _bouncer_heal —— 它做的是"把这层修到能用"，而不是"拷贝文件"。
-# 从只读基座恢复 bouncer 依赖。与 _rom_restore_pkg 的唯一差别是配置那一项：
-# .list 里含 /etc/config/crowdsec，而通用逻辑对 /etc/config/* 与 conffiles 一律跳过 ——
-# 那对「用户改过配置」是对的，但对「整个文件都没了」等于不修。
+# 装回 bouncer 依赖（v.180.150 起走本地包安装，与 lxc 同一套）。配置那一项例外：
+# 包管理器恢复 conffiles 时只补「不存在」的，对「文件在但字段全错」它不修 ——
+# 而出厂版本身就是坏的，所以配置由下面 _bouncer_uci_apply 从零重建。
 # 所以这里特判：文件不存在才拷回，存在则一个字节不动（哪怕内容被改过）。
 # 【v.180.111】配置判据不再是「文件在不在」，而是「字段对不对」。
 # 与 verify_bouncer_fill 同口径（enabled / api_url / api_key 三项），但独立实现：
@@ -3390,9 +3351,10 @@ _bouncer_cfg_ok() {
     return 0
 }
 _bouncer_heal() {
-    _bouncer_restore_files crowdsec-firewall-bouncer
-    # nft 走递归：libnftables.so* 与 libnftnl11 在 Depends 里，一并补
-    _bouncer_restore_files nftables-json
+    # 走本地包安装（与 lxc 同一套）。bouncer 的 Depends 里有 libnftables.so* 与
+    # libnftnl11，opkg 走本地源时会自己解依赖，不需要在这里手写递归。
+    _rom_restore_pkg crowdsec-firewall-bouncer
+    _rom_restore_pkg nftables-json
     # 【v.180.111】配置一律重建，不再从只读基座拷出厂版。
     # 真机实测（2026-10-27）出厂版本身不可用：
     #   enabled '0' / api_key '' / api_url http://localhost:8080/ / list interface 'eth1'

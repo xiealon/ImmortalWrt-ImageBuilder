@@ -13,6 +13,7 @@
 #   pkg-restore.sh <包名>              装回（已装则跳过）
 #   pkg-restore.sh --tree <包名>       连同 Depends 递归（最多 3 层）
 #   pkg-restore.sh --lxc               lxc 全家桶（applet 是各自独立的包）
+#   pkg-restore.sh --host              宿主机侧全部：lxc 全家桶 + bouncer + nftables
 #   pkg-restore.sh --force <包名>      强制重装（记账说有、文件其实缺了）
 #   pkg-restore.sh --installed <包名>  只判记账，0=在册 1=不在册
 #
@@ -126,9 +127,20 @@ _pr_lxc() {
     return 0
 }
 
+# 宿主机侧全家桶（v.180.150）：lxc + crowdsec 的 nftables 守门人。
+# bouncer 和 lxc 一样是「宿主机该有的包」，一起走本地包安装，不再单独拷文件。
+# 它的配置不在这里管 —— 出厂版本身是坏的（enabled=0 / api_url 指向 localhost），
+# 由 bootstrap 的 _bouncer_uci_apply 从零重建。
+_pr_host() {
+    _pr_lxc || return 1
+    _pr_tree crowdsec-firewall-bouncer
+    _pr_tree nftables-json
+    return 0
+}
+
 case "${1:-}" in
 "")
-    echo "用法：$0 <包名> | --tree <包名> | --lxc | --force <包名> | --installed <包名>" >&2
+    echo "用法：$0 <包名> | --tree <包名> | --lxc | --host | --force <包名> | --installed <包名>" >&2
     exit 2
     ;;
 --installed)
@@ -142,6 +154,9 @@ case "${1:-}" in
     ;;
 --lxc)
     _pr_lxc && exit 0 || exit 1
+    ;;
+--host)
+    _pr_host && exit 0 || exit 1
     ;;
 -*)
     echo "未知选项：$1" >&2

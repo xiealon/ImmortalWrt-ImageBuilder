@@ -637,12 +637,20 @@ _pkgcache_feed_audit() {
     esac
     if command -v apk >/dev/null 2>&1; then
         _pfa_conf="$ROOT/etc/apk/repositories"
-        _pfa_pat='^file://.*/(apk|pkg)-cache/?$'
+        # 【v.180.141】apk-repositories(5) 的路径规则：一行 `file://<目录>`
+        # 属于「repository 类型」，索引位置是 $base_url/$arch/Packages.adb ——
+        # 也就是 /rom/root/apk-cache/x86_64/Packages.adb，而我们的索引是
+        # /rom/root/apk-cache/packages.adb（无 arch 子目录、小写）。目录写法的
+        # 源在真机上永远找不到索引，本地源等于不存在。
+        # `ndx <索引文件>` 才是对的：base_url = 去掉最后一段 = 包目录，
+        # 默认包路径 $base_url/$name-$version.apk 正好与我们的布局一致。
+        # 正则同时匹配旧的目录写法，否则升级后旧行删不掉，会残留两条源。
+        _pfa_pat='^(ndx[[:space:]]+)?file://.*/(apk|pkg)-cache(/packages\.adb)?/?$'
         _pfa_idx=packages.adb
         _pfa_ro="${PKG_CACHE_RO:-$ROM_DIR/root/apk-cache}"
         _pfa_ov="${PKG_CACHE:-$ROOT/root/apk-cache}"
         _pfa_what="apk 源"
-        _pfa_fmt='file://%s\n'
+        _pfa_fmt='ndx file://%s/packages.adb\n'
     else
         _pfa_conf="$ROOT/etc/opkg/customfeeds.conf"
         _pfa_pat='^src/gz[[:space:]]*pkgcache[[:space:]]'
@@ -669,7 +677,11 @@ _pkgcache_feed_audit() {
         [ -f "$_pfa_d/$_pfa_idx" ] && { _pfa_live="$_pfa_d"; break; }
     done
     # 可用目录在、且已经挂着它：零动作（刷机后的常态，一分钟一轮也不写 flash）
-    if [ -n "$_pfa_live" ] && grep -qF "file://$_pfa_live" "$_pfa_conf" 2>/dev/null; then
+    # apk 侧必须看到 <目录>/packages.adb：只写目录的旧行在真机上读不到索引，
+    # 但字面上包含 "file://<目录>"，不收紧就会被当成「已挂好」而永不纠正。
+    _pfa_need="file://$_pfa_live"
+    [ "$_pfa_idx" = "packages.adb" ] && _pfa_need="file://$_pfa_live/packages.adb"
+    if [ -n "$_pfa_live" ] && grep -qF "$_pfa_need" "$_pfa_conf" 2>/dev/null; then
         return 0
     fi
     _pfa_tmp="$_pfa_conf.tmp.$$"

@@ -301,6 +301,10 @@ if [ $? -ne 0 ]; then
 fi
 
 # ---- 第一遍之后：收关键包 ipk 到 files/root/pkg-cache/ ----
+# files/ 在下面第二遍 make image 时合进 rootfs，所以这批 ipk 最终躺在 squashfs 里，
+# 刷机后是只读的 /rom/root/pkg-cache（不是 overlay 的 /root/pkg-cache）。
+# 运行期脚本（bootstrap/guard/probe）因此按 /rom 优先解析包库目录：
+# 只读层删不掉、不占 overlay 空间、也不会出现「overlay 里是旧固件留下的旧 ipk」。
 _PC_DIR="files/root/pkg-cache"
 _PC_MISS=/tmp/pkg-cache-miss.txt
 rm -rf "$_PC_DIR"
@@ -496,7 +500,7 @@ done
 
 _pc_n=$(ls "$_PC_DIR"/*.ipk 2>/dev/null | wc -l)
 _pc_sz=$(du -sh "$_PC_DIR" | cut -f1)
-echo "==> [pkg-cache] 合计 $_pc_n 个 ipk，$_pc_sz，位于 /root/pkg-cache/"
+echo "==> [pkg-cache] 合计 $_pc_n 个 ipk，$_pc_sz，位于 /root/pkg-cache/（刷机后为只读的 /rom/root/pkg-cache）"
 if [ -n "$_pc_gap" ]; then
     echo "::warning::白名单里这些包没收到（如属第三方 run 包，看上面来源 A 的数量；如确实没有，固件里就没有可离线装回的 ipk）：$_pc_gap"
 fi
@@ -565,6 +569,8 @@ fi
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Build completed successfully."
 
 echo "==> 离线恢复示例（固件刷好后，包被别人卸载时）："
-echo "    单个包：opkg install --force-reinstall /root/pkg-cache/smartdns_*.ipk"
-echo "    整批装：opkg install --force-reinstall /root/pkg-cache/*.ipk"
-echo "    查库存：ls /root/pkg-cache/ | wc -l"
+echo "    单个包：opkg install --force-reinstall /rom/root/pkg-cache/smartdns_*.ipk"
+echo "    整批装：opkg install --force-reinstall /rom/root/pkg-cache/*.ipk"
+echo "    查库存：ls /rom/root/pkg-cache/ | wc -l"
+echo "    说明：ipk 在 squashfs 只读层（/rom）里，删不掉；装完 opkg 记账正确、LuCI 可见"
+echo "          脚本会自动把本地源写进 /etc/opkg/customfeeds.conf，不用手动 opkg update"

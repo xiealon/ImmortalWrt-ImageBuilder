@@ -2497,7 +2497,7 @@ rootfs 资产（`/etc`、`crowdsec` 二进制等），不看 DNS。
 
 ### 为什么要做这件事
 
-`tests/` 里 29 个脚本一直是**开发期工具**——构建只打包 `files/`，它们进不了固件，
+`tests/` 里那批脚本一直是**开发期工具**——构建只打包 `files/`，它们进不了固件，
 所以刷机后在路由器上没法跑任何一条验收。想核对「这台机器到底正常不正常」，
 只能把仓库拷过去。
 
@@ -2524,19 +2524,26 @@ _dir_sig() {   # 相对路径 + cksum，排序成一串
 | 只留最近一份备份 | 每轮堆一份，377 KB × N 轮能填满 flash |
 | 回读复核 | `cp -a` 返回成功 ≠ 真的在了（overlay 白out 的老问题），复完再算一次签名 |
 
-为什么不像其他文件那样逐条列进 `GUARD_FILES`：29 条要手工维护，新增一个测试就得回来补一条，早晚漏。
+为什么不像其他文件那样逐条列进 `GUARD_FILES`：二十几条要手工维护，新增一个测试就得回来补一条，早晚漏。
 
 ### 为什么分两个目录
 
 | 位置 | 内容 | 数量 |
 |---|---|---|
-| `usr/share/crowdsec-tests/` | 只读断言类，跑起来不改现场 | 23 |
-| `usr/share/crowdsec-tests/danger/` | 会写 uci 或注入损坏，动之前先看 README | 6 |
+| `usr/share/crowdsec-tests/` | 只读断言类，跑起来不改现场 | 22 |
+| `usr/share/crowdsec-tests/danger/` | 会写 uci 或注入损坏，动之前先看 README | 3 |
 
-`danger/` 里是：`probe_netsafe.sh`、`probe_v10832.sh`、`test_bp_consistency.sh`、
-`test_bp_dag.sh`、`test_bp_net.sh`、`test_bp_reset.sh`。
+`danger/` 里是：`probe_netsafe.sh`、`probe_v10832.sh`、`test_bp_reset.sh`。
 **它们在真机上跑会改 `/etc/config`、注入人为损坏**——这是设计用途（验证自愈），
 但别在生产时段手滑跑一遍。
+
+> 【v.180.162】删掉了 5 个随 A/B/C 步骤化重构失效的测试：
+> `test_bp_dag.sh`、`test_bp_consistency.sh`、`test_bp_net.sh` 断言的是
+> `verify_wan_input` / `verify_dns_domain` / `build_lxc_zone_fwd` 那批旧节点，
+> 28 节点重构后它们一个都不剩，跑起来第一步提取就空；
+> `luci_restore.sh` 断言 `_rom_restore_luci_smartdns`、`probe_last_pull_semantics.sh`
+> 断言 `_sc_wait_pull`，这两个函数随 smartdns 整棵移出 bootstrap（v.180.157）一起没了。
+> 留着只会「一直红」，红久了就没人看 —— 比没有更糟。
 
 ### 旧固件不受影响
 

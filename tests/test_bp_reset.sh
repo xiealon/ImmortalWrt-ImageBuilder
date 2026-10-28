@@ -193,14 +193,6 @@ _R11F=$(printf '%s\n' "$_R11OUT" | grep -c '^FAIL:')
 PASS=$((PASS+_R11P)); FAIL=$((FAIL+_R11F))
 [ "$_R11F" = 0 ] || echo "!! R11 有 $_R11F 条失败（详见上方）"
 
-echo "===== R12. last_pull 判定诚实性：判不了不许假装没问题 ====="
-_R12OUT=$(sh "$REPO/tests/probe_last_pull_semantics.sh" 2>&1)
-printf '%s\n' "$_R12OUT"
-_R12P=$(printf '%s\n' "$_R12OUT" | grep -c '^PASS:')
-_R12F=$(printf '%s\n' "$_R12OUT" | grep -c '^FAIL:')
-PASS=$((PASS+_R12P)); FAIL=$((FAIL+_R12F))
-[ "$_R12F" = 0 ] || echo "!! R12 有 $_R12F 条失败（详见上方）"
-
 echo "===== R4. reinstall_pending 不被清（设计如此） ====="
 eq "R4.1 _pending_report 只读不删" \
    "$(awk '/^_pending_report\(\)/,/^}/' "$BS" | grep -c 'rm -f')" "0"

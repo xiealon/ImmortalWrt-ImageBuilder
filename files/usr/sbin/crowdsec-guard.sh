@@ -105,8 +105,11 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.161"
+SCRIPT_VER="2026-10-29.180.162"
 # 【v.180.152】补进 v.180.146~151 新增的 6 个恢复脚本。
+# 【v.180.162】再加 pkg-restore-apps.sh（应用主程序恢复），共 7 个。
+# 增删恢复脚本时必须同步这张清单 —— 漏一个是「脚本自己也会被删掉」的静默失效：
+# 探针那一轮只会报「装不上」，而能把脚本补回来的东西当时已经不在了。
 # 之前只保护了 bootstrap / probe / guard 三个 crowdsec-*.sh，pkg 这套是裸奔的：
 # 被 opkg remove 连带删掉、或被手滑 rm 掉之后，探针那一轮只会报「装不上」，
 # 没有任何东西能把脚本本身补回来 —— 恰恰是这套保护最该覆盖的对象。
@@ -121,6 +124,7 @@ GUARD_FILES="${CS_GUARD_FILES:-
 /usr/sbin/crowdsec-guard.sh
 /usr/sbin/pkg-restore.sh
 /usr/sbin/pkg-restore-smartdns.sh
+/usr/sbin/pkg-restore-apps.sh
 /usr/sbin/pkg-cache-lib.sh
 /usr/sbin/pkg-cache-fix.sh
 /usr/sbin/pkg-cache-check.sh
@@ -133,9 +137,9 @@ GUARD_FILES="${CS_GUARD_FILES:-
 # repo/tests/ 在构建期被铺到 /usr/share/crowdsec-tests/（build24/25.sh 负责），
 # 刷机后 /rom 里就有同一份，于是这里能拿它当基准。
 #
-# 为什么不把这 29 个文件逐条列进 GUARD_FILES：
+# 为什么不让这批文件逐条列进 GUARD_FILES：
 #   · 新增一个测试就得回来补一条，早晚漏；
-#   · 逐文件那一套会为每个文件留一份 .user-<时间戳> 备份，29 份备份在 flash 上太浪费。
+#   · 逐文件那一套会为每个文件留一份 .user-<时间戳> 备份，几十份备份在 flash 上太浪费。
 # 整目录做一次清单比对，不一致就整目录换回，一处逻辑管到底。
 #
 # 旧固件 /rom 里没有这个目录 —— 下面循环第一行判 -d 就跳过，零动作、零日志。

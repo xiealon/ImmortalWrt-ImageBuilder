@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.161"
+SCRIPT_VER="2026-10-29.180.162"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -216,8 +216,12 @@ _dns_ok() {
 # ---- 修复一律交脚本（v.180.158）----
 # 探针只做两件事：探测 + 拉脚本。自己不动手补文件、不拼 uci ——
 # 修法只留一处（pkg-restore-smartdns.sh），避免探针和脚本两套实现慢慢漂移。
-# 这条规则对所有被观测的应用都一样：daed / ssrp / mosdns / clashoo 将来各有自己的
-# pkg-restore-<app>.sh，探针只探测 + 调它，不内联各自的修复动作。
+# 这条规则对所有被观测的应用都一样：daed / ssrp / mosdns / clashoo 由
+# pkg-restore-apps.sh 统一承担（v.180.162 落地），探针只探测 + 调它，
+# 不内联各自的修复动作。
+# 不按应用各建一支 pkg-restore-<app>.sh：smartdns 需要专用脚本是因为它还要
+# 重写主段与上游、commit、重启并等 53 口；这四个只做「装包」一件事，
+# 动作完全同构，四支脚本只会变成四份要同步维护的同一段代码。
 #
 # 探测项与覆盖关系（用户 2026-10-29 定）：
 #   · last_pull 一项覆盖三个项目：lxc 运行时、crowdsec-firewall-bouncer、
@@ -228,8 +232,9 @@ _dns_ok() {
 #     （lxc、bouncer、容器 正好是 bootstrap 六件事里的三件）。
 #   · smartdns 进程在不在（pidof）
 #   · 53/UDP 有没有人在听（netstat -lnu）
-#   其余应用（daed / ssrp / mosdns / clashoo）不搞进程/端口这一套，
-#   只判主程序有没有装 —— 它们不像 smartdns 那样接管 53，端口多维度没有意义。
+#   · 其余应用（daed / ssrp / mosdns / clashoo）只判主程序包有没有装，
+#     不搞进程/端口 —— 它们不像 smartdns 那样接管 53，端口多维度没有意义。
+#     缺了走 _apps_watch → pkg-restore-apps.sh 装回。
 #
 # 为什么不保留「补规则文件 + 重启」的快速通道：
 # 2026-10-28 那次事故的根因是 /etc/smartdns 下 5 个规则文件被遮掉，当时探针自己补文件、
@@ -354,10 +359,80 @@ _dns_watch() {
     return 0
 }
 
+# ---- 应用主程序通道（v.180.162）----
+# 用户 2026-10-29 定：daed / ssrp / mosdns / clashoo 不像 smartdns 那样接管 53，
+# 不搞进程/端口那一套，只判主程序包有没有装；缺了交 pkg-restore-apps.sh 装回。
+# 判据与「该不该有」的门槛全在脚本里（只恢复固件本来就带的那个应用），
+# 探针这边只做三件事：拉脚本问一次 → 连续 N 轮缺才动作 → 装完再问一次。
+# 修法只留一处，与 smartdns 那条通道同一个取向（v.180.158）。
+_APPS_RESTORE="${CS_PROBE_APPS_RESTORE:-/usr/sbin/pkg-restore-apps.sh}"
+
+_apps_watch() {
+    [ -x "$_APPS_RESTORE" ] || return 0
+    _aw_out="$("$_APPS_RESTORE" --check 2>&1)"
+    _aw_rc=$?
+    if [ "$_aw_rc" = "0" ]; then
+        if [ "${P_APP_BAD:-0}" -gt 0 ]; then
+            plog "【应用】主程序已全部在位（此前缺 $P_APP_BAD 轮）"
+        fi
+        P_APP_BAD=0
+        P_APP_FIX=0
+        P_HUMAN_APP=0
+        return 0
+    fi
+    # 2 = 判断不了（opkg/apk 都不在，或脚本自己跑不起来）。不计数、不动作 ——
+    # 跟「缺了」是两件事，混在一起会在老固件上刷满假告警。
+    [ "$_aw_rc" = "1" ] || return 0
+    P_APP_BAD=$((${P_APP_BAD:-0} + 1))
+    # 达到失败阈值后停手。理由同补印链路：重跑同一套装包换不来新结果，
+    # 而每轮都跑一次 opkg --force-reinstall 是实打实刷 flash。
+    if [ "${P_HUMAN_APP:-0}" = "1" ]; then
+        P_ACTION="app-need-human-hold"
+        return 0
+    fi
+    if [ "$P_APP_BAD" -lt "$PROBE_STALL_ROUNDS" ]; then
+        P_ACTION="app-warn"
+        plog "【应用】主程序缺失：$_aw_out（第 $P_APP_BAD/$PROBE_STALL_ROUNDS 轮）"
+        return 0
+    fi
+    _aw_now="$(date +%s)"
+    if [ $((_aw_now - ${P_APP_TRIG:-0})) -lt "$PROBE_COOLDOWN" ]; then
+        P_ACTION="app-cooldown"
+        plog "【应用】主程序持续缺失：$_aw_out，冷却中（剩余 $((PROBE_COOLDOWN - (_aw_now - P_APP_TRIG)))s），暂不装回"
+        return 0
+    fi
+    P_APP_TRIG="$_aw_now"
+    P_APP_BAD=0
+    P_ACTION="app-repair"
+    plog "【应用】连续 ${PROBE_STALL_ROUNDS} 轮缺失（$_aw_out），交 pkg-restore-apps.sh 装回"
+    "$_APPS_RESTORE" --repair >>"$BOOT_LOG" 2>&1
+    # 复判不看脚本退出码：装包可能 exit 0 而包其实没进记账（本地库缺该包时
+    # pkg-restore.sh 会逐包 log 失败但整体仍返回非 0；反过来也有 exit 1 而
+    # 主要应用都装回来的情况）。唯一可信的判据是再问一次 --check。
+    if _aw_out2="$("$_APPS_RESTORE" --check 2>&1)"; then
+        P_APP_BAD=0
+        P_APP_FIX=0
+        P_ACTION="app-fixed"
+        plog "【应用】装回成功，主程序已全部在位"
+        return 0
+    fi
+    P_APP_FIX=$((${P_APP_FIX:-0} + 1))
+    if [ "$P_APP_FIX" -ge "$PROBE_FAIL_ALERT" ]; then
+        P_ACTION="app-need-human"
+        P_HUMAN_APP=1
+        plog "【应用】【需人工介入】连续 $P_APP_FIX 次装不回（仍缺：$_aw_out2）。多为只读基底包库里没有该包，或包管理器记账写不进去。已停止自动重装"
+    else
+        P_ACTION="app-fix-fail"
+        plog "【应用】装回失败（仍缺：$_aw_out2，连续第 $P_APP_FIX/${PROBE_FAIL_ALERT} 次，日志见 $BOOT_LOG）"
+    fi
+    return 0
+}
+
 # ---- 可测化的一轮处理：判定 + 动作 ----
 # 全局状态（测试可直接预设/断言）：
 #   P_STALL 连续停滞轮数 / P_LAST_TRIG 上次触发时刻 / P_FAIL 连续修复失败次数
 #   P_DNS_BAD 连续 DNS 不可用轮数 / P_DNS_TRIG 上次 DNS 触发时刻 / P_DNS_FIX 连续 DNS 修复失败次数
+#   P_APP_BAD 连续主程序缺失轮数 / P_APP_TRIG 上次装回时刻 / P_APP_FIX 连续装回失败次数
 #   P_LOCK_RECLAIMED 本轮是否回收过陈旧锁 / P_ACTION 本轮动作标签
 probe_tick() {
     P_ACTION=""
@@ -462,6 +537,9 @@ probe_tick() {
     # 【v.180.117】DNS 体检必须排在 last_pull 判定之前：后者在「链路正常」时直接
     # return 0，放在它后面等于永远不执行 —— 而 DNS 挂掉恰恰是「链路照样正常」的情形。
     _dns_watch
+    # 应用主程序通道同样必须排在 last_pull 判定之前：应用被删不影响 last_pull，
+    # 放在「链路正常就 return 0」后面等于永远不执行 —— v.180.117 在 DNS 上踩过这一脚。
+    _apps_watch
     if _boot --probe-check >/dev/null 2>&1; then
         if [ "${P_STALL:-0}" -gt 0 ]; then
             plog "【恢复】last_pull 已恢复（停滞 $P_STALL 轮后）"
@@ -647,10 +725,13 @@ _probe_save() {
     # （比如 dns_fail 含 fail=、dns_human 含 human=）就会被当成旧键取走，
     # 于是「DNS 修复失败 2 次」会把 last_pull 的失败计数改成 2。
     # 所以叫 dnsfix / dnshold，不叫 dns_fail / dns_human。
-    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s human_pull=%s dnsbad=%s dnsfix=%s dnstrig=%s dnshold=%s\n' \
+    # 【v.180.162】应用通道同理：appbad / apptrig / appfix / apphold，
+    # 四个都不含旧键字面量（audit_bad= / dnstrig= / dnsfix= / dnshold=）。
+    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s human_pull=%s dnsbad=%s dnsfix=%s dnstrig=%s dnshold=%s appbad=%s apptrig=%s appfix=%s apphold=%s\n' \
         "${P_STALL:-0}" "${P_LAST_TRIG:-0}" "${P_FAIL:-0}" "${P_ACTION:-none}" "$(date +%s)" \
         "${P_ROUND:-0}" "${P_AUDIT_BAD:-0}" "${P_HUMAN:-0}" "${P_HUMAN_PULL:-0}" \
         "${P_DNS_BAD:-0}" "${P_DNS_FIX:-0}" "${P_DNS_TRIG:-0}" "${P_HUMAN_DNS:-0}" \
+        "${P_APP_BAD:-0}" "${P_APP_TRIG:-0}" "${P_APP_FIX:-0}" "${P_HUMAN_APP:-0}" \
         > "$STATE_FILE" 2>/dev/null
 }
 _probe_load() {
@@ -680,6 +761,15 @@ _probe_load() {
     [ -n "$_v" ] && P_DNS_TRIG="$_v"
     _v=$(printf '%s\n' "$_pl" | sed -n 's/.*dnshold=\([0-9][0-9]*\).*/\1/p')
     [ -n "$_v" ] && P_HUMAN_DNS="$_v"
+    # 【v.180.162】应用通道的独立计数与锁存。旧状态文件没这几个键 → 保持 0（向后兼容）。
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*appbad=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_APP_BAD="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*apptrig=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_APP_TRIG="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*appfix=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_APP_FIX="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*apphold=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_HUMAN_APP="$_v"
     return 0
 }
 
@@ -696,6 +786,11 @@ P_DNS_BAD=0
 P_DNS_FIX=0
 P_DNS_TRIG=0
 P_HUMAN_DNS=0
+# 【v.180.162】应用主程序通道（daed / ssrp / mosdns / clashoo）
+P_APP_BAD=0
+P_APP_TRIG=0
+P_APP_FIX=0
+P_HUMAN_APP=0
 DNS_WHY=""
 _probe_load
 while true; do

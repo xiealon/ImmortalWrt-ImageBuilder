@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-28.180.127"
+SCRIPT_VER="2026-10-28.180.128"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -729,34 +729,78 @@ PKGROOT="${PKGROOT:-}"
 #     （拷文件那套对 conffiles 一律 continue，缺了永远补不上）。
 # 拷文件那套保留当兜底：opkg 因签名/源问题失败时仍然能把文件补回去。
 PKG_CACHE="${PKG_CACHE:-/root/pkg-cache}"
-OPKG_BIN="${OPKG_BIN:-opkg}"
+# 【v.180.128】只读基座副本，解析时优先于 overlay。
+# 构建时 ipk 收在 files/root/pkg-cache/，铺进镜像后就在 squashfs 里，
+# 刷机后是 /rom/root/pkg-cache。而 /root/pkg-cache 走的是 overlay 合并视图：
+#   一次 `rm -rf /root/pkg-cache` 会在 overlay 写一个 whiteout，
+#   从此该路径永久读不到 —— 可 squashfs 里那份一个字节都没少。
+# 这正是「备份包明明在 /rom 里，却装不回来」的成因，所以顺序固定为 /rom 优先：
+#   · 删不掉：whiteout 只遮 overlay 路径，遮不住 /rom 挂载点本身；
+#   · 不占 overlay：2G 分区里这几百兆很贵，包里不该再存一份；
+#   · 同版：不会出现「overlay 里是旧固件留下的旧 ipk」这种跨版本混装。
+PKG_CACHE_RO="${PKG_CACHE_RO:-/rom/root/pkg-cache}"
+_PKG_CACHE_ACT=""
+
+# 解析实际可用的包库目录到 _PKG_CACHE_ACT；两处都不可用返回 1。
+# 判定用 Packages 索引而不是目录存在：空目录（被清过）照样不可用。
+_pkgcache_resolve() {
+    for _pr_d in "$PKG_CACHE_RO" "$PKG_CACHE"; do
+        [ -n "$_pr_d" ] || continue
+        [ -f "$_pr_d/Packages" ] || continue
+        _PKG_CACHE_ACT="$_pr_d"
+        return 0
+    done
+    _PKG_CACHE_ACT=""
+    return 1
+}
 
 _pkgcache_ready() {
-    [ -f "$PKG_CACHE/Packages" ] || return 1
-    ls "$PKG_CACHE"/*.ipk >/dev/null 2>&1 || return 1
+    _pkgcache_resolve || return 1
+    ls "$_PKG_CACHE_ACT"/*.ipk >/dev/null 2>&1 || return 1
     return 0
 }
 
-# 把 pkg-cache 挂成 opkg 源。幂等；已有条目就不重复写，不覆盖原有 customfeeds.conf
+# 把 pkg-cache 挂成 opkg 源。幂等 + 自清理死源。
+# 旧写法只做「没有就追加」，于是两个坑：
+#   ① 路径变了（/root → /rom）就多一条，两条同名源指两个目录；
+#   ② 目录被删后那行还在，`opkg update` 遇到不存在的 file:// 源会整体失败退出，
+#      连带把真正可用的远程源也更新不掉 —— 用户装任何包都先撞这个错。
+# 现在每次都按前缀重写这一行：其余源一个字不碰，pkgcache 行永远只有一条、且指向
+# 当前真正可用的目录。
 _pkgcache_feed_ensure() {
-    _pcf_dir=/etc/opkg
-    _pcf_conf="$_pcf_dir/customfeeds.conf"
-    if [ -f "$_pcf_conf" ] && grep -q "file://$PKG_CACHE" "$_pcf_conf" 2>/dev/null; then
-        return 0
-    fi
+    _pkgcache_resolve || return 1
+    # PKG_CACHE_CONF 只给夹具用：生产环境为空，写的仍是 /etc/opkg/customfeeds.conf
+    _pcf_conf="${PKG_CACHE_CONF:-/etc/opkg/customfeeds.conf}"
+    _pcf_dir="${_pcf_conf%/*}"
+    _pcf_tmp="$_pcf_conf.tmp.$$"
     mkdir -p "$_pcf_dir" 2>/dev/null
-    echo "src/gz pkgcache file://$PKG_CACHE" >> "$_pcf_conf" 2>/dev/null || return 1
-    log "[PKG] 已挂载本地包源：file://$PKG_CACHE"
+    if [ -f "$_pcf_conf" ]; then
+        grep -v '^src/gz[[:space:]]*pkgcache[[:space:]]' "$_pcf_conf" > "$_pcf_tmp" 2>/dev/null
+        [ -f "$_pcf_tmp" ] || return 1
+    else
+        : > "$_pcf_tmp" 2>/dev/null || return 1
+    fi
+    printf 'src/gz pkgcache file://%s\n' "$_PKG_CACHE_ACT" >> "$_pcf_tmp" 2>/dev/null || return 1
+    # 单文件 bind mount 无法 rename 覆盖（Device or resource busy），必须 cat 写回
+    cat "$_pcf_tmp" > "$_pcf_conf" 2>/dev/null || { rm -f "$_pcf_tmp"; return 1; }
+    rm -f "$_pcf_tmp"
+    log "[PKG] 已挂载本地包源：file://$_PKG_CACHE_ACT"
     return 0
 }
 
 # 让 opkg 认识这个源。优先直接铺索引到 lists 目录 —— opkg update 会去连所有
 # 远程源，离线时白等几十秒，而本地索引根本不需要联网。
 _pkgcache_lists() {
-    _pcl_dir=$(sed -n 's/^lists_dir[[:space:]]*[a-z]*[[:space:]]*\(.*\)/\1/p' /etc/opkg.conf 2>/dev/null | head -n1)
-    [ -n "$_pcl_dir" ] || _pcl_dir=/var/opkg-lists
+    # PKG_CACHE_LISTS 只给夹具用：生产环境为空，仍按 /etc/opkg.conf 的 lists_dir 走
+    if [ -n "${PKG_CACHE_LISTS:-}" ]; then
+        _pcl_dir="$PKG_CACHE_LISTS"
+    else
+        _pcl_dir=$(sed -n 's/^lists_dir[[:space:]]*[a-z]*[[:space:]]*\(.*\)/\1/p' /etc/opkg.conf 2>/dev/null | head -n1)
+        [ -n "$_pcl_dir" ] || _pcl_dir=/var/opkg-lists
+    fi
     mkdir -p "$_pcl_dir" 2>/dev/null || return 1
-    cp -f "$PKG_CACHE/Packages" "$_pcl_dir/pkgcache_Packages" 2>/dev/null || return 1
+    _pcl_src="${_PKG_CACHE_ACT:-$PKG_CACHE}"
+    cp -f "$_pcl_src/Packages" "$_pcl_dir/pkgcache_Packages" 2>/dev/null || return 1
     return 0
 }
 

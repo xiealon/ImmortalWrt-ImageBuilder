@@ -42,8 +42,43 @@ if ! pcl_feed_ok; then
     exit 1
 fi
 
+# ---- 依赖查询表 ----
+# apk 没有 lists 中转层：索引（packages.adb）直接躺在源目录里，被删就是被删，
+# 没有第二份。这里必须自己查，否则探针会一直报「一切正常」，而装包时全是
+# not available from any configured src。这段必须排在 pcl_lists_ok 之前，
+# 否则提示会变成「缺 /var/opkg-lists/pkgcache」—— apk 根本没有这个目录。
+if [ "$PKG_MGR" = "apk" ]; then
+    _pcc_adb="$PKG_CACHE_ACT/packages.adb"
+    if [ ! -f "$_pcc_adb" ]; then
+        echo "依赖查询表缺失：$_pcc_adb（$PKG_CACHE_ACT 里有 apk 但没有索引）"
+        exit 1
+    fi
+    _pcc_sz=$(wc -c < "$_pcc_adb" 2>/dev/null | tr -d ' ')
+    [ -n "$_pcc_sz" ] || _pcc_sz=0
+    # 空索引比没有更坏：apk 会把它当合法的空库，不报错、只是什么都查不到
+    if [ "$_pcc_sz" -lt 64 ]; then
+        echo "依赖查询表是空索引（${_pcc_sz} 字节）：$_pcc_adb"
+        exit 1
+    fi
+    # 魔数校验：apk 索引是 ADB 二进制库，头部固定 "ADB"（apk v3 见 ADBd）；
+    # 个别版本会整体 gzip。头部对不上说明这文件是被别的东西覆盖/拷错的，
+    # 光看字节数是看不出来的 —— 一个 500KB 的错文件同样能骗过大小检查。
+    _pcc_magic=$(od -An -tx1 -N3 "$_pcc_adb" 2>/dev/null | tr -d ' \n')
+    case "$_pcc_magic" in
+    414442 | 1f8b*) ;;
+    *)
+        echo "依赖查询表格式异常（头部=${_pcc_magic:-不可读}）：$_pcc_adb"
+        exit 1
+        ;;
+    esac
+fi
+
 if ! pcl_lists_ok; then
-    echo "索引未铺设（缺 $(pcl_lists_dir)/pkgcache）"
+    if [ "$PKG_MGR" = "apk" ]; then
+        echo "索引未铺设（缺 $PKG_CACHE_ACT/packages.adb）"
+    else
+        echo "索引未铺设（缺 $(pcl_lists_dir)/pkgcache）"
+    fi
     exit 1
 fi
 

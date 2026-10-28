@@ -288,24 +288,27 @@ _AK_DIR="files/root/apk-cache"
 rm -rf "$_AK_DIR"
 mkdir -p "$_AK_DIR"
 
-# 白名单按 25.12.2 官方索引 + run 包实解内容逐条核对过：
-#   · 官方源有：lxc 全套 35 个 / smartdns / daed / dae / mosdns / crowdsec-bouncer /
-#     v2ray-geo* / xray / sing-box / nftables-json
-#   · 官方源没有、只有 run 包有：clashoo 三件套、ssr-plus 全套、luci-app-mosdns、
-#     luci-i18n-mosdns-zh-cn、geo2txt、vmlinux-btf
-#   · 官方 25.12 已无 smartdns-ui 与 vmlinux-btf 这两个包名（前者并入 smartdns，
-#     后者内核 6.12 自带 BTF）；vmlinux-btf 只可能来自 daed 的 run 包
+# 【v.180.132】白名单按 25.12.2（本次实建 622 个包的 Installing 清单）逐条核对修正。
+# 旧版是照 24.10 抄的，有 12 个包名在 25.12 里根本不存在，白等一整轮：
+#   lxc-monitord                    → 25.12 叫 lxc-monitor（无尾 d）
+#   lxc-unprivileged / lxc-user-nic → 25.12 无此拆包，删
+#   luci-i18n-smartdns-zh-cn        → 25.12 无此 i18n 包，删
+#   dae / dae-geoip / dae-geosite / luci-app-dae / luci-i18n-dae-zh-cn
+#                                   → 25.12 全套改名 daed-*（多一个 d），旧名删
+#   crowdsec                        → 本体跑在 LXC 容器里（由 crowdsec-lxc tarball 提供，
+#                                     宿主机不需要），宿主机只装防火墙 bouncer，所以不收主包
+# 修正后 51 条，实测在 25.12.2 官方 index.json 里 51/51 全部命中；
+# xray-core 走 run 包（26.6.22，比官方 26.3.27 新，按 run 包优先原则不下官方版）。
 _AK_WANT="lxc lxc-attach lxc-auto lxc-autostart lxc-cgroup lxc-checkconfig lxc-common
 lxc-config lxc-configs lxc-console lxc-copy lxc-create lxc-destroy lxc-device
-lxc-execute lxc-freeze lxc-hooks lxc-info lxc-init lxc-ls lxc-monitor lxc-monitord
-lxc-snapshot lxc-start lxc-stop lxc-templates lxc-top lxc-unfreeze lxc-unprivileged
-lxc-unshare lxc-user-nic lxc-usernsexec lxc-wait liblxc rpcd-mod-lxc
+lxc-execute lxc-freeze lxc-hooks lxc-info lxc-init lxc-ls lxc-monitor
+lxc-snapshot lxc-start lxc-stop lxc-templates lxc-top lxc-unfreeze
+lxc-unshare lxc-usernsexec lxc-wait liblxc rpcd-mod-lxc
 luci-app-lxc luci-i18n-lxc-zh-cn
-smartdns luci-app-smartdns luci-i18n-smartdns-zh-cn
+smartdns luci-app-smartdns
 mosdns
 daed daed-geoip daed-geosite luci-app-daed luci-i18n-daed-zh-cn
-dae dae-geoip dae-geosite luci-app-dae luci-i18n-dae-zh-cn
-crowdsec crowdsec-firewall-bouncer luci-app-crowdsec-firewall-bouncer
+crowdsec-firewall-bouncer luci-app-crowdsec-firewall-bouncer
 luci-i18n-crowdsec-firewall-bouncer-zh-cn nftables-json
 v2ray-geoip v2ray-geosite xray-core xray-plugin sing-box"
 
@@ -336,14 +339,10 @@ if [ -n "$_ak_skip_btf" ]; then
     echo "::warning::已排除 $_ak_skip_btf（内核 BTF 与目标内核版本不一致；25.12 内核自带 BTF，无需此包）"
 fi
 
-# 来源 B：官方源。apk fetch --recursive 自己解依赖闭包 ——
-# 这是 apk 比 opkg 省事的地方：不用手写 BFS、不会漏，也不会把依赖装半残。
-# 同包名不同版本（run 包里的更新）会共存，apk 安装时自己选最高版本。
-#
-# 【v.180.131】apk 二进制不一定在 PATH 里：ImageBuilder 容器是 Ubuntu 底子，
-# 给 rootfs 装包用的 apk 是 ImageBuilder 自己带的那份（staging_dir/host/bin/apk），
-# 直接写 command -v apk 很可能找不到，于是官方源那部分一个包都收不到、还不报错。
-# 所以按「自带优先、PATH 兜底」探一遍，把结果固定到 _AK_BIN 后面统一用。
+# apk 二进制定位：只给最后「生成 packages.adb 索引」用，来源 B 已不依赖 apk。
+# 【v.180.131】apk 不一定在 PATH 里：ImageBuilder 容器是 Ubuntu 底子，
+# 给 rootfs 装包用的是它自带那份（staging_dir/host/bin/apk，与 grub-bios-setup 同目录）。
+# 上一轮日志已证实探测命中该路径，所以按「自带优先、PATH 兜底」探一遍固定到 _AK_BIN。
 _AK_BIN=""
 for _c in "$(pwd)/staging_dir/host/bin/apk" "$(pwd)/staging_dir/host/bin/apk.static"; do
     if [ -x "$_c" ]; then
@@ -356,30 +355,86 @@ if [ -z "$_AK_BIN" ]; then
 fi
 [ -n "$_AK_BIN" ] && echo "==> [apk-cache] apk 用：$_AK_BIN"
 
-_ak_b=0
-if [ -n "$_AK_BIN" ]; then
-    "$_AK_BIN" update >/dev/null 2>&1 || echo "::warning::apk update 失败，沿用容器里已有索引"
-    _ak_before=$(ls "$_AK_DIR" 2>/dev/null | wc -l)
-    "$_AK_BIN" fetch --recursive --output-dir "$_AK_DIR" $_AK_WANT >/tmp/apk-fetch.log 2>&1
-    _ak_rc=$?
-    _ak_after=$(ls "$_AK_DIR" 2>/dev/null | wc -l)
-    _ak_b=$((_ak_after - _ak_before))
-    echo "==> [apk-cache] 来源 B（官方源 + 递归依赖）：$_ak_b 个 apk（fetch rc=$_ak_rc）"
-    if [ "$_ak_rc" != "0" ]; then
-        echo "::warning::apk fetch 非零退出，末尾日志："
-        tail -8 /tmp/apk-fetch.log 2>/dev/null
+# 【v.180.132】来源 B：官方源官方包，用 index.json + HTTP 直下。
+# 三条实证决定了这个写法，前两版都是错的：
+#   ① 上一版想"直接读本地 packages/"——错。ImageBuilder 的 packages/ 里只有 run 包
+#      （日志里来源 A 恰好 75 个 = packages/*.apk 全量，排除 btf 后），官方 547 个包
+#      是它联网流式装进 rootfs 的，装完不落地，本地根本没有；
+#   ② 原版用 apk fetch —— 也错。apk-tools 3.0.5 的 FETCH_OPTIONS 里没有 --output-dir
+#      也没有 --recursive（只有 -o/--output、--built-after、--pkgname-spec、-s/--stdout、
+#      --url、--link），所以 rc=1；而且宿主机是 Ubuntu，没有 /etc/apk/repositories，
+#      apk update 必然失败，apk 也就无从知道有哪些包可下；
+#   ③ 官方每个 feed 目录都有 index.json，格式是 {"packages":{"包名":"完整版本"}}，
+#      文件名就是 "包名-版本.apk"。实测 lxc-6.0.5-r1 / smartdns-48.4-r1 /
+#      luci-app-daed-26.236.50544~cb5d434 等 HEAD 全部 200。
+# 所以直接取 index.json 拼文件名下载，不碰 apk 的索引/签名/宿主配置，确定性最高。
+# 版本取的就是 25.12.2 官方源当前版本，与本次 ImageBuilder 装机来源同源同日。
+_AK_BASE="${AK_BASE_OVERRIDE:-https://downloads.immortalwrt.org/releases/25.12.2}"
+_AK_FEEDS="${AK_FEEDS_OVERRIDE:-packages/x86_64/base packages/x86_64/luci packages/x86_64/packages packages/x86_64/routing packages/x86_64/telephony targets/x86/64/packages}"
+
+_AK_DL="${AK_DL_OVERRIDE:-}"
+if [ -z "$_AK_DL" ]; then
+    if command -v curl >/dev/null 2>&1; then
+        _AK_DL=curl
+    elif command -v wget >/dev/null 2>&1; then
+        _AK_DL=wget
     fi
+fi
+echo "==> [apk-cache] 下载器：${_AK_DL:-无}；源：$_AK_BASE"
+
+# $1=url $2=输出文件
+_ak_dl() {
+    case "$_AK_DL" in
+    curl) curl -fsSL --connect-timeout 20 --max-time 180 -o "$2" "$1" ;;
+    wget) wget -q -T 30 -O "$2" "$1" ;;
+    *) return 1 ;;
+    esac
+}
+
+_ak_b=0
+_ak_miss=""
+if [ -n "$_AK_DL" ]; then
+    _ak_pat=$(printf '%s' "$_AK_WANT" | tr ' ' '|')
+    for _ak_fd in $_AK_FEEDS; do
+        _ak_u="$_AK_BASE/$_ak_fd"
+        _ak_jf="/tmp/akidx.json"
+        if ! _ak_dl "$_ak_u/index.json" "$_ak_jf"; then
+            echo "::warning::取不到 $_ak_u/index.json，跳过这个 feed"
+            continue
+        fi
+        # 一次 grep 抽出白名单里所有 "<名>":"<版本>"，再逐个拼文件名
+        # index.json 实际是 "包名": "版本"（冒号后有空格），grep 要容忍空白，再统一去掉
+        for _ak_kv in $(grep -oE "\"($_ak_pat)\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$_ak_jf" 2>/dev/null | sed 's/[[:space:]]//g'); do
+            _ak_nm=$(printf '%s' "$_ak_kv" | sed 's/^"//; s/":".*$//')
+            _ak_ver=$(printf '%s' "$_ak_kv" | sed 's/^.*":"//; s/"$//')
+            [ -n "$_ak_nm" ] && [ -n "$_ak_ver" ] || continue
+            # run 包优先：packages/ 里已有的包名（比如更新的 clashoo/daed）不再下官方版
+            if ls "$_AK_DIR/$_ak_nm"-*.apk >/dev/null 2>&1; then
+                continue
+            fi
+            _ak_fn="$_ak_nm-$_ak_ver.apk"
+            if _ak_dl "$_ak_u/$_ak_fn" "$_AK_DIR/$_ak_fn"; then
+                _ak_b=$((_ak_b + 1))
+            else
+                _ak_miss="$_ak_miss $_ak_nm"
+            fi
+        done
+    done
 else
-    echo "::warning::没找到 apk 二进制（staging_dir/host/bin/apk 与 PATH 都没有），跳过官方源收包"
+    echo "::warning::容器里既没有 curl 也没有 wget，官方源这部分收不到"
+fi
+echo "==> [apk-cache] 来源 B（官方源 index.json 直下）：$_ak_b 个 apk"
+if [ -n "$_ak_miss" ]; then
+    echo "::warning::以下包在官方源上没下到（可能已改名或不在 25.12.2 源里）：$_ak_miss"
 fi
 
 _ak_n=$(ls "$_AK_DIR"/*.apk 2>/dev/null | wc -l)
 _ak_sz=$(du -sh "$_AK_DIR" 2>/dev/null | cut -f1)
 echo "==> [apk-cache] 合计 $_ak_n 个 apk，$_ak_sz，位于 /root/apk-cache/（刷机后为只读的 /rom/root/apk-cache）"
 
-if [ "$_ak_n" -le 0 ]; then
-    echo "::error::apk-cache 一个包都没收到，离线装回功能不可用"
-    echo "::error::来源 A 看 packages/*.apk；来源 B 看 /tmp/apk-fetch.log"
+if [ "$_ak_n" -lt 100 ]; then
+    echo "::error::apk-cache 只收到 $_ak_n 个包，远低于预期（run 包约 75 + 官方白名单约 49）"
+    echo "::error::来源 A 看 packages/*.apk；来源 B 看上面的 missing 列表"
     exit 1
 fi
 
@@ -389,10 +444,10 @@ fi
 # 失败不中断构建：没有索引时仍能按绝对路径单文件装（依赖齐的常态够用）。
 if [ -n "$_AK_BIN" ]; then
     _ak_rc2=0
-    ( cd "$_AK_DIR" && "$_AK_BIN" index -o packages.adb --description "offline pkg cache" ./*.apk ) \
+    ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o packages.adb ./*.apk ) \
         >/tmp/apk-index.log 2>&1 || _ak_rc2=1
     if [ "$_ak_rc2" != "0" ]; then
-        ( cd "$_AK_DIR" && "$_AK_BIN" index -o packages.adb ./*.apk ) >>/tmp/apk-index.log 2>&1 || _ak_rc2=2
+        ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o packages.adb --no-warnings ./*.apk ) >>/tmp/apk-index.log 2>&1 || _ak_rc2=2
     fi
     if [ "$_ak_rc2" != "2" ] && [ -s "$_AK_DIR/packages.adb" ]; then
         echo "==> [apk-cache] 索引已生成：$(wc -c < "$_AK_DIR/packages.adb") 字节"

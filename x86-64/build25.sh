@@ -310,12 +310,31 @@ luci-i18n-crowdsec-firewall-bouncer-zh-cn nftables-json
 v2ray-geoip v2ray-geosite xray-core xray-plugin sing-box"
 
 # 来源 A：packages/ 里 run 包解出的 apk（第三方包，官方源没有）
+#
+# 【v.180.131】vmlinux-btf 单独排除，理由是与内核强绑定且实测对不上：
+#   · 25.12.0 内核 6.12.87 / 25.12.1 内核 6.12.94 / 25.12.2 内核 6.12.103
+#   · daed 的 run 包里带的是 vmlinux-btf-6.12.79
+#   三个候选版本没有一个是 6.12.79，装上去 daed 的 eBPF 校验过不去。
+#   而且 25.12 官方源里【一个 btf 包都没有】，说明内核已自带 BTF
+#   （/sys/kernel/btf/vmlinux 由内核提供），本就不该再放一份。
+#   若将来 run 包的 btf 版本与目标内核一致，把下面的 case 去掉即可 ——
+#   这个判断不写死版本号，只按包名排除，换版本时不需要改代码。
 _ak_a=0
+_ak_skip_btf=""
 for _f in packages/*.apk; do
     [ -f "$_f" ] || continue
+    case "${_f##*/}" in
+    vmlinux-btf-*)
+        _ak_skip_btf="${_f##*/}"
+        continue
+        ;;
+    esac
     cp -f "$_f" "$_AK_DIR"/ && _ak_a=$((_ak_a + 1))
 done
 echo "==> [apk-cache] 来源 A（run 包）：$_ak_a 个 apk"
+if [ -n "$_ak_skip_btf" ]; then
+    echo "::warning::已排除 $_ak_skip_btf（内核 BTF 与目标内核版本不一致；25.12 内核自带 BTF，无需此包）"
+fi
 
 # 来源 B：官方源。apk fetch --recursive 自己解依赖闭包 ——
 # 这是 apk 比 opkg 省事的地方：不用手写 BFS、不会漏，也不会把依赖装半残。

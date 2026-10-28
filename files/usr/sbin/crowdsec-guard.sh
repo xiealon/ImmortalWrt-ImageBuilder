@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-28.180.129"
+SCRIPT_VER="2026-10-28.180.130"
 GUARD_FILES="${CS_GUARD_FILES:-
 /usr/sbin/crowdsec-lxc-bootstrap.sh
 /usr/sbin/crowdsec-lxc-probe.sh
@@ -618,35 +618,55 @@ _dir_sig() {
 # 拿 /rom 基准盖回去等于删他的源。这里只做一件不越界的事 —— 把指向已不存在目录的
 # pkgcache 行摘掉。死源会让 `opkg update` 整体报错退出，用户装任何包都先撞这个错，
 # 而错误信息只说「某个源取不到」，看不出是本机缓存目录没了。
+# 【v.180.130】两种包管理器各有一套源文件与索引名，先分流再走同一套逻辑：
+#   opkg(24.10)：/etc/opkg/customfeeds.conf 里 "src/gz pkgcache file://..." + Packages
+#   apk (25.12)：/etc/apk/repositories 里一行 "file://..."                  + packages.adb
 _pkgcache_feed_audit() {
-    _pfa_conf="$ROOT/etc/opkg/customfeeds.conf"
+    if command -v apk >/dev/null 2>&1; then
+        _pfa_conf="$ROOT/etc/apk/repositories"
+        _pfa_pat='^file://.*/(apk|pkg)-cache/?$'
+        _pfa_idx=packages.adb
+        _pfa_ro="${PKG_CACHE_RO:-$ROM_DIR/root/apk-cache}"
+        _pfa_ov="${PKG_CACHE:-$ROOT/root/apk-cache}"
+        _pfa_what="apk 源"
+        _pfa_fmt='file://%s\n'
+    else
+        _pfa_conf="$ROOT/etc/opkg/customfeeds.conf"
+        _pfa_pat='^src/gz[[:space:]]*pkgcache[[:space:]]'
+        _pfa_idx=Packages
+        _pfa_ro="${PKG_CACHE_RO:-$ROM_DIR/root/pkg-cache}"
+        _pfa_ov="${PKG_CACHE:-$ROOT/root/pkg-cache}"
+        _pfa_what="pkgcache 源"
+        _pfa_fmt='src/gz pkgcache file://%s\n'
+    fi
     [ -f "$_pfa_conf" ] || return 0
-    grep -q '^src/gz[[:space:]]*pkgcache[[:space:]]' "$_pfa_conf" 2>/dev/null || return 0
+    grep -qE "$_pfa_pat" "$_pfa_conf" 2>/dev/null || return 0
     _pfa_live=""
-    for _pfa_d in "${PKG_CACHE_RO:-$ROM_DIR/root/pkg-cache}" "${PKG_CACHE:-$ROOT/root/pkg-cache}"; do
+    for _pfa_d in "$_pfa_ro" "$_pfa_ov"; do
         [ -n "$_pfa_d" ] || continue
-        [ -f "$_pfa_d/Packages" ] && { _pfa_live="$_pfa_d"; break; }
+        [ -f "$_pfa_d/$_pfa_idx" ] && { _pfa_live="$_pfa_d"; break; }
     done
     # 可用目录在、且已经挂着它：零动作（刷机后的常态，一分钟一轮也不写 flash）
     if [ -n "$_pfa_live" ] && grep -qF "file://$_pfa_live" "$_pfa_conf" 2>/dev/null; then
         return 0
     fi
     _pfa_tmp="$_pfa_conf.tmp.$$"
-    grep -v '^src/gz[[:space:]]*pkgcache[[:space:]]' "$_pfa_conf" > "$_pfa_tmp" 2>/dev/null
+    grep -vE "$_pfa_pat" "$_pfa_conf" > "$_pfa_tmp" 2>/dev/null
     if [ ! -f "$_pfa_tmp" ]; then
         return 0
     fi
     if [ -n "$_pfa_live" ]; then
-        printf 'src/gz pkgcache file://%s\n' "$_pfa_live" >> "$_pfa_tmp" 2>/dev/null
+        # 格式跟着包管理器走：opkg 要带 "src/gz pkgcache" 前缀，apk 只要裸 URL
+        printf "$_pfa_fmt" "$_pfa_live" >> "$_pfa_tmp" 2>/dev/null
     fi
     if cat "$_pfa_tmp" > "$_pfa_conf" 2>/dev/null; then
         if [ -n "$_pfa_live" ]; then
-            _glog "【包源】customfeeds.conf 的 pkgcache 源已校正为 $_pfa_live"
+            _glog "【包源】$(basename "$_pfa_conf") 的 $_pfa_what 已校正为 $_pfa_live"
         else
-            _glog "【包源】本地包库已不可用（$ROM_DIR/root/pkg-cache 与 overlay 都没有 Packages），已摘除死源 —— 被卸的包只能用 /rom 拷文件兜底"
+            _glog "【包源】本地包库已不可用（$_pfa_ro 与 overlay 都没有 $_pfa_idx），已摘除死源 —— 被卸的包只能用 /rom 拷文件兜底"
         fi
     else
-        _glog "【包源】customfeeds.conf 校正失败（不可写）"
+        _glog "【包源】$(basename "$_pfa_conf") 校正失败（不可写）"
     fi
     rm -f "$_pfa_tmp"
     return 0

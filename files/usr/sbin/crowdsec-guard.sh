@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.157"
+SCRIPT_VER="2026-10-29.180.158"
 # 【v.180.152】补进 v.180.146~151 新增的 6 个恢复脚本。
 # 之前只保护了 bootstrap / probe / guard 三个 crowdsec-*.sh，pkg 这套是裸奔的：
 # 被 opkg remove 连带删掉、或被手滑 rm 掉之后，探针那一轮只会报「装不上」，

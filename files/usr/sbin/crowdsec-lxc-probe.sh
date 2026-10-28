@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.157"
+SCRIPT_VER="2026-10-29.180.158"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -213,70 +213,34 @@ _dns_ok() {
     return 0
 }
 
-# ---- smartdns 规则文件自愈（v.180.124）----
-# 2026-10-28 真机事故：/rom/etc/smartdns/ 里 address.conf(824B)、blacklist-ip.conf(231B)、
-# custom.conf(97B)、domain-block.list(96B)、domain-forwarding.list(106B) 全在，
-# /etc/smartdns/ 里一个都没有。smartdns 解析 /var/etc/smartdns/smartdns.conf 第 32 行
-# 的 conf-file 时直接失败退出 → procd 判 crash loop → 53 端口全空 → probe 判
-# 「进程不在」→ 重跑整条 bootstrap → 重启 smartdns → 再挂，死循环。
-# 为什么 bootstrap 救不回来：_rom_restore_pkg 对 conffiles 一律 continue，而
-# smartdns.conffiles 正好就是 /etc/config/smartdns + 这 5 个文件。文件不存在时，
-# 那条「不覆盖用户配置」的保护就变成了「永远不修」。
-# bootstrap 侧的 _rom_restore_smartdns_conf 只在新固件里生效；这里再兜一层，
-# 让旧固件也能自愈。取向与 bootstrap 完全一致：
-#   · 只处理 /etc/smartdns/ 这 5 个文件，绝不碰 /etc/config/smartdns；
-#   · 只补「不存在」的，存在就一个字节不动（用户清成 0 字节也尊重）；
-#   · 文件齐了立即返回，不重启、不写日志 —— 所以每分钟调一次也是零动作。
-_DNS_CONF_FILES="address.conf blacklist-ip.conf custom.conf domain-block.list domain-forwarding.list"
-# 两个路径可被环境覆盖：生产环境走默认（真实 /etc/smartdns 与 /etc/init.d/smartdns），
-# 只在单元测试里替换成临时目录 —— 否则「文件缺失」这种情形没法在不动真机的前提下复现。
-_DNS_CONF_DIR="${CS_PROBE_SD_CONF:-/etc/smartdns}"
-_DNS_INIT="${CS_PROBE_SD_INIT:-/etc/init.d/smartdns}"
-# 只给测试用：换成 busybox 的 true / false 来模拟「重启后进程在 / 不在」。
-_DNS_PIDOF="${CS_PROBE_SD_PIDOF:-pidof}"
-
-_dns_conf_missing() {
-    for _dcm_f in $_DNS_CONF_FILES; do
-        [ -e "$_DNS_CONF_DIR/$_dcm_f" ] || return 0
-    done
-    return 1
-}
-
-# 返回 0 = 补了文件且重启后进程确实在；返回 1 = 没补（文件齐/源也没有）或补了没救回来。
-_dns_selfheal() {
-    _dns_conf_missing || return 1
-    _dsh_n=0
-    for _dsh_f in $_DNS_CONF_FILES; do
-        [ -e "$_DNS_CONF_DIR/$_dsh_f" ] && continue
-        [ -e "$ROMDIR/etc/smartdns/$_dsh_f" ] || continue
-        mkdir -p "$_DNS_CONF_DIR" 2>/dev/null
-        cp -a "$ROMDIR/etc/smartdns/$_dsh_f" "$_DNS_CONF_DIR/$_dsh_f" 2>/dev/null \
-            && _dsh_n=$((_dsh_n + 1))
-    done
-    [ "$_dsh_n" -gt 0 ] || return 1
-    plog "【DNS】【自愈】/etc/smartdns 缺 $_dsh_n 个规则文件，已从 $ROMDIR 补回，重启 smartdns"
-    "$_DNS_INIT" restart >/dev/null 2>&1
-    sleep "${CS_PROBE_SD_WAIT:-2}"
-    "$_DNS_PIDOF" smartdns >/dev/null 2>&1 && return 0
-    return 1
-}
-
-# ---- 交给 smartdns 自己的脚本（v.180.157）----
-# bootstrap 已不再处理 smartdns：配置、服务、上游表全部移到 pkg-restore-smartdns.sh。
-# 所以「进程不在，且规则文件也补齐了仍起不来」这类故障，重跑引导已经修不动 ——
-# 引导只会重走网络与容器，一个字节都不会碰 /etc/config/smartdns。
-# 分工：
-#   · _dns_selfheal   只补 /etc/smartdns 下那 5 个规则文件，便宜、零副作用，先试；
-#   · _sd_script_repair（本函数）按 uci 重写主段 + 13 条上游再重启，有副作用，
-#     所以只在「连续 N 轮不可用 + 冷却闸门通过」之后才调，不会每分钟来一次。
-# --repair 与 --config 在脚本里等价，用 --repair 是为了调用点语义清楚。
+# ---- 修复一律交脚本（v.180.158）----
+# 探针只做两件事：探测 + 拉脚本。自己不动手补文件、不拼 uci ——
+# 修法只留一处（pkg-restore-smartdns.sh），避免探针和脚本两套实现慢慢漂移。
+# 这条规则对所有被观测的应用都一样：daed / ssrp / mosdns / clashoo 将来各有自己的
+# pkg-restore-<app>.sh，探针只探测 + 调它，不内联各自的修复动作。
+#
+# 探测项与覆盖关系（用户 2026-10-29 定）：
+#   · last_pull       → lxc（容器真在跑）+ bouncer（bouncer 真在拉 LAPI），见 _pull_watch
+#   · smartdns 进程在不在（pidof）
+#   · 53/UDP 有没有人在听（netstat -lnu）
+#   其余应用（daed / ssrp / mosdns / clashoo）不搞进程/端口这一套，
+#   只判主程序有没有装 —— 它们不像 smartdns 那样接管 53，端口多维度没有意义。
+#
+# 为什么不保留「补规则文件 + 重启」的快速通道：
+# 2026-10-28 那次事故的根因是 /etc/smartdns 下 5 个规则文件被遮掉，当时探针自己补文件、
+# 自己重启，救回来了。但那套逻辑与脚本的 _sd_conf 是同一份清单、两处实现（清单在两边
+# 各硬写一遍），将来加文件漏一处就会出现「探针认为齐了、脚本认为缺着」。
+# 现在统一走 --repair：它内部第一步就是 _sd_conf 补文件，再重写主段与 13 条上游、
+# commit 并重启。代价从「补文件后约 2 秒」变成「完整流程约 15 秒」，但只在
+# 连续 N 轮不可用且冷却闸门通过之后触发，不会每分钟来一次。
 _SD_RESTORE="${CS_PROBE_SD_RESTORE:-/usr/sbin/pkg-restore-smartdns.sh}"
 
-_sd_script_repair() {
+# 跑脚本的一个子命令。输出转 syslog（标签与探针分开，排障时能分清谁说的），
+# 然后用 _dns_ok 现场复验 —— 脚本 exit 0 不等于 53 真在听，判据始终看现场。
+_sd_run() {
     [ -x "$_SD_RESTORE" ] || return 1
-    _sr_out="$("$_SD_RESTORE" --repair 2>&1)"
+    _sr_out="$("$_SD_RESTORE" "$1" 2>&1)"
     _sr_rc=$?
-    # 脚本输出转进 syslog，与探针自己的日志分开打标签，排障时一眼能分清是谁说的
     [ -n "$_sr_out" ] && printf '%s\n' "$_sr_out" | logger -t crowdsec-probe-sd 2>/dev/null
     [ "$_sr_rc" = "0" ] || return 1
     sleep "${CS_PROBE_SD_WAIT:-2}"
@@ -307,11 +271,12 @@ _run_fix() {
     return "$_rf_rc"
 }
 
-# DNS 通道：连续 PROBE_STALL_ROUNDS 轮不可用 → 冷却检查 → 跑一轮引导 → 看现场复验。
+# DNS 通道：连续 PROBE_STALL_ROUNDS 轮不可用 → 冷却检查 → 拉 smartdns 脚本修 →
+# 脚本修不好才跑一轮引导 → 每一步都看现场复验。
 # 计数与锁存都是独立的（P_DNS_*）：与 last_pull 那条链路根因完全不同，
 # 共用一个计数器的话，修 DNS 会把「容器拉不动」的累计清零，反过来也一样 ——
 # 这正是 v.108.58 在两个锁存上踩过的坑（P_HUMAN 归补印、P_HUMAN_PULL 归停滞）。
-# 复验不看退出码看现场：引导可能 exit 0（sd_serve 失败只是 hard 终止在最后一步），
+# 复验不看退出码看现场：引导可能 exit 0（它只重走网络与容器，与 DNS 无关），
 # 也可能 exit 1 而 DNS 其实已恢复，唯一可信的判据是再问一次 _dns_ok。
 _dns_watch() {
     if _dns_ok; then
@@ -321,17 +286,6 @@ _dns_watch() {
         P_DNS_BAD=0
         P_DNS_FIX=0
         return 0
-    fi
-    # 【v.180.124】进程不在时先分诊：是不是规则文件被遮掉了？
-    # 是 → 补文件 + 重启 smartdns，当场复验；救回来就别去跑整条 bootstrap。
-    # 否 → 一个字都不动，继续走原来的「计数 → 冷却 → 重跑引导」。
-    if [ "$DNS_WHY" = "进程不在" ] && _dns_selfheal; then
-        if _dns_ok; then
-            plog "【DNS】自愈成功：补回规则文件并重启 smartdns 后已恢复（此前不可用 ${P_DNS_BAD:-0} 轮）"
-            P_DNS_BAD=0
-            P_DNS_FIX=0
-            return 0
-        fi
     fi
     P_DNS_BAD=$((${P_DNS_BAD:-0} + 1))
     if [ "${P_HUMAN_DNS:-0}" = "1" ]; then
@@ -357,7 +311,7 @@ _dns_watch() {
     # 放在冷却闸门之后调，是因为 --repair 会重写 uci 并重启服务，不能每轮都来一次。
     P_ACTION="dns-script-repair"
     plog "【DNS】smartdns 连续 ${PROBE_STALL_ROUNDS} 轮不可用（$DNS_WHY），先交 pkg-restore-smartdns.sh --repair"
-    if _sd_script_repair; then
+    if _sd_run --repair; then
         P_DNS_FIX=0
         P_ACTION="dns-script-fixed"
         plog "【DNS】脚本修复成功：smartdns 已恢复（bootstrap 未参与）"

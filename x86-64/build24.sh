@@ -659,6 +659,18 @@ if [ "$_PC_SIGNED" = "0" ]; then
     } > files/etc/opkg.conf
 fi
 
+# --- ⑤ manifest.txt：pkg-cache-restore.sh --all 的比对基准 ---
+# 只写包名（去重），不写版本：判定「包在不在位」看包名，带版本比会在跨版本
+# 升级后把整库都报成缺失。包名在 opkg 里不允许含下划线，所以从第一个下划线
+# 截断即可 —— 文件名是 <包名>_<版本>_<架构>.ipk，而架构 x86_64 自己就带下划线，
+# 用「去掉最后两段」的正则会截在 mosdns_5.3.3-r4 上。
+# 刻意不含容器内组件：crowdsec 本体在 LXC 容器里由 tarball 提供，宿主机本来
+# 就没有这个包，列进来会让 --all 天天报「crowdsec 缺失」，而它其实跑得好好的。
+_pc_man=$(ls "$_PC_DIR"/*.ipk 2>/dev/null | sed 's#.*/##; s/_.*//' | grep -v '^$' | sort -u)
+printf '%s\n' "$_pc_man" > "$_PC_DIR/manifest.txt"
+_pc_mn=$(printf '%s\n' "$_pc_man" | grep -c .)
+echo "==> [pkg-cache] manifest.txt：$_pc_mn 个包名（供 restore --all 比对）"
+
 ls "$_PC_DIR" | head -n 40
 
 # ---- 第二遍：把缓存打进 rootfs ----

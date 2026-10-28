@@ -34,7 +34,11 @@ fi
 if ! pcl_feed_ok; then
     if [ ! -f "$PKG_CACHE_CONF" ]; then
         echo "源配置不存在：$PKG_CACHE_CONF"
-    elif ! grep -qF "file://$PKG_CACHE_ACT" "$PKG_CACHE_CONF" 2>/dev/null; then
+    elif [ "$PKG_MGR" = "apk" ] && ! grep -qF "file://$PKG_CACHE_ACT/packages.adb" "$PKG_CACHE_CONF" 2>/dev/null; then
+        # 只写目录的旧写法也走这里：apk 对 repository 类型会去找
+        # <目录>/<arch>/Packages.adb，而我们没有 arch 子目录，等于没挂。
+        echo "源未挂载（应为 ndx file://$PKG_CACHE_ACT/packages.adb）"
+    elif [ "$PKG_MGR" != "apk" ] && ! grep -qF "file://$PKG_CACHE_ACT" "$PKG_CACHE_CONF" 2>/dev/null; then
         echo "源未挂载（应指向 file://$PKG_CACHE_ACT）"
     else
         echo "源重复：$PKG_CACHE_CONF 里有不止一条 pkgcache 行"

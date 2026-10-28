@@ -269,12 +269,31 @@ else
     echo "::warning::自检脚本一个都没铺进去，本镜像不含 crowdsec-tests（不阻断出镜像）"
 fi
 
-# ---- 第一遍：先出镜像，把包取到本地 ----
-make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE
-
-if [ $? -ne 0 ]; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Error: Build failed!"
-    exit 1
+# ---- 第 0.5 遍（条件）：只在拿不到 apk 二进制时才补编 ----
+# 【v.180.136】原来这里无条件编一整遍，唯一的目的是拿到
+# staging_dir/host/bin/apk 去给包库建索引。但那个 apk 是 ImageBuilder
+# 压缩包自带的预编译工具，解压后就在 —— 于是这一整遍（实测 5-10 分钟）
+# 多数时候纯属白跑。现在先探测：有就跳过，最后只编一次。
+#
+# 不能干脆删掉：万一某个 ImageBuilder 版本确实不带 apk，索引就建不出来，
+# 包库退化成「只能按绝对路径装」。所以保留这个兜底分支，代价只是一次 test -x。
+_AK_PRE=""
+for _c in "$(pwd)/staging_dir/host/bin/apk" "$(pwd)/staging_dir/host/bin/apk.static"; do
+    if [ -x "$_c" ]; then
+        _AK_PRE="$_c"
+        break
+    fi
+done
+if [ -n "$_AK_PRE" ]; then
+    echo "==> [预构建] apk 二进制已就绪：$_AK_PRE"
+    echo "==> [预构建] 跳过第一遍 make image，最后只编一次"
+else
+    echo "==> [预构建] 没有可用的 apk 二进制，先编一遍把它生成出来（这一步省不掉）"
+    make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE
+    if [ $? -ne 0 ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Error: Build failed (pre-pass)!"
+        exit 1
+    fi
 fi
 
 # ---- v.180.130：收关键包 apk 到 files/root/apk-cache/ ----
@@ -339,12 +358,24 @@ _ak_is_apk() {
 
 _ak_a=0
 _ak_skip_btf=""
+_ak_skip_geo=""
 _ak_bad_a=""
 for _f in packages/*.apk; do
     [ -f "$_f" ] || continue
     case "${_f##*/}" in
     vmlinux-btf-*)
         _ak_skip_btf="${_f##*/}"
+        continue
+        ;;
+    # 【v.180.136】geo 数据统一走官方源，run 包带来的两份不要。
+    # 原因：同名包在库里会凑出 3 个版本 —— PassWall 的 202606182327.1 /
+    # 2026.06.06-r1、daed 的 20260529193437-r1。apk 装依赖时只挑版本号最大的，
+    # 而 14 位数字段 20260529193437 必然赢，于是真正装进固件的是 daed 那份；
+    # geoip.dat 的格式与 xray-core 版本耦合，选错不报错、只静默分流错误。
+    # 官方 25.12.2 有这两个包（geoip 202605120112-r1 / geosite 20260518025449-r1），
+    # 格式合法、版本统一、与官方 core 同批构建，比各带一份可靠。
+    v2ray-geoip-* | v2ray-geosite-*)
+        _ak_skip_geo="$_ak_skip_geo ${_f##*/}"
         continue
         ;;
     esac
@@ -361,6 +392,9 @@ if [ -n "$_ak_bad_a" ]; then
 fi
 if [ -n "$_ak_skip_btf" ]; then
     echo "::warning::已排除 $_ak_skip_btf（内核 BTF 与目标内核版本不一致；25.12 内核自带 BTF，无需此包）"
+fi
+if [ -n "$_ak_skip_geo" ]; then
+    echo "==> [apk-cache] 已排除 run 包里的 geo 数据（统一走官方源，避免多版本被 apk 挑错）：$_ak_skip_geo"
 fi
 
 # apk 二进制定位：只给最后「生成 packages.adb 索引」用，来源 B 已不依赖 apk。
@@ -545,7 +579,7 @@ echo "==> [apk-cache] manifest.txt：$_ak_mn 个包名（供 restore --all 比�
 
 ls "$_AK_DIR" | head -n 20
 
-# ---- 第二遍：把包库打进 rootfs ----
+# ---- 唯一一遍：此时 files/ 里的包库已完整，一次合进 rootfs ----
 make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE
 
 if [ $? -ne 0 ]; then

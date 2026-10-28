@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-28.180.124"
+SCRIPT_VER="2026-10-28.180.127"
 GUARD_FILES="${CS_GUARD_FILES:-
 /usr/sbin/crowdsec-lxc-bootstrap.sh
 /usr/sbin/crowdsec-lxc-probe.sh

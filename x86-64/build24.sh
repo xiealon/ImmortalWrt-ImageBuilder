@@ -260,15 +260,38 @@ else
     echo "::warning::自检脚本一个都没铺进去，本镜像不含 crowdsec-tests（不阻断出镜像）"
 fi
 
-# ---- v.180.125：两遍 make image，把本次构建产出的全部 ipk 收进固件 ----
-# 目的：固件自带完整本地包源。smartdns 这类包被 opkg 卸掉后，可以直接
-#   opkg install --force-reinstall /root/pkg-cache/packages/smartdns_*.ipk
-# 离线装回来 —— opkg 记账正确、LuCI 软件包页面也看得见，不必依赖 bootstrap 拷文件。
-# 为什么必须两遍：ipk 只有第一遍 make image 跑完才落到 bin/packages 里，
-# 而 files/ 是在 rootfs 组装阶段合并的，同一个 make 进程里插不进这一步。
-# 分区大小由 ROOTFS_MB 决定（.config 里也同步成同值，传参优先）：
-# 300 MB 装不下上百兆的包缓存，这里给 2 GB。
-ROOTFS_MB="${ROOTFS_MB:-2048}"
+# ---- v.180.126：两遍 make image，把关键包的 ipk 收进固件 ----
+# 目的：smartdns / lxc 全套 / daed / dae / mosdns / ssr-plus / clashoo /
+# crowdsec-firewall-bouncer 被人 opkg 卸掉后，用固件自带的 ipk 装回来 ——
+# 走 opkg 装，记账正确、conffiles 由包管理器恢复、LuCI 软件包页面也看得见，
+# 不再依赖 bootstrap 里 cp -a 拷文件那套（那套不写 opkg 数据库）。
+#
+# 为什么必须两遍 make image：files/ 是在 rootfs 组装阶段合并的，而 ipk 要等
+# 第一遍跑完才齐。分区由 $PROFILE 决定（workflow 的 Profile 下拉框传进来）。
+#
+# v.180.125 的错误：从 bin/packages/x86_64 收包。这个仓库用 ImageBuilder，
+# 不编译包，bin/ 下只有 targets/，那个目录根本不存在 —— 收出来是空的。
+# 现在改成两个真实来源：
+#   A. packages/     prepare-packages.sh 解 run 得到的第三方 ipk
+#                    （clashoo / luci-app-ssr-plus / luci-app-mosdns / v2ray-geo* 只在这里）
+#   B. repositories.conf 的官方 feed   按白名单取 Filename 再下载
+#                    （smartdns / lxc 全套 / daed / mosdns / crowdsec-bouncer）
+ROOTFS_MB="${PROFILE:-2048}"
+case "$ROOTFS_MB" in
+    ''|*[!0-9]*)
+        echo "::warning::PROFILE=$PROFILE 不是数字，分区沿用 .config 里已有的值"
+        ROOTFS_MB="" ;;
+esac
+if [ -n "$ROOTFS_MB" ] && [ -f .config ]; then
+    # .config 是单文件 bind mount，sed -i 靠 rename 会撞 "Device or resource busy"，
+    # 所以先写到临时文件再原地截断写回。
+    if sed "s|^CONFIG_TARGET_ROOTFS_PARTSIZE=.*|CONFIG_TARGET_ROOTFS_PARTSIZE=$ROOTFS_MB|" .config > /tmp/imm.cfg 2>/dev/null; then
+        cat /tmp/imm.cfg > .config
+        echo "==> rootfs 分区按 Profile 设为 ${ROOTFS_MB}MB"
+    else
+        echo "::warning::改写 .config 的 ROOTFS_PARTSIZE 失败，沿用原值"
+    fi
+fi
 
 make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$ROOTFS_MB
 
@@ -277,29 +300,259 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# ---- 第一遍之后：把 bin/ 里的全部 ipk 收进 files/root/pkg-cache/ ----
-_PKG_CACHE="files/root/pkg-cache"
-rm -rf "$_PKG_CACHE"
-mkdir -p "$_PKG_CACHE"
-_pc_n=0
-for _pc_d in base luci packages routing telephony; do
-    [ -d "bin/packages/x86_64/$_pc_d" ] || continue
-    mkdir -p "$_PKG_CACHE/$_pc_d"
-    cp -a "bin/packages/x86_64/$_pc_d"/*.ipk "$_PKG_CACHE/$_pc_d/" 2>/dev/null || true
-    _pc_c=$(ls "$_PKG_CACHE/$_pc_d"/*.ipk 2>/dev/null | wc -l)
-    _pc_n=$((_pc_n + _pc_c))
-    echo "==> 收包 $_pc_d: $_pc_c 个"
+# ---- 第一遍之后：收关键包 ipk 到 files/root/pkg-cache/ ----
+_PC_DIR="files/root/pkg-cache"
+_PC_MISS=/tmp/pkg-cache-miss.txt
+rm -rf "$_PC_DIR"
+mkdir -p "$_PC_DIR"
+: > "$_PC_MISS"
+
+# 白名单。官方源没有的（clashoo / luci-app-ssr-plus / luci-app-mosdns /
+# v2ray-geo*）会记进 miss，由来源 A（packages/ 里的 run 包）补上。
+# 白名单，按应用分组列。依据是 run 包实解内容 + 官方 feed 索引核实：
+#   ssrp_x86_64.run        -> luci-app-ssr-plus / luci-i18n-ssr-plus-zh-cn（mihomo 版，不带 ssr-libev）
+#   mosdns_x86_64.run      -> mosdns / luci-app-mosdns / luci-i18n-mosdns-zh-cn / v2ray-geo* / geo2txt
+#   clashoo_x86_64.run     -> clashoo / luci-app-clashoo / luci-i18n-clashoo-zh-cn
+#   luci-app-dead_x86_64.run（文件名是 dead，里面是 daed）-> daed / luci-app-daed /
+#                             luci-i18n-daed-zh-cn / v2ray-geo* / vmlinux-btf
+# 官方 feed 另有 smartdns / smartdns-ui / lxc 全套 / dae / crowdsec-bouncer。
+#
+# 刻意不收录的：
+#   libopenssl3   ssrp run 里带了这个，但它是系统核心库 —— 拿它 --force-reinstall
+#                 会把 opkg/wget 依赖的 openssl 换掉，风险远大于收益。真缺了应该重刷固件。
+#   ssr-plus      裸名，不存在。实际包名是 luci-app-ssr-plus。
+_PC_WANT="lxc lxc-attach lxc-auto lxc-autostart lxc-cgroup lxc-checkconfig lxc-common
+lxc-config lxc-configs lxc-console lxc-copy lxc-create lxc-destroy lxc-device
+lxc-execute lxc-freeze lxc-hooks lxc-info lxc-init lxc-ls lxc-monitor lxc-monitord
+lxc-snapshot lxc-start lxc-stop lxc-templates lxc-top lxc-unfreeze lxc-unprivileged
+lxc-unshare lxc-user-nic lxc-usernsexec lxc-wait liblxc rpcd-mod-lxc
+luci-app-lxc luci-i18n-lxc-zh-cn
+smartdns smartdns-ui luci-app-smartdns luci-i18n-smartdns-zh-cn
+mosdns luci-app-mosdns luci-i18n-mosdns-zh-cn v2ray-geoip v2ray-geosite geo2txt
+daed daed-geoip daed-geosite luci-app-daed luci-i18n-daed-zh-cn vmlinux-btf
+dae dae-geoip dae-geosite luci-app-dae luci-i18n-dae-zh-cn
+crowdsec crowdsec-firewall-bouncer luci-app-crowdsec-firewall-bouncer
+luci-i18n-crowdsec-firewall-bouncer-zh-cn nftables-json
+luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn
+shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir shadowsocksr-libev-ssr-server
+trojan-plus xray-core xray-plugin sing-box
+clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn"
+
+# --- 来源 A：容器里已经存在的 ipk ---
+# 构建本来就要把用到的包取到本地，能捞到就别再下载一遍（省流量也省时间）。
+# 两个地方会有：packages/ 是 prepare-packages.sh 解 run 得到的第三方包，
+# dl/ staging_dir/ build_dir/ 是 ImageBuilder 自己下载/解包时留下的。
+# 只捞白名单里的 —— passwall / nekobox 那类几十兆的无关包不进固件。
+_pc_a=0
+_pc_hit() {
+    for _pw in $_PC_WANT; do
+        case "$1" in
+            "${_pw}_"*) return 0 ;;
+        esac
+    done
+    return 1
+}
+for _d in packages dl staging_dir build_dir; do
+    [ -d "$_d" ] || continue
+    for _f in $(find "$_d" -name '*.ipk' 2>/dev/null); do
+        [ -f "$_f" ] || continue
+        _bn=$(basename "$_f")
+        [ -f "$_PC_DIR/$_bn" ] && continue
+        _pc_hit "$_bn" || continue
+        cp -f "$_f" "$_PC_DIR/$_bn" 2>/dev/null && _pc_a=$((_pc_a + 1))
+    done
 done
-mkdir -p "$_PKG_CACHE/target"
-cp -a bin/targets/x86/64/packages/*.ipk "$_PKG_CACHE/target/" 2>/dev/null || true
-_pc_c=$(ls "$_PKG_CACHE/target"/*.ipk 2>/dev/null | wc -l)
-_pc_n=$((_pc_n + _pc_c))
-echo "==> 收包 target: $_pc_c 个"
-if [ "$_pc_n" -gt 0 ]; then
-    echo "==> 离线包缓存就位：$_pc_n 个 ipk，合计 $(du -sh "$_PKG_CACHE" | cut -f1)"
-else
-    echo "::warning::离线包缓存为空，本次镜像不含本地源（卸载后无法离线装回，不阻断出镜像）"
+echo "==> [pkg-cache] 来源 A（容器内已有 ipk，按白名单捞）：$_pc_a 个"
+
+# --- 来源 B：官方 feed，先按 Depends 算依赖闭包，再逐个下载 ---
+# 为什么必须闭包：只收白名单那 75 个，opkg install 会因缺依赖失败；
+# 而用 --force-depends 硬装会装出半残的包（文件在、跑不起来）。
+# 宁可多收几十兆，也别让恢复在真机上失败。
+_pc_b=0
+_idx_all=/tmp/pc-index-all.txt
+# 基础系统包不进闭包 —— 它们真缺了整个系统已经废了，靠 ipk 补是饮鸩止渴。
+# libopenssl3 也在这里：拿它 --force-reinstall 会把 opkg/wget 依赖的 openssl 换掉。
+_skip_list="libc libpthread librt libdl libm libgcc libstdcpp libopenssl3 kernel
+base-files busybox opkg procd uci ubus ubox netifd libubox libubus libuci"
+: > "$_idx_all"
+if [ -f repositories.conf ]; then
+    echo "==> [pkg-cache] repositories.conf:"
+    cat repositories.conf
+    _i=0
+    while read -r _a _b _c _rest; do
+        case "$_a" in
+            src*) ;;
+            *) continue ;;
+        esac
+        _u="$_c"
+        [ -n "$_u" ] || continue
+        _i=$((_i + 1))
+        _gz="/tmp/pc-idx-$_i.gz"
+        wget -q -O "$_gz" "$_u/Packages.gz" 2>/dev/null || { rm -f "$_gz"; continue; }
+        [ -s "$_gz" ] || { rm -f "$_gz"; continue; }
+        _base=$(echo "$_u" | sed 's|/[^/]*$||')
+        # 索引里的 Filename 有两种写法：带 feed 目录（packages/smartdns_x.ipk）
+        # 或不带（smartdns_x.ipk）。所以两个候选 URL 都存，下载时依次试。
+        gzip -dc "$_gz" 2>/dev/null | awk -v b="$_base" -v u="$_u" '
+            /^Package: / { print; next }
+            /^Filename: / {
+                s = $0
+                sub(/^Filename:[ \t]*/, "", s)
+                print "Filename: " b " " u " " s
+                next
+            }
+            { print }
+        ' >> "$_idx_all"
+        rm -f "$_gz"
+    done < repositories.conf
 fi
+
+if [ -s "$_idx_all" ]; then
+    awk -v want="$_PC_WANT" -v skip="$_skip_list" '
+        BEGIN {
+            n = split(want, W, " ")
+            for (i = 1; i <= n; i++) wanted[W[i]] = 1
+            m = split(skip, S, " ")
+            for (i = 1; i <= m; i++) skipped[S[i]] = 1
+        }
+        /^Package: / { cur = $2; next }
+        /^Depends: / {
+            s = $0
+            sub(/^Depends:[ \t]*/, "", s)
+            gsub(/\([^)]*\)/, "", s)
+            gsub(/[|,]/, " ", s)
+            if (cur != "") dep[cur] = dep[cur] " " s
+            next
+        }
+        /^Filename: / {
+            if (cur != "") {
+                s = $0
+                sub(/^Filename:[ \t]*/, "", s)
+                fn[cur] = s
+            }
+            next
+        }
+        END {
+            qn = 0
+            for (p in wanted) q[++qn] = p
+            i = 1
+            while (i <= qn) {
+                p = q[i]; i++
+                if (p in seen) continue
+                seen[p] = 1
+                nd = split(dep[p], D, " ")
+                for (j = 1; j <= nd; j++) {
+                    d = D[j]
+                    gsub(/[ \t]/, "", d)
+                    if (d == "" || (d in skipped) || (d in seen)) continue
+                    q[++qn] = d
+                }
+            }
+            for (p in seen) {
+                if (p in skipped) continue
+                if (p in fn) print p " " fn[p]
+                else print p " MISSING - -"
+            }
+        }
+    ' "$_idx_all" > /tmp/pc-plan.txt
+
+    _pc_plan=$(wc -l < /tmp/pc-plan.txt)
+    echo "==> [pkg-cache] 依赖闭包展开：$_pc_plan 个包待收"
+    while read -r _p _base _u _fn; do
+        [ "$_base" = "MISSING" ] && continue
+        _bn=$(basename "$_fn")
+        [ -f "$_PC_DIR/$_bn" ] && continue
+        if wget -q -O "$_PC_DIR/$_bn" "$_base/$_fn" 2>/dev/null && [ -s "$_PC_DIR/$_bn" ]; then
+            _pc_b=$((_pc_b + 1))
+        elif wget -q -O "$_PC_DIR/$_bn" "$_u/$_fn" 2>/dev/null && [ -s "$_PC_DIR/$_bn" ]; then
+            _pc_b=$((_pc_b + 1))
+        else
+            rm -f "$_PC_DIR/$_bn"
+            echo "下载失败 $_p $_fn" >> "$_PC_MISS"
+        fi
+    done < /tmp/pc-plan.txt
+fi
+echo "==> [pkg-cache] 来源 B（官方 feed + 依赖闭包）：$_pc_b 个"
+
+# --- 校验：ipk 必须是能解开的 tar.gz，坏的全部剔掉 ---
+_pc_bad=0
+for _f in "$_PC_DIR"/*.ipk; do
+    [ -f "$_f" ] || continue
+    if ! gzip -t "$_f" 2>/dev/null; then
+        rm -f "$_f"
+        _pc_bad=$((_pc_bad + 1))
+        echo "剔除损坏的包：$(basename "$_f")" >> "$_PC_MISS"
+    fi
+done
+[ "$_pc_bad" -gt 0 ] && echo "::warning::剔除 $_pc_bad 个损坏/不完整的 ipk"
+
+# --- 白名单缺口报告 ---
+_pc_gap=""
+for _p in $_PC_WANT; do
+    if ! ls "$_PC_DIR"/${_p}_*.ipk >/dev/null 2>&1; then
+        _pc_gap="$_pc_gap $_p"
+    fi
+done
+
+_pc_n=$(ls "$_PC_DIR"/*.ipk 2>/dev/null | wc -l)
+_pc_sz=$(du -sh "$_PC_DIR" | cut -f1)
+echo "==> [pkg-cache] 合计 $_pc_n 个 ipk，$_pc_sz，位于 /root/pkg-cache/"
+if [ -n "$_pc_gap" ]; then
+    echo "::warning::白名单里这些包没收到（如属第三方 run 包，看上面来源 A 的数量；如确实没有，固件里就没有可离线装回的 ipk）：$_pc_gap"
+fi
+if [ -s "$_PC_MISS" ]; then
+    echo "==> [pkg-cache] 失败明细（前 20 行）："
+    head -n 20 "$_PC_MISS"
+fi
+if [ "$_pc_n" -eq 0 ]; then
+    echo "::error::pkg-cache 一个 ipk 都没收到，离线装回功能不可用"
+    exit 1
+fi
+# --- 生成本地 opkg 索引 ---
+# 没有 Packages 索引，opkg install 只认单个 ipk，一缺依赖就得联网；
+# 有了索引 + customfeeds.conf 里的 file:// 源，opkg 会自己从本地源补齐依赖。
+# 条目直接取自合并后的官方索引，只把 Filename 改成本地文件名。
+if [ -s /tmp/pc-plan.txt ] && [ -s "$_idx_all" ]; then
+    _pc_have=$(ls "$_PC_DIR" 2>/dev/null | grep '\.ipk$' | tr '\n' ' ')
+    awk -v have="$_pc_have" '
+        BEGIN {
+            RS = ""
+            n = split(have, H, " ")
+            for (i = 1; i <= n; i++) if (H[i] != "") ok[H[i]] = 1
+        }
+        {
+            nf = split($0, L, "\n")
+            keep = 0
+            for (i = 1; i <= nf; i++) {
+                if (L[i] ~ /^Filename: /) {
+                    f = L[i]
+                    sub(/^Filename:[ \t]*/, "", f)
+                    m = split(f, P, " ")
+                    fn = P[m]
+                    gsub(/.*\//, "", fn)
+                    if (fn in ok) { keep = 1; fname = fn }
+                }
+            }
+            if (keep) {
+                for (i = 1; i <= nf; i++) {
+                    if (L[i] ~ /^Filename: /) print "Filename: " fname
+                    else if (L[i] != "") print L[i]
+                }
+                print ""
+            }
+        }
+    ' "$_idx_all" > "$_PC_DIR/Packages"
+    _pc_idx=$(grep -c '^Package: ' "$_PC_DIR/Packages" 2>/dev/null)
+    [ -n "$_pc_idx" ] || _pc_idx=0
+    echo "==> [pkg-cache] 本地索引：$_pc_idx 条 / $_pc_n 个 ipk"
+    if [ "$_pc_idx" -lt "$_pc_n" ]; then
+        echo "::warning::索引条目少于 ipk 数量（$_pc_idx < $_pc_n），部分包只能按单文件手动装"
+    fi
+else
+    echo "::warning::没有可用于生成本地索引的数据，opkg 无法从 pkg-cache 自动解依赖"
+fi
+
+ls "$_PC_DIR" | head -n 40
 
 # ---- 第二遍：把缓存打进 rootfs ----
 make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$ROOTFS_MB
@@ -311,5 +564,7 @@ fi
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Build completed successfully."
 
-echo "==> 离线恢复示例（固件刷好后，包被卸载时）："
-echo "    opkg install --force-reinstall /root/pkg-cache/packages/smartdns_*.ipk"
+echo "==> 离线恢复示例（固件刷好后，包被别人卸载时）："
+echo "    单个包：opkg install --force-reinstall /root/pkg-cache/smartdns_*.ipk"
+echo "    整批装：opkg install --force-reinstall /root/pkg-cache/*.ipk"
+echo "    查库存：ls /root/pkg-cache/ | wc -l"

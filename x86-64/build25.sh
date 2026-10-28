@@ -269,6 +269,7 @@ else
     echo "::warning::自检脚本一个都没铺进去，本镜像不含 crowdsec-tests（不阻断出镜像）"
 fi
 
+# ---- 第一遍：先出镜像，把包取到本地 ----
 make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE
 
 if [ $? -ne 0 ]; then
@@ -276,4 +277,109 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# ---- v.180.130：收关键包 apk 到 files/root/apk-cache/ ----
+# 目的：smartdns / lxc / daed / mosdns / ssr-plus / clashoo / crowdsec-bouncer 被人
+# opkg→apk 卸掉后，能用固件自带的包装回来，且记账正确（/etc/apk/world）、LuCI 可见。
+#
+# files/ 在下面第二遍 make image 时合进 rootfs，所以这批 apk 最终躺在 squashfs 里，
+# 刷机后是只读的 /rom/root/apk-cache（不是 overlay 的 /root/apk-cache）。
+# 运行期脚本按 /rom 优先解析：只读层删不掉、不占 overlay、与固件同版。
+_AK_DIR="files/root/apk-cache"
+rm -rf "$_AK_DIR"
+mkdir -p "$_AK_DIR"
+
+# 白名单按 25.12.2 官方索引 + run 包实解内容逐条核对过：
+#   · 官方源有：lxc 全套 35 个 / smartdns / daed / dae / mosdns / crowdsec-bouncer /
+#     v2ray-geo* / xray / sing-box / nftables-json
+#   · 官方源没有、只有 run 包有：clashoo 三件套、ssr-plus 全套、luci-app-mosdns、
+#     luci-i18n-mosdns-zh-cn、geo2txt、vmlinux-btf
+#   · 官方 25.12 已无 smartdns-ui 与 vmlinux-btf 这两个包名（前者并入 smartdns，
+#     后者内核 6.12 自带 BTF）；vmlinux-btf 只可能来自 daed 的 run 包
+_AK_WANT="lxc lxc-attach lxc-auto lxc-autostart lxc-cgroup lxc-checkconfig lxc-common
+lxc-config lxc-configs lxc-console lxc-copy lxc-create lxc-destroy lxc-device
+lxc-execute lxc-freeze lxc-hooks lxc-info lxc-init lxc-ls lxc-monitor lxc-monitord
+lxc-snapshot lxc-start lxc-stop lxc-templates lxc-top lxc-unfreeze lxc-unprivileged
+lxc-unshare lxc-user-nic lxc-usernsexec lxc-wait liblxc rpcd-mod-lxc
+luci-app-lxc luci-i18n-lxc-zh-cn
+smartdns luci-app-smartdns luci-i18n-smartdns-zh-cn
+mosdns
+daed daed-geoip daed-geosite luci-app-daed luci-i18n-daed-zh-cn
+dae dae-geoip dae-geosite luci-app-dae luci-i18n-dae-zh-cn
+crowdsec crowdsec-firewall-bouncer luci-app-crowdsec-firewall-bouncer
+luci-i18n-crowdsec-firewall-bouncer-zh-cn nftables-json
+v2ray-geoip v2ray-geosite xray-core xray-plugin sing-box"
+
+# 来源 A：packages/ 里 run 包解出的 apk（第三方包，官方源没有）
+_ak_a=0
+for _f in packages/*.apk; do
+    [ -f "$_f" ] || continue
+    cp -f "$_f" "$_AK_DIR"/ && _ak_a=$((_ak_a + 1))
+done
+echo "==> [apk-cache] 来源 A（run 包）：$_ak_a 个 apk"
+
+# 来源 B：官方源。apk fetch --recursive 自己解依赖闭包 ——
+# 这是 apk 比 opkg 省事的地方：不用手写 BFS、不会漏，也不会把依赖装半残。
+# 同包名不同版本（run 包里的更新）会共存，apk 安装时自己选最高版本。
+_ak_b=0
+if command -v apk >/dev/null 2>&1; then
+    apk update >/dev/null 2>&1 || echo "::warning::apk update 失败，沿用容器里已有索引"
+    _ak_before=$(ls "$_AK_DIR" 2>/dev/null | wc -l)
+    apk fetch --recursive --output-dir "$_AK_DIR" $_AK_WANT >/tmp/apk-fetch.log 2>&1
+    _ak_rc=$?
+    _ak_after=$(ls "$_AK_DIR" 2>/dev/null | wc -l)
+    _ak_b=$((_ak_after - _ak_before))
+    echo "==> [apk-cache] 来源 B（官方源 + 递归依赖）：$_ak_b 个 apk（fetch rc=$_ak_rc）"
+    if [ "$_ak_rc" != "0" ]; then
+        echo "::warning::apk fetch 非零退出，末尾日志："
+        tail -8 /tmp/apk-fetch.log 2>/dev/null
+    fi
+else
+    echo "::warning::容器里没有 apk 命令，跳过官方源收包（只会有 run 包那部分）"
+fi
+
+_ak_n=$(ls "$_AK_DIR"/*.apk 2>/dev/null | wc -l)
+_ak_sz=$(du -sh "$_AK_DIR" 2>/dev/null | cut -f1)
+echo "==> [apk-cache] 合计 $_ak_n 个 apk，$_ak_sz，位于 /root/apk-cache/（刷机后为只读的 /rom/root/apk-cache）"
+
+if [ "$_ak_n" -le 0 ]; then
+    echo "::error::apk-cache 一个包都没收到，离线装回功能不可用"
+    echo "::error::来源 A 看 packages/*.apk；来源 B 看 /tmp/apk-fetch.log"
+    exit 1
+fi
+
+# --- 生成 apk 索引 ---
+# apk 的索引是 packages.adb（二进制 ADB 格式），手写不出来，必须用它自己的命令。
+# opkg 那套「拼 Packages 纯文本」在这里完全不适用。
+# 失败不中断构建：没有索引时仍能按绝对路径单文件装（依赖齐的常态够用）。
+if command -v apk >/dev/null 2>&1; then
+    _ak_rc2=0
+    ( cd "$_AK_DIR" && apk index -o packages.adb --description "offline pkg cache" ./*.apk ) \
+        >/tmp/apk-index.log 2>&1 || _ak_rc2=1
+    if [ "$_ak_rc2" != "0" ]; then
+        ( cd "$_AK_DIR" && apk index -o packages.adb ./*.apk ) >>/tmp/apk-index.log 2>&1 || _ak_rc2=2
+    fi
+    if [ "$_ak_rc2" != "2" ] && [ -s "$_AK_DIR/packages.adb" ]; then
+        echo "==> [apk-cache] 索引已生成：$(wc -c < "$_AK_DIR/packages.adb") 字节"
+    else
+        echo "::warning::apk index 失败，本包库只能按绝对路径单文件装（依赖齐时可用）"
+        tail -6 /tmp/apk-index.log 2>/dev/null
+    fi
+fi
+
+ls "$_AK_DIR" | head -n 20
+
+# ---- 第二遍：把包库打进 rootfs ----
+make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$PROFILE
+
+if [ $? -ne 0 ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Error: Build failed (2nd pass: apk-cache)!"
+    exit 1
+fi
+
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Build completed successfully."
+
+echo "==> 离线恢复示例（固件刷好后，包被别人卸载时）："
+echo "    单个包：apk add --allow-untrusted /rom/root/apk-cache/smartdns-*.apk"
+echo "    走源装：apk add --allow-untrusted --no-network --repository file:///rom/root/apk-cache smartdns"
+echo "    查库存：ls /rom/root/apk-cache/ | wc -l"
+echo "    说明：apk 在 squashfs 只读层（/rom）里，删不掉；装完 /etc/apk/world 记账正确、LuCI 可见"

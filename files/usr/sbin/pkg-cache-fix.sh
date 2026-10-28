@@ -62,7 +62,26 @@ _pcf_feed_ensure() {
 
 # ③ 铺索引：绕过 opkg update（它会连所有远程源，离线时白等几十秒）
 _pcf_lists_ensure() {
-    [ "$PKG_MGR" = "apk" ] && return 0
+    if [ "$PKG_MGR" = "apk" ]; then
+        _pcf_adb="$PKG_CACHE_ACT/packages.adb"
+        [ -s "$_pcf_adb" ] && return 0
+        # apk 的索引没有 lists 中转层，只能原地重建 —— 源目录必须可写。
+        # 重建用的是包库自己那堆 apk，不联网、不依赖任何远程源。
+        if [ ! -w "$PKG_CACHE_ACT" ]; then
+            pcl_log "依赖查询表缺失，且源目录只读（$PKG_CACHE_ACT），只能刷带索引的固件"
+            return 1
+        fi
+        _pcf_n=$(ls "$PKG_CACHE_ACT"/*.apk 2>/dev/null | wc -l)
+        [ "$_pcf_n" -gt 0 ] || return 1
+        # --allow-untrusted 是全局选项，必须放在 applet 前面
+        if ( cd "$PKG_CACHE_ACT" && "$APK_BIN" --allow-untrusted index -o packages.adb ./*.apk ) \
+                >/dev/null 2>&1 && [ -s "$_pcf_adb" ]; then
+            pcl_log "已重建依赖查询表：$_pcf_adb（$_pcf_n 个包）"
+            return 0
+        fi
+        pcl_log "依赖查询表重建失败（apk index 退出非 0）"
+        return 1
+    fi
     _pcf_lists=$(pcl_lists_dir)
     mkdir -p "$_pcf_lists" 2>/dev/null || return 1
     # 落盘名必须是源名本身（pkgcache），不是 pkgcache_Packages ——

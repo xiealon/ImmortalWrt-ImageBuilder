@@ -220,14 +220,17 @@ echo "==> 容器内受保护文件已进固件（16 个，/rom 只读基准）"
 #   -ash: /usr/sbin/pkg-cache-check.sh: Permission denied   (rc=126)
 # 而 bootstrap 里调 /usr/sbin/pkg-cache-restore.sh 的地方同样失效 —— 包级自愈一直是废的，
 # 只是没在真机上跑过所以没暴露。枚举法必然还会漏，改成扫 files/usr/sbin/*.sh。
+# 【v.180.163】init.d 也改成扫目录：cgroup2-guard 没有 .sh 后缀，
+# 「files/usr/sbin/*.sh」和「逐个点名的 init.d 两项」两条通道都漏了它 ——
+# 它靠 git mode 恰好是 755 才没出事，一旦哪次提交丢了执行位，docker 会在
+# 开机时静默失败（devices cgroup 没挂 → dockerd 退出 → docker0 不建）。
 chmod +x files/etc/rc.local \
-         files/etc/uci-defaults/99-custom.sh \
-         files/etc/uci-defaults/98-lxc-auto.sh \
+         files/etc/uci-defaults/*.sh \
          files/usr/sbin/*.sh \
-         files/etc/init.d/crowdsec-lxc-probe 2>/dev/null
+         files/etc/init.d/* 2>/dev/null
 for _f in files/etc/rc.local \
           files/usr/sbin/*.sh \
-          files/etc/init.d/crowdsec-lxc-probe; do
+          files/etc/init.d/*; do
     [ -x "$_f" ] || { echo "::error::缺少执行位: $_f"; exit 1; }
 done
 echo "==> 已确保引导/自愈脚本可执行（files/usr/sbin 下 $(ls files/usr/sbin/*.sh 2>/dev/null | wc -l | tr -d ' ') 个）"

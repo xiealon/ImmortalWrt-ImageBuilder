@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.162"
+SCRIPT_VER="2026-10-29.180.163"
 # 【v.180.152】补进 v.180.146~151 新增的 6 个恢复脚本。
 # 【v.180.162】再加 pkg-restore-apps.sh（应用主程序恢复），共 7 个。
 # 增删恢复脚本时必须同步这张清单 —— 漏一个是「脚本自己也会被删掉」的静默失效：
@@ -132,7 +132,12 @@ GUARD_FILES="${CS_GUARD_FILES:-
 /etc/rc.local
 /etc/init.d/crowdsec-lxc-probe
 /etc/init.d/lxc-auto
+/etc/init.d/cgroup2-guard
 }"
+# 【v.180.163】cgroup2-guard 是这三个 init.d 里唯一没有 .sh 后缀的，
+# 所以按后缀扫的两个通道（本清单早期也是手写枚举、build24/25 的 chmod 列表）
+# 都漏了它。它被删之后不会立刻出事 —— 只在下次重启时 dockerd 起不来
+# （devices cgroup 没挂 → docker0 不建），这种「重启才炸」的缺口最难查。
 # 【v.180.120】目录级保护：固件自带的自检脚本。
 # repo/tests/ 在构建期被铺到 /usr/share/crowdsec-tests/（build24/25.sh 负责），
 # 刷机后 /rom 里就有同一份，于是这里能拿它当基准。

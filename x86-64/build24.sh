@@ -716,10 +716,38 @@ fi
 # 用「去掉最后两段」的正则会截在 mosdns_5.3.3-r4 上。
 # 刻意不含容器内组件：crowdsec 本体在 LXC 容器里由 tarball 提供，宿主机本来
 # 就没有这个包，列进来会让 --all 天天报「crowdsec 缺失」，而它其实跑得好好的。
-_pc_man=$(ls "$_PC_DIR"/*.ipk 2>/dev/null | sed 's#.*/##; s/_.*//' | grep -v '^$' | sort -u)
+#
+# 【v.180.145】口径收紧：只列「固件确实要装」的包，不再是包库全量。
+# 原来直接取 ipk 文件名去重（真机实测 150 个），而 --all 的语义是「补齐缺失」，
+# 于是它会把固件本来没装的包（dae、xray-core 的另一版、纯备用的依赖）
+# 一个个装上去 —— 那不叫恢复，那叫扩容。
+# 正确口径 = PACKAGES（已含 CUSTOM_PACKAGES）∩ 包库里有文件的包：
+#   · 固件没选的包         -> 不在 PACKAGES，排除
+#   · 选了但库里没文件的   -> 交集后排除（装不回来，列进去只会天天报缺）
+_pc_all=$(ls "$_PC_DIR"/*.ipk 2>/dev/null | sed 's#.*/##; s/_.*//' | grep -v '^$' | sort -u)
+: > /tmp/pc-want-inst.txt
+for _pwi in $PACKAGES; do
+    case "$_pwi" in -*) continue ;; esac
+    echo "$_pwi"
+done | sort -u > /tmp/pc-want-inst.txt
+# busybox grep 的 -f 碰到空模式文件不是「一条都不匹配」，而是把整份输入全吐出来
+# （夹具实测：want 文件 0 行 -> manifest 150 行全过）。那样 PACKAGES 为空时就
+# 悄悄退回「包库全量」这个错行为，还看不出来。必须显式挡一道。
+if [ -s /tmp/pc-want-inst.txt ]; then
+    _pc_man=$(printf '%s\n' "$_pc_all" | grep -Fxf /tmp/pc-want-inst.txt 2>/dev/null)
+else
+    _pc_man=""
+fi
+_pc_alln=$(printf '%s\n' "$_pc_all" | grep -c .)
+[ -n "$_pc_alln" ] || _pc_alln=0
 printf '%s\n' "$_pc_man" > "$_PC_DIR/manifest.txt"
 _pc_mn=$(printf '%s\n' "$_pc_man" | grep -c .)
-echo "==> [pkg-cache] manifest.txt：$_pc_mn 个包名（供 restore --all 比对）"
+[ -n "$_pc_mn" ] || _pc_mn=0
+echo "==> [pkg-cache] manifest.txt：$_pc_mn 个包名（库内 $_pc_alln 个，只列本固件该装的；供 restore --all 比对）"
+if [ "$_pc_mn" -lt 1 ]; then
+    echo "::error::manifest 为空：PACKAGES 与包库没有交集，restore --all 将无事可做"
+    exit 1
+fi
 
 ls "$_PC_DIR" | head -n 40
 

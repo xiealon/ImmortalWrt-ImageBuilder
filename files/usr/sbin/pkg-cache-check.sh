@@ -89,11 +89,28 @@ fi
 # 索引文件是 0 字节、或里面一条 Package 都没有，也算坏：opkg 会当成空源，
 # 装什么都 not available。这里按条目数判，不按字节数 —— 字节阈值是拍出来的，
 # 小库（比如只带几个包的精简镜像）会被误报成异常。
+#
+# 【v.180.144】按魔数分两支数条目。
+# 真机实测：opkg 对 file:// 源【不重写、不解压】list，直接把 Packages.gz 原样
+# 复制成 /var/opkg-lists/pkgcache —— 16881 字节、头部 1f8b，与源目录里的
+# Packages.gz 字节数完全一致。opkg 自己读得懂（16.8 KB 的 gz 解析出 164 条目，
+# 装包时 Downloading file:///rom/root/pkg-cache/xxx.ipk 正常），但这里用
+# grep 数明文永远数出 0，于是「源能用、包能装」的同时探针报 rc=1。
+# 这种假告警比没有判据更坏：喊久了真出问题时没人信。
 if [ "$PKG_MGR" = "opkg" ]; then
-    _pcc_n=$(grep -c '^Package: ' "$(pcl_lists_dir)/pkgcache" 2>/dev/null)
-    [ -n "$_pcc_n" ] || _pcc_n=0
+    _pcc_l="$(pcl_lists_dir)/pkgcache"
+    _pcc_n=0
+    if [ -f "$_pcc_l" ]; then
+        _pcc_m=$(od -An -tx1 -N2 "$_pcc_l" 2>/dev/null | tr -d ' \n')
+        if [ "$_pcc_m" = "1f8b" ]; then
+            _pcc_n=$(gzip -dc "$_pcc_l" 2>/dev/null | grep -c '^Package: ')
+        else
+            _pcc_n=$(grep -c '^Package: ' "$_pcc_l" 2>/dev/null)
+        fi
+        [ -n "$_pcc_n" ] || _pcc_n=0
+    fi
     if [ "$_pcc_n" -lt 1 ]; then
-        echo "索引里没有任何包条目（$(pcl_lists_dir)/pkgcache）"
+        echo "索引里没有任何包条目（$_pcc_l，魔数=${_pcc_m:-无}）"
         exit 1
     fi
 fi

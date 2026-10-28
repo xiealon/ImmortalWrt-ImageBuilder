@@ -322,8 +322,24 @@ v2ray-geoip v2ray-geosite xray-core xray-plugin sing-box"
 #   （/sys/kernel/btf/vmlinux 由内核提供），本就不该再放一份。
 #   若将来 run 包的 btf 版本与目标内核一致，把下面的 case 去掉即可 ——
 #   这个判断不写死版本号，只按包名排除，换版本时不需要改代码。
+# 【v.180.134】合法 apk 的判定：只有两种文件头
+#   1f 8b        gzip       -> apk v2（tar.gz 结构）
+#   41 44 42 64  "ADBd"     -> apk v3（ADB 容器）
+# 其它一律不是包。真机日志里 apk index 报 "file format not supported" 的
+# 那 6 个（xray-core/xray-plugin/v2ray-geoip/v2ray-geosite），就是 run 包里
+# 带的坏文件；而「按文件名判断已存在」让它们挡住了官方源的好版本，
+# 于是一个坏包废掉整份索引。
+_ak_is_apk() {
+    _ai_h=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')
+    case "$_ai_h" in
+    1f8b* | 41444264*) return 0 ;;
+    esac
+    return 1
+}
+
 _ak_a=0
 _ak_skip_btf=""
+_ak_bad_a=""
 for _f in packages/*.apk; do
     [ -f "$_f" ] || continue
     case "${_f##*/}" in
@@ -332,9 +348,17 @@ for _f in packages/*.apk; do
         continue
         ;;
     esac
+    # 拷之前先验文件头：坏文件不进库，否则它会以「已存在」挡住官方源的好版本
+    if ! _ak_is_apk "$_f"; then
+        _ak_bad_a="$_ak_bad_a ${_f##*/}"
+        continue
+    fi
     cp -f "$_f" "$_AK_DIR"/ && _ak_a=$((_ak_a + 1))
 done
 echo "==> [apk-cache] 来源 A（run 包）：$_ak_a 个 apk"
+if [ -n "$_ak_bad_a" ]; then
+    echo "::warning::run 包里有不是合法 apk 的文件（已丢弃，改由官方源补）：$_ak_bad_a"
+fi
 if [ -n "$_ak_skip_btf" ]; then
     echo "::warning::已排除 $_ak_skip_btf（内核 BTF 与目标内核版本不一致；25.12 内核自带 BTF，无需此包）"
 fi
@@ -420,10 +444,20 @@ if [ -n "$_AK_DL" ]; then
             _ak_nm=$(printf '%s' "$_ak_kv" | sed 's/^"//; s/":".*$//')
             _ak_ver=$(printf '%s' "$_ak_kv" | sed 's/^.*":"//; s/"$//')
             [ -n "$_ak_nm" ] && [ -n "$_ak_ver" ] || continue
-            # run 包优先：packages/ 里已有的包名（比如更新的 clashoo/daed）不再下官方版
-            if ls "$_AK_DIR/$_ak_nm"-*.apk >/dev/null 2>&1; then
-                continue
-            fi
+            # run 包优先：packages/ 里已有【且合法】的同名包就不再下官方版。
+            # 【v.180.134】原来只看文件名在不在，坏文件会一直挡住官方版；
+            # 现在顺手把同名的坏文件删掉，让官方版能补进来。
+            _ak_keep=0
+            for _ak_e in "$_AK_DIR/$_ak_nm"-*.apk; do
+                [ -f "$_ak_e" ] || continue
+                if _ak_is_apk "$_ak_e"; then
+                    _ak_keep=1
+                else
+                    rm -f "$_ak_e"
+                    echo "::warning::丢弃非法 apk（交回官方源）：${_ak_e##*/}"
+                fi
+            done
+            [ "$_ak_keep" = "1" ] && continue
             _ak_fn="$_ak_nm-$_ak_ver.apk"
             if _ak_dl "$_ak_u/$_ak_fn" "$_AK_DIR/$_ak_fn"; then
                 _ak_b=$((_ak_b + 1))
@@ -461,8 +495,30 @@ if [ -n "$_AK_BIN" ]; then
     if [ "$_ak_rc2" != "0" ]; then
         ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o packages.adb --no-warnings ./*.apk ) >>/tmp/apk-index.log 2>&1 || _ak_rc2=2
     fi
-    if [ "$_ak_rc2" != "2" ] && [ -s "$_AK_DIR/packages.adb" ]; then
+    # 【v.180.134】一个坏包会让整份索引建不出来（112 个好的也白搭）。
+    # 所以失败时从日志里抓出错文件名，删掉再重试，最多 5 轮。
+    _ak_round=0
+    while :; do
+        [ "$_ak_rc2" = "0" ] && [ -s "$_AK_DIR/packages.adb" ] && break
+        [ "$_ak_round" -ge 5 ] && break
+        _ak_badlist=$(grep -oE '\./[^:]+: file format not supported' /tmp/apk-index.log \
+            2>/dev/null | sed 's#^\./##; s/: file format not supported$//' | sort -u)
+        [ -n "$_ak_badlist" ] || break
+        _ak_round=$((_ak_round + 1))
+        for _ak_b in $_ak_badlist; do
+            [ -f "$_AK_DIR/$_ak_b" ] && rm -f "$_AK_DIR/$_ak_b"
+        done
+        _ak_bn=$(printf '%s\n' "$_ak_badlist" | grep -c .)
+        echo "==> [apk-cache] 剔除 $_ak_bn 个非 apk 文件后重建索引（第 $_ak_round 轮）"
+        _ak_rc2=0
+        ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o packages.adb ./*.apk ) \
+            >/tmp/apk-index.log 2>&1 || _ak_rc2=1
+    done
+    if [ "$_ak_rc2" = "0" ] && [ -s "$_AK_DIR/packages.adb" ]; then
         echo "==> [apk-cache] 索引已生成：$(wc -c < "$_AK_DIR/packages.adb") 字节"
+        if [ "$_ak_round" -gt 0 ]; then
+            echo "==> [apk-cache] 重建 $_ak_round 轮后成功（被剔除的不是合法 apk，真机也装不上）"
+        fi
     else
         echo "::warning::apk index 失败，本包库只能按绝对路径单文件装（依赖齐时可用）"
         tail -6 /tmp/apk-index.log 2>/dev/null

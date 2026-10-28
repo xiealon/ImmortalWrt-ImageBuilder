@@ -51,7 +51,12 @@ _pcr_prepare() {
 _pcr_install() {
     _pcr_p="$1"
     [ -n "$_pcr_p" ] || return 2
-    if pcl_installed "$_pcr_p"; then
+    # 【v.180.148】PCR_FORCE=1 时不做「已装就跳过」判定。
+    # opkg 只认 /usr/lib/opkg/info 的记账，不校验文件在不在：包记在册上、
+    # 二进制却被删了，pcl_installed 照样返回真，整条恢复链在这里断掉。
+    # 强制模式直接走 install --force-reinstall —— 不卸载、不联网、只覆盖文件，
+    # 是「记账说有、实际没有」这种情况唯一能修的手段。
+    if [ "${PCR_FORCE:-0}" != "1" ] && pcl_installed "$_pcr_p"; then
         pcl_log "已安装，跳过：$_pcr_p"
         return 0
     fi

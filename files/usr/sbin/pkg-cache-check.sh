@@ -47,11 +47,14 @@ if ! pcl_lists_ok; then
     exit 1
 fi
 
-# 索引文件是 0 字节也算坏：opkg 会当成空源，装什么都 not available
+# 索引文件是 0 字节、或里面一条 Package 都没有，也算坏：opkg 会当成空源，
+# 装什么都 not available。这里按条目数判，不按字节数 —— 字节阈值是拍出来的，
+# 小库（比如只带几个包的精简镜像）会被误报成异常。
 if [ "$PKG_MGR" = "opkg" ]; then
-    _pcc_sz=$(wc -c < "$(pcl_lists_dir)/pkgcache" 2>/dev/null | tr -d ' ')
-    if [ -z "$_pcc_sz" ] || [ "$_pcc_sz" -lt 1024 ]; then
-        echo "索引文件异常（${_pcc_sz:-0} 字节）"
+    _pcc_n=$(grep -c '^Package: ' "$(pcl_lists_dir)/pkgcache" 2>/dev/null)
+    [ -n "$_pcc_n" ] || _pcc_n=0
+    if [ "$_pcc_n" -lt 1 ]; then
+        echo "索引里没有任何包条目（$(pcl_lists_dir)/pkgcache）"
         exit 1
     fi
 fi

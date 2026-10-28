@@ -478,17 +478,48 @@ if [ -s "$_idx_all" ]; then
 fi
 echo "==> [pkg-cache] 来源 B（官方 feed + 依赖闭包）：$_pc_b 个"
 
-# --- 校验：ipk 必须是能解开的 tar.gz，坏的全部剔掉 ---
+# --- 校验：ipk 必须是能解开的 tar.gz ---
+# 【v.180.140】对照 25 版 v.180.138 的教训：坏包不能一删了之。
+# 25 版就是「工具读不懂」被当成「包坏了」，一句话删掉 114 个包（含官方源刚下载的）。
+# 24 版这里原来也是 gzip -t 失败就 rm，只是恰好没踩到 —— 同一个坑，一起补上：
+#   ① 先看魔数再看 gzip -t：1f8b 之外的东西（HTML 错误页、截断文件、空文件）
+#      要把它到底是什么打进日志，否则下次照样只能猜；
+#   ② 隔离到 /tmp，不直接删：判断可能错，错了还得能捡回来；
+#   ③ 熔断：坏到 max(3, 总数 5%) 以上，就不是个别畸形文件了，一个都不动。
+_pc_total=$(ls "$_PC_DIR"/*.ipk 2>/dev/null | wc -l)
+_pc_cap=$((_pc_total / 20))
+[ "$_pc_cap" -lt 3 ] && _pc_cap=3
+[ "$_pc_cap" -gt "$_pc_total" ] && _pc_cap=$_pc_total
 _pc_bad=0
+_pc_badlist=""
 for _f in "$_PC_DIR"/*.ipk; do
     [ -f "$_f" ] || continue
-    if ! gzip -t "$_f" 2>/dev/null; then
-        rm -f "$_f"
-        _pc_bad=$((_pc_bad + 1))
-        echo "剔除损坏的包：$(basename "$_f")" >> "$_PC_MISS"
+    _h=$(od -An -tx1 -N2 "$_f" 2>/dev/null | tr -d ' \n')
+    if [ "$_h" = "1f8b" ] && gzip -t "$_f" 2>/dev/null; then
+        continue
     fi
+    _pc_bad=$((_pc_bad + 1))
+    _pc_badlist="$_pc_badlist $(basename "$_f")|${_h:-unreadable}"
 done
-[ "$_pc_bad" -gt 0 ] && echo "::warning::剔除 $_pc_bad 个损坏/不完整的 ipk"
+if [ "$_pc_bad" -gt 0 ]; then
+    if [ "$_pc_bad" -gt "$_pc_cap" ]; then
+        echo "::error::$_pc_bad 个 ipk 通不过 gzip 校验，超过上限 $_pc_cap（总 $_pc_total）——判定为系统性异常，本次一个都不剔除"
+        _show=0
+        for _b in $_pc_badlist; do
+            _show=$((_show + 1))
+            [ "$_show" -le 10 ] && echo "    未剔除：$_b"
+        done
+    else
+        mkdir -p /tmp/ipk-quarantine 2>/dev/null
+        for _b in $_pc_badlist; do
+            _bn=$(printf '%s' "$_b" | sed 's/|.*//')
+            _bh=$(printf '%s' "$_b" | sed 's/.*|//')
+            echo "隔离损坏的包：$_bn（头部=$_bh）" >> "$_PC_MISS"
+            mv -f "$_PC_DIR/$_bn" /tmp/ipk-quarantine/ 2>/dev/null
+        done
+        echo "::warning::隔离 $_pc_bad 个损坏/不完整的 ipk（在 /tmp/ipk-quarantine，未删除）"
+    fi
+fi
 
 # --- 白名单缺口报告 ---
 _pc_gap=""
@@ -603,6 +634,12 @@ _pc_idx=$(grep -c '^Package: ' "$_PC_DIR/Packages" 2>/dev/null)
 _pc_uniq=$(grep '^Package: ' "$_PC_DIR/Packages" 2>/dev/null | sort -u | wc -l | tr -d ' ')
 [ -n "$_pc_uniq" ] || _pc_uniq=0
 echo "==> [pkg-cache] 本地索引：$_pc_idx 条 / $_pc_uniq 个包名 / $_pc_n 个 ipk"
+# 0 条索引等于「有包、查不了依赖」：opkg update 会为这个源建出一条空记录，
+# 之后按包名装任何东西都是 not available from any configured src。
+# 这不是 warning，是包库报废 —— 必须报错，别让镜像看起来是好的。
+if [ "$_pc_uniq" -lt 1 ]; then
+    echo "::error::本地索引 0 条：$_pc_n 个 ipk 一个都没进 Packages，真机上本地源是空源"
+fi
 # 判据用去重包名数，不用条目数：同名多版本会让条目数天然大于包数，
 # 按条目数比会天天误报（v.180.132 的 "139 < 164" 就是误报，实为同包去重）
 if [ "$_pc_uniq" -lt "$_pc_n" ]; then
@@ -613,12 +650,19 @@ fi
 # -n 不写时间戳：同一个 Packages 每次产出的 gz 字节一致，便于比对
 if [ -s "$_PC_DIR/Packages" ]; then
     gzip -9 -n -c "$_PC_DIR/Packages" > "$_PC_DIR/Packages.gz" 2>/dev/null
-    if [ -s "$_PC_DIR/Packages.gz" ]; then
-        echo "==> [pkg-cache] Packages.gz：$(wc -c < "$_PC_DIR/Packages.gz" | tr -d ' ') 字节"
+    # 字节数非 0 只是必要条件：截断的 gz 也有字节数，opkg 解到一半就报错。
+    # 所以再解一遍验证，过了才算真的可用。
+    if [ -s "$_PC_DIR/Packages.gz" ] && gzip -t "$_PC_DIR/Packages.gz" 2>/dev/null; then
+        echo "==> [pkg-cache] Packages.gz：$(wc -c < "$_PC_DIR/Packages.gz" | tr -d ' ') 字节，解压校验通过"
     else
-        echo "::error::Packages.gz 生成失败，本地源在真机上必然 update 失败"
+        echo "::error::Packages.gz 生成失败或校验不过，本地源在真机上必然 update 失败"
         exit 1
     fi
+else
+    # 与 0 条索引同理：没有 Packages 就没有 gz，opkg 会报
+    # copy_file: ///rom/root/pkg-cache/Packages.gz: No such file or directory
+    echo "::error::Packages 为空，不生成 Packages.gz；本地源在真机上 update 必失败"
+    exit 1
 fi
 
 # --- ④ 签名 Packages.sig ---

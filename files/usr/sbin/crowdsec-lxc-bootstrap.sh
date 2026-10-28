@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-29.180.160"
+SCRIPT_VER="2026-10-29.180.161"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -702,11 +702,12 @@ SD_DNS_IPS="$SD_DNS_IP_CN $SD_DNS_IP_OUT"
 #   Ⅳ crowdsec 配置与安装             —— INSTALL / PREP / CAPIBLOCK / BOOT / LOGCONF / LAPI / BOUNCERVERIFY
 #   Ⅴ 网络连通检测（到达 crowdsec）+ enroll —— DEPS / SMARTCHK / ENROLL
 #   联网只出现在 Ⅴ：Ⅴ 之前一律离线，包只在 /rom 与运行时文件系统之间搬。
-# 【v.180.102】pkg_base 的闸门从「只看 lxc」扩到「lxc 五件套 + smartdns」：
-#   · 两者都是固件该内置的东西，缺了都属于装机不合规，Ⅱ 阶段一次性说清；
-#   · 判据仍是「命令/文件真能用」而不是包名：lxc 看五件套，smartdns 看二进制 + init；
-#   · 缺任何一个都先走 /rom 文件级自愈（lxc→pkg-restore.sh --lxc，smartdns→pkg-restore-smartdns.sh）；
-#   · 自愈后仍缺才 hard exit 1。
+# 【v.180.102 → v.180.157】pkg_base 现在只管 lxc 五件套。
+#   · v.180.102 曾把阀门扩到「lxc + smartdns」，v.180.157 又把 smartdns 整坨
+#     （包 / 规则文件 / uci / 界面）搬出本脚本，所以这里只剩 lxc 这一半；
+#     smartdns 的去处在 pkg-restore-smartdns.sh 的文件头，判在探针的 _dns_ok；
+#   · 判据是「命令/文件真能用」而不是包名：lxc 看五件套 + 一次 lxc-start --version 冒烟；
+#   · 缺了先走 /rom 包级自愈（lxc→pkg-restore.sh --lxc），自愈后仍缺才 hard exit 1。
 _LXC_MISSING=""
 _PKG_MISSING=""
 
@@ -716,7 +717,8 @@ _PKG_MISSING=""
 # 语义：opkg remove 并不会删掉 /rom 里的原件，只在 overlay 层写一个 whiteout 把上层遮住。
 #       所以「恢复」= 按清单把 /rom 的原件拷回运行时路径，不联网、不装包。
 # 边界：不修 opkg 数据库（opkg list-installed 依旧看不到它），也不覆盖 conffiles
-#       （/etc/config/* 这类用户配置一律跳过，配置由 build_smartdns 按 uci 重写）。
+#        （/etc/config/* 这类用户配置一律跳过；smartdns 的配置由
+#         pkg-restore-smartdns.sh --config 重写，不在本脚本里）。
 ROMDIR="${ROMDIR:-/rom}"
 # PKGROOT 只给夹具用：生产环境为空串，写的仍是真实路径 /usr/...
 PKGROOT="${PKGROOT:-}"
@@ -906,7 +908,8 @@ _pkgcache_install_apk() {
     _pkgcache_ready || return 1
     command -v apk >/dev/null 2>&1 || return 1
     # 已装就跳过：没坏的东西不该重装一遍
-    if apk info -e "$_pci_pkg" >/dev/null 2>&1; then
+    # 【v.180.161】PCR_FORCE=1 时不跳：同上，记账在、文件缺。
+    if [ "${PCR_FORCE:-0}" != "1" ] && apk info -e "$_pci_pkg" >/dev/null 2>&1; then
         return 0
     fi
     # ① 绝对路径直装。glob 用 [0-9] 卡住版本号起点：
@@ -949,7 +952,9 @@ _pkgcache_install() {
     _pkgcache_ready || return 1
     command -v "$OPKG_BIN" >/dev/null 2>&1 || return 1
     # 已经装着的就跳过：没坏的东西不该被 --force-reinstall 重写一遍
-    if "$OPKG_BIN" list-installed 2>/dev/null | grep -q "^$_pci_pkg "; then
+    # 【v.180.161】PCR_FORCE=1 时不跳：调用方已确认文件真的不在，而记账还在。
+    if [ "${PCR_FORCE:-0}" != "1" ] \
+       && "$OPKG_BIN" list-installed 2>/dev/null | grep -q "^$_pci_pkg "; then
         return 0
     fi
     # ① 绝对路径直装。用 ls 匹配而不是猜文件名：版本号里带 r 修订，猜不准
@@ -992,7 +997,18 @@ _rom_restore_pkg() {
     #      下次升级会乱，属于「能跑但半残」；
     #   ② 文件清单随包版本漂，判据越写越复杂，迟早出错。
     # 老固件没有本地包库时也无法恢复 —— 装不上就报错，不再补一个半残状态。
-    _pkgcache_install "$1"
+    #
+    # 【v.180.161】第二个参数为 1 = 强制重装（跳过「已装就跳过」判定）。
+    # 只有「文件确已不在」的调用方才许传 1：opkg 记账清不掉手删的文件，
+    # 而 pkg-cache-restore.sh 和下面的内置回退都以记账为准 —— 不强制的话，
+    # 恢复链会在这里返回 0 却不做任何事，日志上看是「装好了」，实际二进制还缺。
+    # PCR_FORCE 是 pkg-cache-lib.sh 的既定接口（那边 _pcr_install 已支持），
+    # 这里只是把它透传下去；前缀赋值由子进程按环境变量继承。
+    if [ "${2:-0}" = "1" ]; then
+        PCR_FORCE=1 _pkgcache_install "$1"
+    else
+        _pkgcache_install "$1"
+    fi
 }
 
 # 【v.180.150】bouncer 不再单独拷文件 —— 和 lxc 一样走本地包安装。
@@ -1038,11 +1054,11 @@ _preflight() {
         *lxc*) _rom_restore_lxc || log "[PRE] lxc 装回失败（固件未内置或包库不可用）" ;;
         esac
         case "$_pf_bad" in
-        *cs-firewall-bouncer* | *init.d/*) _rom_restore_pkg crowdsec-firewall-bouncer \
+        *cs-firewall-bouncer* | *init.d/*) _rom_restore_pkg crowdsec-firewall-bouncer 1 \
             || log "[PRE] bouncer 装回失败" ;;
         esac
         case "$_pf_bad" in
-        *nft*) _rom_restore_pkg nftables-json || log "[PRE] nftables-json 装回失败" ;;
+        *nft*) _rom_restore_pkg nftables-json 1 || log "[PRE] nftables-json 装回失败" ;;
         esac
         hash -r 2>/dev/null || true
         # 装完复判，别把「试过了」当「好了」
@@ -1069,7 +1085,7 @@ _preflight() {
 
 
 # 必备组件缺哪些（lxc 五件套）：全在返回 0；否则返回 1，缺失清单留在 _LXC_MISSING。
-# 【v.180.112】只管 lxc，不含 smartdns —— 后者见 _smartdns_installed。
+# 【v.180.112 / v.180.157】只管 lxc，不管 smartdns —— 后者归 pkg-restore-smartdns.sh + 探针。
 # 只读不写 —— verify / build 两侧都用它。
 # 五个命令逐一查：lxc-ls / lxc-info / lxc-attach 都是独立 applet 包（各自一个 ipk/apk），
 # 没有任何反向依赖会把它们拉进来；只查 lxc-start 会得出「装好了」的假阳性 —— v.180.99 修正。
@@ -1081,9 +1097,10 @@ _preflight() {
 # 判据取向：只有明确看到动态库加载错误才判缺。反过来的「误判成缺」会让 pkg_base
 # 硬失败、把整轮引导带走，代价远大于漏报，所以其余任何异常输出一律放过。
 # 【v.180.112】本函数旧名带 sd 字样，有歧义：函数体只查 lxc 五件套，
-# 与 smartdns 毫无关系；而 _pkg_missing_all / verify_sd_serve 都带 sd 字样，
-# 三处混在一起看，很容易以为「smartdns 的检查在这儿」。
-# smartdns 的检查在 _smartdns_installed，由 _pkg_missing_all 单独调用。
+# 与 smartdns 毫无关系；v.180.112 之前本函数旧名带 sd 字样，容易被读成
+# 「smartdns 也在这里查」。v.180.157 起 smartdns 已整坨移出本脚本：
+# 恢复归 pkg-restore-smartdns.sh，判定归探针的 _dns_ok / _dns_watch，
+# 本脚本不再有、也不该有 smartdns 的检查入口。
 _lxc_missing_deps() {
     _LXC_MISSING=""
     for _lx_c in lxc-start lxc-stop lxc-ls lxc-info lxc-attach; do
@@ -1441,7 +1458,8 @@ build_dhcp_ignore() {
     # 【v.180.97】53 不在这里让。曾经并到这一步试过，但 dhcp_ignore 排在 DEPS 之前：
     # 那一刻 smartdns 可能还没装，让出 53 等于本机立刻没有 DNS，_net_ready 第三层
     # 的 nslookup 必然失败，DEPS 就永远装不上 smartdns —— 首轮直接死锁。
-    # 所以让位只跟着 smartdns 的配置走（build_smartdns → _dnsmasq_release_53）：
+    # 所以让位跟着 smartdns 的接管结果走（port=53 + auto_set_dnsmasq=1 时，
+    # 由 smartdns 自己的 init 让 dnsmasq 退出 53，见 pkg-restore-smartdns.sh 文件头）：
     # 能接管了才放手，接管不了就继续让 dnsmasq 顶着。
     log "[DHCP] 已让权：lan.ignore=1，并清除 RA/authoritative"
     return 0
@@ -2910,8 +2928,15 @@ _bouncer_cfg_ok() {
 _bouncer_heal() {
     # 走本地包安装（与 lxc 同一套）。bouncer 的 Depends 里有 libnftables.so* 与
     # libnftnl11，opkg 走本地源时会自己解依赖，不需要在这里手写递归。
-    _rom_restore_pkg crowdsec-firewall-bouncer
-    _rom_restore_pkg nftables-json
+    # 【v.180.161】按「文件在不在」决定要不要强制：本函数也会因为「配置缺」被叫来，
+    # 那种情况包是好的，强制重装只会白刷一次 flash 并重启 bouncer。
+    _bh_f_b=0
+    { [ -x /usr/bin/cs-firewall-bouncer ] \
+      && [ -x /etc/init.d/crowdsec-firewall-bouncer ]; } || _bh_f_b=1
+    _bh_f_n=0
+    [ -x /usr/sbin/nft ] || _bh_f_n=1
+    _rom_restore_pkg crowdsec-firewall-bouncer "$_bh_f_b"
+    _rom_restore_pkg nftables-json "$_bh_f_n"
     # 【v.180.111】配置一律重建，不再从只读基座拷出厂版。
     # 真机实测（2026-10-27）出厂版本身不可用：
     #   enabled '0' / api_key '' / api_url http://localhost:8080/ / list interface 'eth1'

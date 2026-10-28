@@ -62,14 +62,42 @@ _pr_installed() {
     return 1
 }
 
+# 记账说已装、文件却不在的情形（手删二进制，包仍在册）。
+#   判据只覆盖「可执行 / init / 共享库」这几类 —— 它们缺了包一定跑不起来；
+#   /usr/share、/etc/config 一律不看：conffiles 允许用户改动，缺失不等于包坏，
+#   拿它当判据会把「用户改过配置」误判成「包坏了」，每轮重装一次、刷 flash。
+#   工具：opkg 的安装清单 /rom/usr/lib/opkg/info/<pkg>.list 是文本，逐行可读；
+#   apk（25.12）的清单在二进制 installed.adb 里，取不到 → 直接放行，维持原行为。
+#   取 /rom 侧而不是运行侧：opkg remove 会把运行侧的 .list 一起删掉，
+#   而 /rom 是只读基底，固件原始清单永远在。
+_pr_files_ok() {
+    _pfo_l="$ROMDIR/usr/lib/opkg/info/$1.list"
+    [ -f "$_pfo_l" ] || return 0
+    while IFS= read -r _pfo_f; do
+        case "$_pfo_f" in
+            /usr/bin/*|/usr/sbin/*|/etc/init.d/*|/lib/*.so*|/usr/lib/*.so*) ;;
+            *) continue ;;
+        esac
+        [ -e "$PKGROOT$_pfo_f" ] || return 1
+    done < "$_pfo_l"
+    return 0
+}
+
 # 单包：装回。第二个参数为 1 时强制重装（跳过「已装」判定）。
 _pr_pkg() {
     _p1="$1"
     _pf="${2:-0}"
     [ -n "$_p1" ] || return 2
     if [ "$_pf" != "1" ] && _pr_installed "$_p1"; then
-        log "已安装，跳过：$_p1"
-        return 0
+        if _pr_files_ok "$_p1"; then
+            log "已安装，跳过：$_p1"
+            return 0
+        fi
+        # 【v.180.161】记账在、文件缺：pkg-cache-restore.sh 的「已装就跳过」会在这里
+        # 把整条恢复链静默断掉（返回 0、看上去装好了、实际什么都没做）。
+        # 只能走 PCR_FORCE=1：不卸载、不联网，只按包内清单覆盖文件。
+        log "记账说已装但关键文件缺失，改强制重装：$_p1"
+        _pf=1
     fi
     [ -x "$RESTORE_BIN" ] || {
         log "找不到包级安装脚本：$RESTORE_BIN"
@@ -126,8 +154,28 @@ _pr_tree() {
 #        lxc-6.0.5-r1.x86_64.apk     404  ← 不带架构后缀
 #      即 index.json 里的 "包名":"版本" 直接拼成 包名-版本.apk，与 build25.sh
 #      来源 B 的拼法一致。
-#      不在覆盖范围：rpcd-mod-lxc（不以 lxc- 开头，是 LuCI 的 rpcd 模块，
-#      不是 lxc 运行时；opkg 侧的 lxc-*.list 同样扫不到它）。
+#      另外三个同属 lxc 体系、名字却不以 lxc- 开头的包由 _pr_lxc_extra 点名：
+#      rpcd-mod-lxc（LuCI 的 rpcd 模块）、luci-app-lxc、luci-i18n-lxc-zh-cn。
+#      两条扫描通路都捞不到它们；两版固件的白名单（build24.sh 的 _PC_WANT、
+#      build25.sh 的 _AK_WANT）都列了这三个，也都打进了 /rom 包库。
+# 点名包：同属 lxc 体系但名字不以 lxc- 开头，opkg 的 lxc-*.list 与 apk 的
+# lxc-*.apk 两条通路都匹配不到，只能在这里写死名字。
+# 取向和上面一致：包里真有才输出。更老的固件没有这三个包时不会硬装，
+# 也不会因为它们缺席而把整条 lxc 恢复判成失败。
+_pr_lxc_extra() {
+    for _lx_n in rpcd-mod-lxc luci-app-lxc luci-i18n-lxc-zh-cn; do
+        if [ -f "$ROMDIR/usr/lib/opkg/info/$_lx_n.list" ]; then
+            printf '%s\n' "$_lx_n"
+            continue
+        fi
+        for _lx_f in "$ROMDIR"/root/apk-cache/"$_lx_n"-*.apk; do
+            [ -f "$_lx_f" ] || continue
+            printf '%s\n' "$_lx_n"
+            break
+        done
+    done
+}
+
 _pr_lxc_names() {
     for _pl_l in "$ROMDIR"/usr/lib/opkg/info/lxc-*.list; do
         [ -f "$_pl_l" ] || continue
@@ -140,6 +188,7 @@ _pr_lxc_names() {
         _pl_n="${_pl_n%.apk}"
         printf '%s\n' "$_pl_n" | sed -n 's/-[0-9][0-9.]*-r[0-9][0-9]*$//p'
     done
+    _pr_lxc_extra
 }
 
 _pr_lxc() {

@@ -930,6 +930,16 @@ _pkgcache_install_apk() {
 }
 
 _pkgcache_install() {
+    # 【v.180.133】优先交给独立脚本 pkg-cache-restore.sh：它自己会先按
+    # resolve -> 挂源 -> 铺索引 的顺序把前置做好，再装 —— 顺序不再依赖调用方。
+    # 下面这段内置实现保留为兜底：老固件里没有那个脚本，行为必须完全不变。
+    if [ -x /usr/sbin/pkg-cache-restore.sh ]; then
+        if /usr/sbin/pkg-cache-restore.sh "$1" >/dev/null 2>&1; then
+            log "[PKG] 经 pkg-cache-restore.sh 装回：$1"
+            return 0
+        fi
+        log "[PKG] pkg-cache-restore.sh 未成功：$1，回退内置实现"
+    fi
     if [ "$_PKG_MGR" = "apk" ]; then
         _pkgcache_install_apk "$1"
         return $?

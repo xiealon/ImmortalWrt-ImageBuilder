@@ -17,11 +17,12 @@
 #      luci-base，递归会一路碰 rpcd / ubus / ucode 一大片基础系统，那是砸系统。
 #
 # 用法：
-#   pkg-restore-smartdns.sh          全量：本体 + 依赖 + /etc/smartdns + 界面
-#   pkg-restore-smartdns.sh --check  只判在位（0 在位 / 1 缺失）
-#   pkg-restore-smartdns.sh --pkg    只装本体（含依赖树）
-#   pkg-restore-smartdns.sh --conf   只补 /etc/smartdns/ 规则文件
-#   pkg-restore-smartdns.sh --luci   只补界面
+#   pkg-restore-smartdns.sh              全量：本体 + 依赖 + /etc/smartdns + 界面
+#   pkg-restore-smartdns.sh --check      只判服务生效（pidof + 53 端口），0=生效
+#   pkg-restore-smartdns.sh --check-pkg  只判包在不在（二进制 + init），0=在
+#   pkg-restore-smartdns.sh --pkg        只装本体（含依赖树）
+#   pkg-restore-smartdns.sh --conf       只补 /etc/smartdns/ 规则文件
+#   pkg-restore-smartdns.sh --luci       只补界面
 #
 # 环境变量：ROMDIR（默认 /rom）、PKGROOT（默认空）、RESTORE_BIN（默认 pkg-restore.sh）
 #
@@ -52,15 +53,32 @@ log() { printf '[PKG] %s\n' "$*"; }
 # /etc/smartdns/ 下必须存在的规则文件（与构建期固化进固件的那批一致）
 SD_CONF_FILES="address.conf blacklist-ip.conf custom.conf domain-block.list domain-forwarding.list"
 
-# 在位判据：二进制 + init 缺一不可；再加一次冒烟，因为 opkg remove libopenssl3
-# 之后两个 -x 判断依然为真，只有真跑才看得见动态库缺口。
-# 取向：只有明确的加载错误才判「不在位」，其余异常一律放过 —— 误判成缺会把整轮引导带走。
-_sd_check() {
+# 【v.180.148】两个判据分开，绝不混用：
+#
+#   --check-pkg   包在不在：二进制 + init 可执行，再做一次冒烟。
+#                 回答的是「要不要装包」。装完就结束，不管服务起没起。
+#
+#   --check       服务生不生效：pidof + 53 端口。
+#                 回答的是「功能通不通」。不生效就重启/报错，绝不再装包 ——
+#                 否则配置写错会变成「判缺 -> 装包 -> 还是不通 -> 再判缺 -> 再装」的死循环。
+#
+# 服务判据与 bootstrap 的 verify_sd_serve 同口径（那边 v.180.106 已改用 pidof，
+# 注释记了弃用 pgrep -x 的原因：busybox 拿 argv[0] 整串比对，"smartdns" 恒不相等）。
+# 冒烟只为抓动态库缺口：opkg remove libopenssl3 之后两个 -x 判断依然为真，
+# 只有真跑才看得见。取向仍是「只有明确加载错误才判缺」，其余异常一律放过。
+_sd_pkg_ok() {
     [ -x "$PKGROOT/usr/sbin/smartdns" ] && [ -x "$PKGROOT/etc/init.d/smartdns" ] || return 1
     case "$("$PKGROOT/usr/sbin/smartdns" -v 2>&1)" in
         *"Error loading"*|*"No such file"*|*"not found"*|*"cannot open shared object"*)
             return 1 ;;
     esac
+    return 0
+}
+
+# 只读判定，不启动、不重启 —— 本脚本负责恢复文件，服务拉起是 bootstrap 的事
+_sd_serve() {
+    pidof smartdns >/dev/null 2>&1 || return 1
+    netstat -lnu 2>/dev/null | grep -qE ':53[[:space:]]' || return 1
     return 0
 }
 
@@ -116,7 +134,10 @@ case "${1:-}" in
     exit $_rc
     ;;
 --check)
-    _sd_check && exit 0 || exit 1
+    _sd_serve && exit 0 || exit 1
+    ;;
+--check-pkg)
+    _sd_pkg_ok && exit 0 || exit 1
     ;;
 --pkg)
     _sd_pkg && exit 0 || exit 1

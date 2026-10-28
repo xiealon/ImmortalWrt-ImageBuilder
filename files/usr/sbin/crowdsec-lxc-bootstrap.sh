@@ -990,6 +990,11 @@ _rom_restore_pkg() {
     if _pkgcache_install "$1"; then
         return 0
     fi
+    # 【v.180.146】文件级恢复已搬到 pkg-restore.sh（独立脚本，能脱离 bootstrap 单测）。
+    # 这里只决定顺序：包级装不上才走文件级。老固件没有该脚本时落回下面的内联实现。
+    if [ -x /usr/sbin/pkg-restore.sh ]; then
+        /usr/sbin/pkg-restore.sh --files "$1" && return 0
+    fi
     _rrp_base="$ROMDIR/usr/lib/opkg/info"
     [ -f "$_rrp_base/$1.list" ] || return 1
     _rrp_n=0
@@ -1033,6 +1038,10 @@ _rom_restore_tree() {
 
 # lxc 全家桶：/rom 里装了哪些 lxc-* 就恢复哪些（applet 是独立包，不会互相拉）
 _rom_restore_lxc() {
+    # 【v.180.146】lxc 全家桶扫描搬到 pkg-restore.sh --lxc，这里只做委托。
+    if [ -x /usr/sbin/pkg-restore.sh ]; then
+        /usr/sbin/pkg-restore.sh --lxc && return 0
+    fi
     _rl_any=0
     for _rl_l in "$ROMDIR"/usr/lib/opkg/info/lxc-*.list; do
         [ -f "$_rl_l" ] || continue
@@ -1051,6 +1060,11 @@ _rom_restore_lxc() {
 # 这种情况恢复不了，直接返回 1 让 pkg_base 把话说清楚。
 # /etc/config/smartdns 由 _rom_restore_pkg 统一跳过，配置交给 build_smartdns 按 uci 重写。
 _rom_restore_smartdns() {
+    # 【v.180.146】搬去 pkg-restore-smartdns.sh --pkg。smartdns 之所以单独一份，
+    # 是因为它还有 /etc/smartdns/ 规则文件和 LuCI 界面两块状态，通用恢复管不了。
+    if [ -x /usr/sbin/pkg-restore-smartdns.sh ]; then
+        /usr/sbin/pkg-restore-smartdns.sh --pkg && return 0
+    fi
     [ -f "$ROMDIR/usr/lib/opkg/info/smartdns.list" ] || return 1
     _rom_restore_tree smartdns
     return 0
@@ -1070,6 +1084,10 @@ _rom_restore_smartdns() {
 # 所以单独开一个口子，只补 /etc/smartdns/ 下这批规则文件，判据是「不存在才补」：
 # 存在就一律不动（哪怕被用户清成 0 字节，那也是他的选择），绝不碰 /etc/config/smartdns。
 _rom_restore_smartdns_conf() {
+    # 【v.180.146】规则文件清单与判据都搬进 pkg-restore-smartdns.sh --conf。
+    if [ -x /usr/sbin/pkg-restore-smartdns.sh ]; then
+        /usr/sbin/pkg-restore-smartdns.sh --conf && return 0
+    fi
     _rsc_n=0
     for _rsc_f in address.conf blacklist-ip.conf custom.conf domain-block.list domain-forwarding.list; do
         [ -e "$PKGROOT/etc/smartdns/$_rsc_f" ] && continue
@@ -1114,6 +1132,10 @@ _luci_smartdns_ok() {
 # 而界面被卸的情形里 luci-base 从来都是好的，递归只有风险没有收益。
 # smartdns 本体也不在这里补：上一段 ② 已经单独处理，各管各的。
 _rom_restore_luci_smartdns() {
+    # 【v.180.146】委托 pkg-restore-smartdns.sh --luci（不递归，避免碰 luci-base 那一大片）。
+    if [ -x /usr/sbin/pkg-restore-smartdns.sh ]; then
+        /usr/sbin/pkg-restore-smartdns.sh --luci && return 0
+    fi
     [ -f "$ROMDIR/usr/lib/opkg/info/luci-app-smartdns.list" ] || return 1
     _rom_restore_pkg luci-app-smartdns
     return 0

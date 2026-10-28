@@ -28,7 +28,20 @@
 set -u
 ROMDIR="${ROMDIR:-/rom}"
 PKGROOT="${PKGROOT:-}"
-RESTORE_BIN="${RESTORE_BIN:-/usr/sbin/pkg-cache-restore.sh}"
+
+# 包级安装脚本的查找顺序（v.180.147）：
+#   ① 显式 RESTORE_BIN
+#   ② /usr/sbin/pkg-cache-restore.sh —— 固件里的正式位置
+#   ③ 与本脚本同目录 —— 脚本被拷到 /tmp 单独验时的情况，
+#      不这么找的话「从 /tmp 跑」就永远只能走文件级兜底，测不到包级那条路。
+RESTORE_BIN="${RESTORE_BIN:-}"
+if [ -z "$RESTORE_BIN" ]; then
+    if [ -x /usr/sbin/pkg-cache-restore.sh ]; then
+        RESTORE_BIN=/usr/sbin/pkg-cache-restore.sh
+    else
+        RESTORE_BIN="$(dirname "$0")/pkg-cache-restore.sh"
+    fi
+fi
 
 log() { printf '[PKG] %s\n' "$*"; }
 

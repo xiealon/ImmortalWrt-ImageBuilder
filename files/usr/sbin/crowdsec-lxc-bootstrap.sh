@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-28.180.124"
+SCRIPT_VER="2026-10-28.180.127"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -721,8 +721,70 @@ ROMDIR="${ROMDIR:-/rom}"
 # PKGROOT 只给夹具用：生产环境为空串，写的仍是真实路径 /usr/...
 PKGROOT="${PKGROOT:-}"
 
+# ---- v.180.127：固件自带离线包源 /root/pkg-cache ----
+# build 时把关键包和它们的依赖闭包收进固件，并生成 Packages 索引。
+# 恢复时优先走 opkg install，而不是从 /rom 拷文件：
+#   · opkg 记账正确 —— opkg list-installed 和 LuCI 软件包页面都看得见；
+#   · conffiles 由包管理器恢复 —— 正是 v.180.124 那次 smartdns 事故的根因
+#     （拷文件那套对 conffiles 一律 continue，缺了永远补不上）。
+# 拷文件那套保留当兜底：opkg 因签名/源问题失败时仍然能把文件补回去。
+PKG_CACHE="${PKG_CACHE:-/root/pkg-cache}"
+OPKG_BIN="${OPKG_BIN:-opkg}"
+
+_pkgcache_ready() {
+    [ -f "$PKG_CACHE/Packages" ] || return 1
+    ls "$PKG_CACHE"/*.ipk >/dev/null 2>&1 || return 1
+    return 0
+}
+
+# 把 pkg-cache 挂成 opkg 源。幂等；已有条目就不重复写，不覆盖原有 customfeeds.conf
+_pkgcache_feed_ensure() {
+    _pcf_dir=/etc/opkg
+    _pcf_conf="$_pcf_dir/customfeeds.conf"
+    if [ -f "$_pcf_conf" ] && grep -q "file://$PKG_CACHE" "$_pcf_conf" 2>/dev/null; then
+        return 0
+    fi
+    mkdir -p "$_pcf_dir" 2>/dev/null
+    echo "src/gz pkgcache file://$PKG_CACHE" >> "$_pcf_conf" 2>/dev/null || return 1
+    log "[PKG] 已挂载本地包源：file://$PKG_CACHE"
+    return 0
+}
+
+# 让 opkg 认识这个源。优先直接铺索引到 lists 目录 —— opkg update 会去连所有
+# 远程源，离线时白等几十秒，而本地索引根本不需要联网。
+_pkgcache_lists() {
+    _pcl_dir=$(sed -n 's/^lists_dir[[:space:]]*[a-z]*[[:space:]]*\(.*\)/\1/p' /etc/opkg.conf 2>/dev/null | head -n1)
+    [ -n "$_pcl_dir" ] || _pcl_dir=/var/opkg-lists
+    mkdir -p "$_pcl_dir" 2>/dev/null || return 1
+    cp -f "$PKG_CACHE/Packages" "$_pcl_dir/pkgcache_Packages" 2>/dev/null || return 1
+    return 0
+}
+
+# 从本地源装回一个包（依赖由 opkg 自己解）。成功返回 0。
+_pkgcache_install() {
+    _pci_pkg="$1"
+    _pkgcache_ready || return 1
+    command -v "$OPKG_BIN" >/dev/null 2>&1 || return 1
+    # 已经装着的就跳过：没坏的东西不该被 --force-reinstall 重写一遍
+    if "$OPKG_BIN" list-installed 2>/dev/null | grep -q "^$_pci_pkg "; then
+        return 0
+    fi
+    _pkgcache_feed_ensure || return 1
+    _pkgcache_lists || log "[PKG] 本地索引铺设失败，改用 opkg update 拉取"
+    if "$OPKG_BIN" install --force-reinstall "$_pci_pkg" >/dev/null 2>&1; then
+        log "[PKG] 本地包源装回成功：$_pci_pkg（记账正确，LuCI 可见）"
+        return 0
+    fi
+    log "[PKG] 本地包源装不回 $_pci_pkg（可能缺签名或依赖），回退 /rom 拷文件"
+    return 1
+}
+
 # 恢复单个包：只补「运行时不存在、只读基座存在」的文件，其余一概不动
 _rom_restore_pkg() {
+    # 第一优先：走包管理器。装成功就结束，不再碰文件。
+    if _pkgcache_install "$1"; then
+        return 0
+    fi
     _rrp_base="$ROMDIR/usr/lib/opkg/info"
     [ -f "$_rrp_base/$1.list" ] || return 1
     _rrp_n=0

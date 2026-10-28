@@ -705,7 +705,7 @@ SD_DNS_IPS="$SD_DNS_IP_CN $SD_DNS_IP_OUT"
 # 【v.180.102】pkg_base 的闸门从「只看 lxc」扩到「lxc 五件套 + smartdns」：
 #   · 两者都是固件该内置的东西，缺了都属于装机不合规，Ⅱ 阶段一次性说清；
 #   · 判据仍是「命令/文件真能用」而不是包名：lxc 看五件套，smartdns 看二进制 + init；
-#   · 缺任何一个都先走 /rom 文件级自愈（lxc→_rom_restore_lxc，smartdns→_rom_restore_smartdns）；
+#   · 缺任何一个都先走 /rom 文件级自愈（lxc→pkg-restore.sh --lxc，smartdns→pkg-restore-smartdns.sh）；
 #   · 自愈后仍缺才 hard exit 1。
 _LXC_MISSING=""
 _PKG_MISSING=""
@@ -1019,41 +1019,21 @@ _rom_restore_lxc() {
     return 0
 }
 
-# smartdns：单包 + 两个依赖（libpthread→libc / libopenssl3），走通用递归即可。
-# 与 lxc 的区别：没有「一堆 applet 各占一个包」的问题，所以不需要按通配符扫清单；
-# 反过来要显式判 .list 在不在 —— 不在说明这台机器的固件压根没编 smartdns，
-# 这种情况恢复不了，直接返回 1 让 pkg_base 把话说清楚。
-# /etc/config/smartdns 由 _rom_restore_pkg 统一跳过，配置交给 build_smartdns 按 uci 重写。
-_rom_restore_smartdns() {
-    # 【v.180.146】搬去 pkg-restore-smartdns.sh --pkg。smartdns 之所以单独一份，
-    # 是因为它还有 /etc/smartdns/ 规则文件和 LuCI 界面两块状态，通用恢复管不了。
-    if [ -x /usr/sbin/pkg-restore-smartdns.sh ]; then
-        /usr/sbin/pkg-restore-smartdns.sh --pkg && return 0
-    fi
-    [ -f "$ROMDIR/usr/lib/opkg/info/smartdns.list" ] || return 1
-    _rom_restore_pkg smartdns
-    _rom_restore_pkg libopenssl3
-    return 0
-}
-
-# 【v.180.124】/etc/smartdns/ 下的规则文件缺失时，从只读基座补回。
-# 起因（2026-10-28 真机）：日志报
-#   smartdns: open config file '/etc/smartdns/address.conf' failed, No such file or directory
-#   smartdns: process config failed at '/var/etc/smartdns/smartdns.conf:32'
-# 然后 procd 记 crash loop 6 crashes，smartdns 一次都没起来，53 端口全空，
-# probe 判「进程不在」→ 重跑 bootstrap → 重启 smartdns → 再挂，死循环。
-# 实测 /rom/etc/smartdns/ 里 address.conf(824B)、blacklist-ip.conf(231B)、
-# custom.conf(97B)、domain-block.list(96B)、domain-forwarding.list(106B) 全在，
-# /etc/smartdns/ 里却一个都没有。
-# 根因：_rom_restore_pkg 对 conffiles 一律 continue。那条保护本意是「不覆盖用户配置」，
-# 但文件根本不存在时，它就退化成「永远不修」—— 刷多少次机都不会自己好。
-# 所以单独开一个口子，只补 /etc/smartdns/ 下这批规则文件，判据是「不存在才补」：
-# 存在就一律不动（哪怕被用户清成 0 字节，那也是他的选择），绝不碰 /etc/config/smartdns。
-_rom_restore_smartdns_conf() {
-    # 【v.180.150】内联实现已删 —— 规则文件补回只在 pkg-restore-smartdns.sh --conf 里，
-    # 那份清单和判据跟 bootstrap 没有第二份拷贝，改一处就够。
-    [ -x /usr/sbin/pkg-restore-smartdns.sh ] || return 1
-    /usr/sbin/pkg-restore-smartdns.sh --conf
+# 【v.180.151】smartdns 的三块状态全部归 /usr/sbin/pkg-restore-smartdns.sh：
+#   --pkg  装包（smartdns + libopenssl3，依赖由包管理器解）
+#   --conf 补 /etc/smartdns/ 规则文件（不存在才补，存在一律不动）
+#   --luci 补 luci-app-smartdns 界面（故意不递归依赖）
+# bootstrap 侧不再有这三个函数的实现，只留下面这一个转发。
+# 为什么搬走：三块恢复的判据只跟 smartdns 自己有关，跟容器、跟引导流程毫无关系。
+# 留在 bootstrap 里等于「只想修 smartdns 也得把整轮引导跑一遍（含容器检查）」，纯白花时间。
+# 现在单独执行 pkg-restore-smartdns.sh 就能全套修好，一次都不碰容器。
+# 也不内联兜底：脚本不在 = 固件没编进去，直接报错，不留「文件在、记账没有」的半残态。
+_sd_restore() {
+    [ -x /usr/sbin/pkg-restore-smartdns.sh ] || {
+        log "[PKG] 固件里没有 /usr/sbin/pkg-restore-smartdns.sh，smartdns 无法恢复（$1）"
+        return 1
+    }
+    /usr/sbin/pkg-restore-smartdns.sh "$@"
 }
 
 # luci-app-smartdns 界面是否可用（v.180.116）。
@@ -1079,22 +1059,6 @@ _luci_smartdns_ok() {
     fi
     [ -f "$ROMDIR/usr/lib/opkg/info/luci-app-smartdns.list" ] || return 0
     return 1
-}
-
-# 恢复 luci-app-smartdns：纯前端包（menu.d / rpcd acl / view js / smartdns-call），
-# 无二进制、无 init、无 conffiles 之外的状态。
-# 只调 _rom_restore_pkg，**不递归依赖** —— 它的 Depends 里有 luci-base，
-# 递归进去会一路碰 rpcd / ubus / ucode 一大片，那是基础系统，不归 pkg_base 管；
-# 而界面被卸的情形里 luci-base 从来都是好的，递归只有风险没有收益。
-# smartdns 本体也不在这里补：上一段 ② 已经单独处理，各管各的。
-_rom_restore_luci_smartdns() {
-    # 【v.180.146】委托 pkg-restore-smartdns.sh --luci（不递归，避免碰 luci-base 那一大片）。
-    if [ -x /usr/sbin/pkg-restore-smartdns.sh ]; then
-        /usr/sbin/pkg-restore-smartdns.sh --luci && return 0
-    fi
-    [ -f "$ROMDIR/usr/lib/opkg/info/luci-app-smartdns.list" ] || return 1
-    _rom_restore_pkg luci-app-smartdns
-    return 0
 }
 
 # smartdns 是否真在位：二进制 + init 脚本缺一不可（少了 init 就没法启停，等于没装）
@@ -1699,10 +1663,10 @@ build_smartdns() {
     # ① 配置之前先确保二进制在位：固件自带；万一被 opkg remove 遮掉了，
     #    从只读基座拷回来（不联网、不装包、不碰 opkg 数据库），然后照常写配置。
     # 【v.180.102】pkg_base 已把 smartdns 纳入第 1 步闸门，正常路径到这里必然在位；
-    # 这段是二次兜底（中途被手工摘掉、或本节点被单独调用时），统一走 _rom_restore_smartdns。
+    # 这段是二次兜底（中途被手工摘掉、或本节点被单独调用时），统一走 _sd_restore --pkg。
     if ! _smartdns_installed; then
         log "[SMARTDNS] smartdns 不在位，先试只读基座 $ROMDIR"
-        _rom_restore_smartdns
+        _sd_restore --pkg
         hash -r 2>/dev/null || true
         if ! _smartdns_installed; then
             log "[SMARTDNS] 只读基座也没有 smartdns：固件未内置该包（查 shell/custom-packages.sh 24.10 / shell/apk-custom-packages.sh 25.12 的 CUSTOM_PACKAGES）"
@@ -1713,7 +1677,7 @@ build_smartdns() {
     # 【v.180.124】二进制在位不等于配置在位。/etc/smartdns/ 的规则文件被遮掉时，
     # 生成的 conf 里 conf-file 指向不存在的文件，smartdns 解析失败直接退出、
     # 进 crash loop，表现和「没装 smartdns」一模一样。所以写配置之前先补。
-    _rom_restore_smartdns_conf
+    _sd_restore --conf
     build_smartdns_main || return 1
     # 上游没铺满就不接管 DNS：此时 dnsmasq 仍留着 53，不会出现「53 让出去了却没人应答」
     build_smartdns_upstream || return 1
@@ -1804,7 +1768,7 @@ build_pkg_base() {
         log "[PKG] 必备组件齐备：lxc 五件套（start/stop/ls/info/attach）+ smartdns（固件自带）"
         if ! _luci_smartdns_ok; then
             log "[PKG] 界面 luci-app-smartdns 缺失（固件里有、现在没了）—— 单独补，不影响上面两项"
-            _rom_restore_luci_smartdns \
+            _sd_restore --luci \
                 || log "[PKG] 只读基座里没有 luci-app-smartdns 的安装清单，界面不恢复（不影响引导）"
         fi
         return 0
@@ -1817,12 +1781,12 @@ build_pkg_base() {
     fi
     # ② smartdns：二进制 + init + 依赖（libopenssl3 等）；.list 不在就没救
     if ! _smartdns_installed; then
-        _rom_restore_smartdns \
+        _sd_restore --pkg \
             || log "[PKG] 只读基座里没有 smartdns 的安装清单（$ROMDIR/usr/lib/opkg/info/smartdns.list）"
     fi
     # ③ luci-app-smartdns：界面，可选件。补不上只记一条，绝不影响本节点成败
     if ! _luci_smartdns_ok; then
-        _rom_restore_luci_smartdns \
+        _sd_restore --luci \
             || log "[PKG] 只读基座里没有 luci-app-smartdns 的安装清单，界面不恢复（不影响引导）"
     fi
     hash -r 2>/dev/null || true

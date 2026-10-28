@@ -506,7 +506,14 @@ if [ -n "$_AK_BIN" ]; then
         [ -n "$_ak_badlist" ] || break
         _ak_round=$((_ak_round + 1))
         for _ak_b in $_ak_badlist; do
-            [ -f "$_AK_DIR/$_ak_b" ] && rm -f "$_AK_DIR/$_ak_b"
+            [ -f "$_AK_DIR/$_ak_b" ] || continue
+            # 把文件头打进日志：下次不用再猜这些包到底是什么东西
+            #   1f8b0800 -> gzip，可能是 .ipk 被改名成 .apk（tar 能读、apk 不认）
+            #   41444264 -> "ADBd"，真是 apk v3，那就是 schema 与 apk 二进制不匹配
+            #   其他     -> 根本不是包（HTML/空文件/截断）
+            _ak_h=$(od -An -tx1 -N4 "$_AK_DIR/$_ak_b" 2>/dev/null | tr -d ' \n')
+            echo "::error::剔除 $_ak_b：头部=$_ak_h 大小=$(wc -c < "$_AK_DIR/$_ak_b") 字节（不是本机 apk 能读的包）"
+            rm -f "$_AK_DIR/$_ak_b"
         done
         _ak_bn=$(printf '%s\n' "$_ak_badlist" | grep -c .)
         echo "==> [apk-cache] 剔除 $_ak_bn 个非 apk 文件后重建索引（第 $_ak_round 轮）"

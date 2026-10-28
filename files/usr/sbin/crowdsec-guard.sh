@@ -106,10 +106,25 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
 SCRIPT_VER="2026-10-28.180.131"
+# 【v.180.152】补进 v.180.146~151 新增的 6 个恢复脚本。
+# 之前只保护了 bootstrap / probe / guard 三个 crowdsec-*.sh，pkg 这套是裸奔的：
+# 被 opkg remove 连带删掉、或被手滑 rm 掉之后，探针那一轮只会报「装不上」，
+# 没有任何东西能把脚本本身补回来 —— 恰恰是这套保护最该覆盖的对象。
+# 它们是纯脚本（最大 6.3KB），六份加起来 ≈33KB，比容器 rootfs 里任何一个文件都小，
+# 每轮 cmp 的代价可以忽略；纳入之后探针 60 秒内自动复原，与 bootstrap 同一套机制。
+# 注意：lxc 的二进制（lxc-start 等，14MB 量级）**不**进这份清单 ——
+# 它们归 pkg_base 的包级恢复（_lxc_missing_deps 判在位 → 从 /rom 包库 opkg install），
+# 文件级逐字节比对 14MB 二进制只会把探针拖慢，且包级恢复本来就带记账，更干净。
 GUARD_FILES="${CS_GUARD_FILES:-
 /usr/sbin/crowdsec-lxc-bootstrap.sh
 /usr/sbin/crowdsec-lxc-probe.sh
 /usr/sbin/crowdsec-guard.sh
+/usr/sbin/pkg-restore.sh
+/usr/sbin/pkg-restore-smartdns.sh
+/usr/sbin/pkg-cache-lib.sh
+/usr/sbin/pkg-cache-fix.sh
+/usr/sbin/pkg-cache-check.sh
+/usr/sbin/pkg-cache-restore.sh
 /etc/rc.local
 /etc/init.d/crowdsec-lxc-probe
 /etc/init.d/lxc-auto

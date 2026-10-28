@@ -749,7 +749,9 @@ apk)
 *)
     _PKG_DEF_OV=/root/pkg-cache
     _PKG_DEF_RO=/rom/root/pkg-cache
-    _PKG_IDX=Packages
+    # opkg 的 file:// 源只认 Packages.gz，判据必须与 opkg 的真实要求一致，
+    # 否则会把「有 Packages 但 opkg 读不了」的目录当成可用源指过去。
+    _PKG_IDX=Packages.gz
     _PKG_EXT=ipk
     ;;
 esac
@@ -768,7 +770,9 @@ PKG_CACHE_RO="${PKG_CACHE_RO:-$_PKG_DEF_RO}"
 _PKG_CACHE_ACT=""
 
 # 解析实际可用的包库目录到 _PKG_CACHE_ACT；两处都不可用返回 1。
-# 判定用 Packages 索引而不是目录存在：空目录（被清过）照样不可用。
+# 判定用 Packages.gz 而不是目录存在：空目录（被清过）照样不可用；
+# 只有裸 Packages 也不行 —— opkg 的 file:// 源只认 .gz（24.10.6 真机实证：
+# copy_file: ///rom/root/pkg-cache/Packages.gz: No such file or directory）。
 _pkgcache_resolve() {
     for _pr_d in "$PKG_CACHE_RO" "$PKG_CACHE"; do
         [ -n "$_pr_d" ] || continue
@@ -851,7 +855,16 @@ _pkgcache_lists() {
     fi
     mkdir -p "$_pcl_dir" 2>/dev/null || return 1
     _pcl_src="${_PKG_CACHE_ACT:-$PKG_CACHE}"
-    cp -f "$_pcl_src/Packages" "$_pcl_dir/pkgcache_Packages" 2>/dev/null || return 1
+    # 【v.180.133】落盘文件名必须是源名本身（pkgcache），不是 pkgcache_Packages。
+    # opkg 按 `src/gz <名字>` 里的名字去 lists_dir 找文件 —— 真机 update 输出
+    # "Updated list of available packages in /var/opkg-lists/immortalwrt_core"
+    # 就是源名。写成 pkgcache_Packages，opkg 根本不读它，铺了等于没铺。
+    cp -f "$_pcl_src/Packages" "$_pcl_dir/pkgcache" 2>/dev/null || return 1
+    # 源目录带 Packages.sig 就一起铺：验签开着时 opkg 按 <名字>.sig 找签名，
+    # 找不到会丢弃整份索引（这是「本地源总被丢掉」的第二个原因）。
+    if [ -f "$_pcl_src/Packages.sig" ]; then
+        cp -f "$_pcl_src/Packages.sig" "$_pcl_dir/pkgcache.sig" 2>/dev/null
+    fi
     return 0
 }
 
@@ -866,7 +879,7 @@ _pkgcache_lists_ensure() {
         _ple_dir=$(sed -n 's/^lists_dir[[:space:]]*[a-z]*[[:space:]]*\(.*\)/\1/p' /etc/opkg.conf 2>/dev/null | head -n1)
         [ -n "$_ple_dir" ] || _ple_dir=/var/opkg-lists
     fi
-    [ -f "$_ple_dir/pkgcache_Packages" ] && return 0
+    [ -f "$_ple_dir/pkgcache" ] && return 0
     _pkgcache_lists
 }
 
@@ -875,10 +888,11 @@ _pkgcache_lists_ensure() {
 # ① 绝对路径直装 —— opkg 把本地 ipk 当文件处理，不走源、不读索引签名、不联网。
 #    固件里的依赖通常齐（包是被单独卸掉的），一步就够，也是绝大多数情形。
 #
-# ② 走本地源装 —— 只有依赖也缺时才需要（让 opkg 自己解依赖）。这条路必须加
-#    --no-check-signature：本机 /etc/opkg.conf 开着 option check_signature，
-#    而本地 file:// 源不可能带 Packages.sig（那是官方源用 usign 私钥签的），
-#    不跳过就是 signature verification failed，一个包都装不上。
+# ② 走本地源装 —— 只有依赖也缺时才需要（让 opkg 自己解依赖）。这条路带
+#    --no-check-signature：/etc/opkg.conf 默认开着 option check_signature，
+#    v.180.133 起构建会给本地源签出 Packages.sig、公钥放进 /etc/opkg/keys/，
+#    正常固件上验签本来能过；但老固件（无 sig、无公钥）仍会失败。
+#    跳过验签只是让两条固件都能装回，包来自本机只读 squashfs，来源可信。
 #    参数支持与否先探测一次；老版本 opkg 没这开关就不带，别为个参数把整条路堵死。
 _PKG_SIGOPT=""
 

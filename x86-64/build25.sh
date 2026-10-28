@@ -648,6 +648,13 @@ if [ -n "$_AK_BIN" ]; then
         414442 | 1f8b*) _ak_idx_ok=1 ;;
         *) echo "::error::packages.adb 头部异常（$_ak_magic），这份索引 apk 读不了" ;;
         esac
+        # 【v.180.138】上一轮的空库索引是 88 字节的 gzip，头部 1f8b08 —— 魔数检查
+        # 放它过去了，日志还打「索引已生成」，等于把空库包装成成功。
+        # 包数上百的索引不可能低于 1KB，低于这个数就是空索引。
+        if [ "$_ak_idx_ok" = "1" ] && [ "$_ak_sz" -lt 1024 ]; then
+            echo "::error::packages.adb 只有 $_ak_sz 字节，是空索引（$(ls "$_AK_DIR"/*.apk 2>/dev/null | wc -l) 个包一个都没进去）"
+            _ak_idx_ok=0
+        fi
         if [ "$_ak_idx_ok" = "1" ]; then
             echo "==> [apk-cache] 索引已生成：$_ak_sz 字节，头部=$_ak_magic"
             if [ "$_ak_round" -gt 0 ]; then

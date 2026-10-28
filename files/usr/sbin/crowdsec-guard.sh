@@ -619,7 +619,9 @@ _dir_sig() {
 # pkgcache 行摘掉。死源会让 `opkg update` 整体报错退出，用户装任何包都先撞这个错，
 # 而错误信息只说「某个源取不到」，看不出是本机缓存目录没了。
 # 【v.180.130】两种包管理器各有一套源文件与索引名，先分流再走同一套逻辑：
-#   opkg(24.10)：/etc/opkg/customfeeds.conf 里 "src/gz pkgcache file://..." + Packages
+#   opkg(24.10)：/etc/opkg/customfeeds.conf 里 "src/gz pkgcache file://..." + Packages.gz
+#               （opkg 的 file:// 源只认 .gz：给裸 Packages 一律 update 失败，
+#                24.10.6 真机实证 copy_file: .../Packages.gz: No such file or directory）
 #   apk (25.12)：/etc/apk/repositories 里一行 "file://..."                  + packages.adb
 _pkgcache_feed_audit() {
     if command -v apk >/dev/null 2>&1; then
@@ -633,14 +635,23 @@ _pkgcache_feed_audit() {
     else
         _pfa_conf="$ROOT/etc/opkg/customfeeds.conf"
         _pfa_pat='^src/gz[[:space:]]*pkgcache[[:space:]]'
-        _pfa_idx=Packages
+        # 判据必须与 opkg 的真实要求对齐：opkg 只吃 Packages.gz，不认裸 Packages。
+        # 用 Packages 当判据的话，guard 会把源指到一个「有索引但 opkg 读不了」的目录，
+        # update 照样失败 —— v.180.133 之前的真机故障就是这么来的。
+        _pfa_idx=Packages.gz
         _pfa_ro="${PKG_CACHE_RO:-$ROM_DIR/root/pkg-cache}"
         _pfa_ov="${PKG_CACHE:-$ROOT/root/pkg-cache}"
         _pfa_what="pkgcache 源"
         _pfa_fmt='src/gz pkgcache file://%s\n'
     fi
     [ -f "$_pfa_conf" ] || return 0
-    grep -qE "$_pfa_pat" "$_pfa_conf" 2>/dev/null || return 0
+    # 【v.180.133】原来这里还有一句
+    #   grep -qE "$_pfa_pat" "$_pfa_conf" 2>/dev/null || return 0
+    # 意思是 conf 里没有 pkgcache 行就直接退出，等于永不补写。而
+    # customfeeds.conf 出厂只有三行注释，_pkgcache_feed_ensure 又只在
+    # 「要装包」时才被调用 —— 两条路都不写，本地包库在真机上等于不存在，
+    # opkg 根本不会去读它。现在不管有没有这一行都往下走：
+    # 有就纠正指向（目录变了/被删了），没有就补写。
     _pfa_live=""
     for _pfa_d in "$_pfa_ro" "$_pfa_ov"; do
         [ -n "$_pfa_d" ] || continue

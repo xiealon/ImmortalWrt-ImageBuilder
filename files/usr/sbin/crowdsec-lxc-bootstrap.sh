@@ -990,11 +990,11 @@ _rom_restore_pkg() {
     if _pkgcache_install "$1"; then
         return 0
     fi
-    # 【v.180.146】文件级恢复已搬到 pkg-restore.sh（独立脚本，能脱离 bootstrap 单测）。
-    # 这里只决定顺序：包级装不上才走文件级。老固件没有该脚本时落回下面的内联实现。
-    if [ -x /usr/sbin/pkg-restore.sh ]; then
-        /usr/sbin/pkg-restore.sh --files "$1" && return 0
-    fi
+    # 【v.180.148】原来的第二优先「pkg-restore.sh --files」(从 /rom 逐条拷文件) 已删除：
+    # 它只在包级装不上时才触发，而那种情形下恢复出来的包 opkg 记不上账 ——
+    # LuCI 看不见、依赖解不开、下次升级会乱，属于「能跑但半残」。
+    # 与其留一条修不干净的兜底，不如让失败明确暴露。下面这段内联兜底仍保留：
+    # 老固件没有本地包库时，它是唯一手段。
     _rrp_base="$ROMDIR/usr/lib/opkg/info"
     [ -f "$_rrp_base/$1.list" ] || return 1
     _rrp_n=0

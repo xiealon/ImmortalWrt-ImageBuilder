@@ -38,6 +38,9 @@ if [ -z "$PKG_MGR" ]; then
     fi
 fi
 OPKG_BIN="${OPKG_BIN:-opkg}"
+# apk 二进制同理：生产环境就是 apk，夹具里可以指到一个假的，
+# 好在没有真实 apk 的机器上验「索引重建」这条分支。
+APK_BIN="${APK_BIN:-apk}"
 
 case "$PKG_MGR" in
 apk)
@@ -71,12 +74,29 @@ PKG_CACHE_ACT=""
 # 为什么 /rom 优先：squashfs 删不掉（overlay 里 rm -rf 只写 whiteout，从此该路径
 # 永久读不到，而 /rom 那份一个字节没少），也不占 overlay 空间、不会混进旧固件的包。
 pcl_resolve() {
+    # 第一轮：索引在位就直接用（正常情况，也是最快的一条路）
     for _pcl_d in "$PKG_CACHE_RO" "$PKG_CACHE"; do
         [ -n "$_pcl_d" ] || continue
         [ -f "$_pcl_d/$PKG_IDX" ] || continue
         PKG_CACHE_ACT="$_pcl_d"
         return 0
     done
+    # 第二轮（仅 apk）：包都在、只缺索引的目录也算可用。
+    # 为什么要有这一轮：apk 没有 lists 中转层，索引就躺在源目录里，构建时
+    # `apk index` 一旦失败，镜像里就是「118 个包 + 没有 packages.adb」。
+    # 如果只在有索引时才算可用，这种情况会被判成「包库不可用」，而事实是
+    # 包全在、只差一份能现场重建的索引 —— 判死等于让人只能重刷固件。
+    # 只挑可写的那个：/rom 是 squashfs，重建写不进去。
+    if [ "$PKG_MGR" = "apk" ]; then
+        for _pcl_d in "$PKG_CACHE" "$PKG_CACHE_RO"; do
+            [ -n "$_pcl_d" ] || continue
+            [ -d "$_pcl_d" ] || continue
+            [ -n "$(ls "$_pcl_d"/*.apk 2>/dev/null)" ] || continue
+            [ -w "$_pcl_d" ] || continue
+            PKG_CACHE_ACT="$_pcl_d"
+            return 0
+        done
+    fi
     PKG_CACHE_ACT=""
     return 1
 }
@@ -102,9 +122,16 @@ pcl_feed_ok() {
     return 0
 }
 
-# 索引是否已铺设（apk 没有中间层，直接读源目录里的 packages.adb）
+# 索引是否已铺设。
+# apk 没有中间层：索引就是源目录里的 packages.adb，所以「铺设」等于「它存在且非空」。
+# 【v.180.137】这里原来对 apk 直接 return 0，后果是 fix 第③步永远判定「已在位」、
+# 永远跳过 _pcf_lists_ensure，apk 缺索引时没有任何修复动作 —— 判据恒真比没有判据更坏。
 pcl_lists_ok() {
-    [ "$PKG_MGR" = "apk" ] && return 0
+    if [ "$PKG_MGR" = "apk" ]; then
+        [ -n "$PKG_CACHE_ACT" ] || return 1
+        [ -s "$PKG_CACHE_ACT/packages.adb" ] || return 1
+        return 0
+    fi
     [ -f "$(pcl_lists_dir)/pkgcache" ]
 }
 

@@ -277,15 +277,22 @@ fi
 #
 # 不能干脆删掉：万一某个 ImageBuilder 版本确实不带 apk，索引就建不出来，
 # 包库退化成「只能按绝对路径装」。所以保留这个兜底分支，代价只是一次 test -x。
+# 【v.180.138】判据从「文件存在」收紧成「版本是 apk-tools 3」。
+# 上一轮就是只看 -x：文件在、可执行，但它是 2.x —— 只认 tar.gz 的老格式，
+# 而 25.12 的包全是 ADB 二进制，于是 no index 一败到底（详见包库段）。
 _AK_PRE=""
 for _c in "$(pwd)/staging_dir/host/bin/apk" "$(pwd)/staging_dir/host/bin/apk.static"; do
-    if [ -x "$_c" ]; then
-        _AK_PRE="$_c"
-        break
-    fi
+    [ -x "$_c" ] || continue
+    _ak_v=$("$_c" --version 2>&1 | head -n1)
+    echo "==> [预构建] 探测到 $_c：${_ak_v:-（--version 无输出）}"
+    case "$_ak_v" in
+    *"apk-tools 3"*) _AK_PRE="$_c" ;;
+    *) echo "==> [预构建] 版本不是 apk-tools 3.x，用它建索引会把 25.12 的包全部判成坏包" ;;
+    esac
+    break
 done
 if [ -n "$_AK_PRE" ]; then
-    echo "==> [预构建] apk 二进制已就绪：$_AK_PRE"
+    echo "==> [预构建] apk 二进制可用：$_AK_PRE"
     echo "==> [预构建] 跳过第一遍 make image，最后只编一次"
 else
     echo "==> [预构建] 没有可用的 apk 二进制，先编一遍把它生成出来（这一步省不掉）"
@@ -401,17 +408,45 @@ fi
 # 【v.180.131】apk 不一定在 PATH 里：ImageBuilder 容器是 Ubuntu 底子，
 # 给 rootfs 装包用的是它自带那份（staging_dir/host/bin/apk，与 grub-bios-setup 同目录）。
 # 上一轮日志已证实探测命中该路径，所以按「自带优先、PATH 兜底」探一遍固定到 _AK_BIN。
+# 【v.180.138】这里原来只判断 -x。文件在、能执行，但版本不对时 apk 会对
+# 25.12 的每一个包都报 file format not supported —— 上一轮 114 个包就是这样
+# 被判成「坏包」全删的。所以从这一处开始就必须按版本挑工具。
 _AK_BIN=""
 for _c in "$(pwd)/staging_dir/host/bin/apk" "$(pwd)/staging_dir/host/bin/apk.static"; do
-    if [ -x "$_c" ]; then
-        _AK_BIN="$_c"
-        break
-    fi
+    [ -x "$_c" ] || continue
+    case "$("$_c" --version 2>&1 | head -n1)" in
+    *"apk-tools 3"*) _AK_BIN="$_c"; break ;;
+    esac
+    echo "==> [apk-cache] 跳过 $_c：$("$_c" --version 2>&1 | head -n1)（不是 apk-tools 3）"
 done
 if [ -z "$_AK_BIN" ]; then
-    _AK_BIN=$(command -v apk 2>/dev/null)
+    _c=$(command -v apk 2>/dev/null)
+    if [ -n "$_c" ]; then
+        case "$("$_c" --version 2>&1 | head -n1)" in
+        *"apk-tools 3"*) _AK_BIN="$_c" ;;
+        *) echo "==> [apk-cache] PATH 里的 apk 也不是 3.x：$("$_c" --version 2>&1 | head -n1)" ;;
+        esac
+    fi
 fi
-[ -n "$_AK_BIN" ] && echo "==> [apk-cache] apk 用：$_AK_BIN"
+if [ -n "$_AK_BIN" ]; then
+    echo "==> [apk-cache] apk 用：$_AK_BIN（$("$_AK_BIN" --version 2>&1 | head -n1)）"
+    # 早探针：拿 extra-packages 里现成的一个包试建索引，别等到 196M 全下完
+    # 才发现工具不行。这一步失败只报错、不阻断 —— 阻断会把整条构建线卡死，
+    # 而「有包无索引」的镜像至少还能按绝对路径装。
+    _ak_ep=$(find extra-packages -name '*.apk' 2>/dev/null | head -n1)
+    if [ -n "$_ak_ep" ]; then
+        if "$_AK_BIN" --allow-untrusted index -o /tmp/ak-probe.adb "$_ak_ep" \
+                >/tmp/ak-probe.log 2>&1 && [ -s /tmp/ak-probe.adb ]; then
+            echo "==> [apk-cache] 索引工具自检通过（试索引 $(basename "$_ak_ep")）"
+        else
+            echo "::error::索引工具自检失败：$_AK_BIN 读不了 $(basename "$_ak_ep")"
+            head -n 5 /tmp/ak-probe.log 2>/dev/null
+        fi
+        rm -f /tmp/ak-probe.adb
+    fi
+else
+    echo "::error::没有可用的 apk-tools 3.x，本次建不出 packages.adb（包仍会收进镜像，真机可按绝对路径装）"
+fi
 
 # 【v.180.132】来源 B：官方源官方包，用 index.json + HTTP 直下。
 # 三条实证决定了这个写法，前两版都是错的：
@@ -523,34 +558,81 @@ fi
 # opkg 那套「拼 Packages 纯文本」在这里完全不适用。
 # 失败不中断构建：没有索引时仍能按绝对路径单文件装（依赖齐的常态够用）。
 if [ -n "$_AK_BIN" ]; then
+    # 先把工具本身是什么打出来。v.180.136 的日志里缺的就是这一行，才把
+    # 「工具不认所有包」误判成「包全是坏的」，一路把 114 个包连同官方源下载的
+    # 一起删光，最后产出空包库 + 0 条 manifest。
+    echo "==> [apk-cache] apk 版本：$("$_AK_BIN" --version 2>&1 | head -n1)"
+
     _ak_rc2=0
     ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o packages.adb ./*.apk ) \
         >/tmp/apk-index.log 2>&1 || _ak_rc2=1
     if [ "$_ak_rc2" != "0" ]; then
         ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o packages.adb --no-warnings ./*.apk ) >>/tmp/apk-index.log 2>&1 || _ak_rc2=2
     fi
-    # 【v.180.134】一个坏包会让整份索引建不出来（112 个好的也白搭）。
-    # 所以失败时从日志里抓出错文件名，删掉再重试，最多 5 轮。
+
+    _ak_total=$(ls "$_AK_DIR"/*.apk 2>/dev/null | wc -l)
+    # 一次最多剔 5%（下限 3）：能剔掉的就该是「个别畸形文件」。
+    # 需要剔一大片的时候，坏的不是包，是工具 —— 这时候一个都不能删。
+    _ak_cap=$((_ak_total / 20))
+    [ "$_ak_cap" -lt 3 ] && _ak_cap=3
+    [ "$_ak_cap" -gt "$_ak_total" ] && _ak_cap=$_ak_total
+
+    # 单包独立验证：只有「单独建索引也失败」的包才算坏。
+    # 批量日志里那句 file format not supported 分不清「这个包坏」和「工具不认所有包」——
+    # 工具读不了格式时，会对每一个文件报同一句话。
+    _ak_one_ok() {
+        _o=$(mktemp 2>/dev/null) || _o="/tmp/ak-one.$$"
+        _r=1
+        if ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o "$_o" "./$1" ) >/dev/null 2>&1; then
+            [ -s "$_o" ] && _r=0
+        fi
+        rm -f "$_o"
+        return $_r
+    }
+
+    # 工具可用性探针：随便挑前 3 个包单独建索引，全失败就说明是工具的问题。
+    _ak_probe=0
+    for _ak_p in $(ls "$_AK_DIR"/*.apk 2>/dev/null | head -n3); do
+        if _ak_one_ok "$(basename "$_ak_p")"; then
+            _ak_probe=1
+            break
+        fi
+    done
+    if [ "$_ak_probe" = "0" ] && [ "$_ak_total" -gt 0 ]; then
+        echo "::error::apk 工具连单个包都建不出索引 —— 这是工具/版本问题，不是包的问题，本次一个文件都不剔除"
+        tail -3 /tmp/apk-index.log 2>/dev/null
+    fi
+
+    # 隔离目录放 /tmp，绝不能放 files/ 下 —— 那是要整体打进固件的。
+    _AK_QUAR="${AK_QUAR_OVERRIDE:-/tmp/apk-quarantine}"
+    _ak_quar_n=0
     _ak_round=0
     while :; do
         [ "$_ak_rc2" = "0" ] && [ -s "$_AK_DIR/packages.adb" ] && break
         [ "$_ak_round" -ge 5 ] && break
+        [ "$_ak_probe" = "1" ] || break
         _ak_badlist=$(grep -oE '\./[^:]+: file format not supported' /tmp/apk-index.log \
             2>/dev/null | sed 's#^\./##; s/: file format not supported$//' | sort -u)
         [ -n "$_ak_badlist" ] || break
+        _ak_cand=$(printf '%s\n' "$_ak_badlist" | grep -c .)
+        if [ "$_ak_cand" -gt "$_ak_cap" ]; then
+            echo "::error::一轮要剔 $_ak_cand 个，超过上限 $_ak_cap（总 $_ak_total）——判定为工具不认这批包，一个都不删"
+            break
+        fi
         _ak_round=$((_ak_round + 1))
+        mkdir -p "$_AK_QUAR" 2>/dev/null
         for _ak_b in $_ak_badlist; do
             [ -f "$_AK_DIR/$_ak_b" ] || continue
-            # 把文件头打进日志：下次不用再猜这些包到底是什么东西
-            #   1f8b0800 -> gzip，可能是 .ipk 被改名成 .apk（tar 能读、apk 不认）
-            #   41444264 -> "ADBd"，真是 apk v3，那就是 schema 与 apk 二进制不匹配
-            #   其他     -> 根本不是包（HTML/空文件/截断）
+            if _ak_one_ok "$_ak_b"; then
+                echo "==> [apk-cache] 保留 $_ak_b：批量报错，但单包能建索引（工具问题，不是包坏）"
+                continue
+            fi
             _ak_h=$(od -An -tx1 -N4 "$_AK_DIR/$_ak_b" 2>/dev/null | tr -d ' \n')
-            echo "::error::剔除 $_ak_b：头部=$_ak_h 大小=$(wc -c < "$_AK_DIR/$_ak_b") 字节（不是本机 apk 能读的包）"
-            rm -f "$_AK_DIR/$_ak_b"
+            echo "::error::隔离 $_ak_b：头部=$_ak_h 大小=$(wc -c < "$_AK_DIR/$_ak_b") 字节（单包也建不出索引）"
+            # 用 mv 不用 rm：判断可能错，判断错了还得能从隔离区捡回来
+            mv -f "$_AK_DIR/$_ak_b" "$_AK_QUAR/$_ak_b" 2>/dev/null && _ak_quar_n=$((_ak_quar_n + 1))
         done
-        _ak_bn=$(printf '%s\n' "$_ak_badlist" | grep -c .)
-        echo "==> [apk-cache] 剔除 $_ak_bn 个非 apk 文件后重建索引（第 $_ak_round 轮）"
+        echo "==> [apk-cache] 隔离 $_ak_quar_n 个后重建索引（第 $_ak_round 轮）"
         _ak_rc2=0
         ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o packages.adb ./*.apk ) \
             >/tmp/apk-index.log 2>&1 || _ak_rc2=1

@@ -214,21 +214,23 @@ echo "==> 容器内受保护文件已进固件（16 个，/rom 只读基准）"
 # 出镜像前补齐执行位并逐项断言：路径改名或文件漏拷时让构建直接失败。
 # 不再用 2>/dev/null 把 chmod 的错误吞掉——那样后面那句"已确保可执行"就是在撒谎。
 # 99-custom.sh / 98-lxc-auto.sh 走 uci-defaults 的 `.` 载入，不依赖执行位，所以只在 chmod 里，不进断言表。
+# 【v.180.143】改成扫目录，不再逐个枚举。
+# 起因：v.180.133 新增的 pkg-cache-check/fix/restore/lib.sh 忘了加进原来的枚举列表，
+# 四个脚本以 644 进固件，真机 /usr/sbin/pkg-cache-check.sh 直接
+#   -ash: /usr/sbin/pkg-cache-check.sh: Permission denied   (rc=126)
+# 而 bootstrap 里调 /usr/sbin/pkg-cache-restore.sh 的地方同样失效 —— 包级自愈一直是废的，
+# 只是没在真机上跑过所以没暴露。枚举法必然还会漏，改成扫 files/usr/sbin/*.sh。
 chmod +x files/etc/rc.local \
          files/etc/uci-defaults/99-custom.sh \
          files/etc/uci-defaults/98-lxc-auto.sh \
-         files/usr/sbin/crowdsec-lxc-bootstrap.sh \
-         files/usr/sbin/crowdsec-lxc-probe.sh \
-         files/usr/sbin/crowdsec-guard.sh \
+         files/usr/sbin/*.sh \
          files/etc/init.d/crowdsec-lxc-probe 2>/dev/null
 for _f in files/etc/rc.local \
-          files/usr/sbin/crowdsec-lxc-bootstrap.sh \
-          files/usr/sbin/crowdsec-lxc-probe.sh \
-          files/usr/sbin/crowdsec-guard.sh \
+          files/usr/sbin/*.sh \
           files/etc/init.d/crowdsec-lxc-probe; do
     [ -x "$_f" ] || { echo "::error::缺少执行位: $_f"; exit 1; }
 done
-echo "==> 已确保 CrowdSec 引导脚本可执行"
+echo "==> 已确保引导/自愈脚本可执行（files/usr/sbin 下 $(ls files/usr/sbin/*.sh 2>/dev/null | wc -l | tr -d ' ') 个）"
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Building image with the following packages:"
 echo "$PACKAGES"

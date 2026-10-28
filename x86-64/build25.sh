@@ -428,21 +428,38 @@ if [ -z "$_AK_BIN" ]; then
         esac
     fi
 fi
+_AK_IDX=""
 if [ -n "$_AK_BIN" ]; then
     echo "==> [apk-cache] apk 用：$_AK_BIN（$("$_AK_BIN" --version 2>&1 | head -n1)）"
-    # 早探针：拿 extra-packages 里现成的一个包试建索引，别等到 196M 全下完
-    # 才发现工具不行。这一步失败只报错、不阻断 —— 阻断会把整条构建线卡死，
+    # 【v.180.139】根因终于定位：apk 有两个建索引的 applet，作用完全不同 ——
+    #   apk index  -> 生成 v2 的 APKINDEX.tar.gz，只吃 tar.gz 包
+    #   apk mkndx  -> 生成 apkv3 的 packages.adb，这才是 25.12 要的东西
+    # 之前一直用 index 去读 ADB 包，于是每个包都报
+    #   "xxx.apk: file format not supported (in this applet)"
+    # 那句 (in this applet) 的意思正是「当前 applet 不支持这种文件格式」。
+    # v.180.134 把这句当成「包是坏的」，是整条误删链的起点。
+    #
+    # 早探针顺便就把 applet 定下来：拿 extra-packages 里现成的一个包逐个试，
+    # 谁能建出非空索引就用谁。失败只报错不阻断 —— 阻断会卡死整条构建线，
     # 而「有包无索引」的镜像至少还能按绝对路径装。
     _ak_ep=$(find extra-packages -name '*.apk' 2>/dev/null | head -n1)
     if [ -n "$_ak_ep" ]; then
-        if "$_AK_BIN" --allow-untrusted index -o /tmp/ak-probe.adb "$_ak_ep" \
-                >/tmp/ak-probe.log 2>&1 && [ -s /tmp/ak-probe.adb ]; then
-            echo "==> [apk-cache] 索引工具自检通过（试索引 $(basename "$_ak_ep")）"
-        else
-            echo "::error::索引工具自检失败：$_AK_BIN 读不了 $(basename "$_ak_ep")"
+        for _ap in mkndx index; do
+            if "$_AK_BIN" --allow-untrusted "$_ap" -o /tmp/ak-probe.adb "$_ak_ep" \
+                    >/tmp/ak-probe.log 2>&1 && [ -s /tmp/ak-probe.adb ]; then
+                _AK_IDX="$_ap"
+                echo "==> [apk-cache] 索引命令确定为 apk $_ap（试索引 $(basename "$_ak_ep") 通过）"
+                break
+            fi
+        done
+        if [ -z "$_AK_IDX" ]; then
+            echo "::error::apk mkndx 与 index 都建不出索引：$_AK_BIN 读不了 $(basename "$_ak_ep")"
             head -n 5 /tmp/ak-probe.log 2>/dev/null
         fi
         rm -f /tmp/ak-probe.adb
+    else
+        # 没有现成的包可试：押 mkndx（25.12 唯一的正解），失败再回退
+        _AK_IDX="mkndx"
     fi
 else
     echo "::error::没有可用的 apk-tools 3.x，本次建不出 packages.adb（包仍会收进镜像，真机可按绝对路径装）"
@@ -557,17 +574,17 @@ fi
 # apk 的索引是 packages.adb（二进制 ADB 格式），手写不出来，必须用它自己的命令。
 # opkg 那套「拼 Packages 纯文本」在这里完全不适用。
 # 失败不中断构建：没有索引时仍能按绝对路径单文件装（依赖齐的常态够用）。
-if [ -n "$_AK_BIN" ]; then
+if [ -n "$_AK_BIN" ] && [ -n "$_AK_IDX" ]; then
     # 先把工具本身是什么打出来。v.180.136 的日志里缺的就是这一行，才把
     # 「工具不认所有包」误判成「包全是坏的」，一路把 114 个包连同官方源下载的
     # 一起删光，最后产出空包库 + 0 条 manifest。
-    echo "==> [apk-cache] apk 版本：$("$_AK_BIN" --version 2>&1 | head -n1)"
+    echo "==> [apk-cache] apk 版本：$("$_AK_BIN" --version 2>&1 | head -n1)，索引命令：$_AK_IDX"
 
     _ak_rc2=0
-    ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o packages.adb ./*.apk ) \
+    ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted "$_AK_IDX" -o packages.adb ./*.apk ) \
         >/tmp/apk-index.log 2>&1 || _ak_rc2=1
     if [ "$_ak_rc2" != "0" ]; then
-        ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o packages.adb --no-warnings ./*.apk ) >>/tmp/apk-index.log 2>&1 || _ak_rc2=2
+        ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted "$_AK_IDX" -o packages.adb --no-warnings ./*.apk ) >>/tmp/apk-index.log 2>&1 || _ak_rc2=2
     fi
 
     _ak_total=$(ls "$_AK_DIR"/*.apk 2>/dev/null | wc -l)
@@ -583,7 +600,7 @@ if [ -n "$_AK_BIN" ]; then
     _ak_one_ok() {
         _o=$(mktemp 2>/dev/null) || _o="/tmp/ak-one.$$"
         _r=1
-        if ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o "$_o" "./$1" ) >/dev/null 2>&1; then
+        if ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted "$_AK_IDX" -o "$_o" "./$1" ) >/dev/null 2>&1; then
             [ -s "$_o" ] && _r=0
         fi
         rm -f "$_o"
@@ -634,7 +651,7 @@ if [ -n "$_AK_BIN" ]; then
         done
         echo "==> [apk-cache] 隔离 $_ak_quar_n 个后重建索引（第 $_ak_round 轮）"
         _ak_rc2=0
-        ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted index -o packages.adb ./*.apk ) \
+        ( cd "$_AK_DIR" && "$_AK_BIN" --allow-untrusted "$_AK_IDX" -o packages.adb ./*.apk ) \
             >/tmp/apk-index.log 2>&1 || _ak_rc2=1
     done
     # 【v.180.137】索引（packages.adb）就是这个包库的依赖查询表：

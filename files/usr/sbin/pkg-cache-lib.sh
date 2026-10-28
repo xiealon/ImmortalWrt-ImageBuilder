@@ -63,7 +63,10 @@ esac
 
 # 源配置里「我们那一行」的行首特征
 if [ "$PKG_MGR" = "apk" ]; then
-    PCR_PAT='^file://.*/(apk|pkg)-cache/?$'
+    # 【v.180.141】要同时匹配两种写法：升级前固件里可能残留旧的
+    # `file://<目录>`（那种写法 apk 会去 <目录>/<arch>/Packages.adb 找索引，
+    # 永远找不到），升级后要能被识别并替换掉，不能留两条源。
+    PCR_PAT='^(ndx[[:space:]]+)?file://.*/(apk|pkg)-cache(/packages\.adb)?/?$'
 else
     PCR_PAT='^src/gz[[:space:]]*pkgcache[[:space:]]'
 fi
@@ -116,7 +119,14 @@ pcl_lists_dir() {
 pcl_feed_ok() {
     [ -n "$PKG_CACHE_ACT" ] || return 1
     [ -f "$PKG_CACHE_CONF" ] || return 1
-    grep -qF "file://$PKG_CACHE_ACT" "$PKG_CACHE_CONF" 2>/dev/null || return 1
+    if [ "$PKG_MGR" = "apk" ]; then
+        # 只写目录的旧写法必须判为「需修复」：apk 对 repository 类型会去
+        # <目录>/<arch>/Packages.adb 找索引，而索引就在 <目录>/packages.adb，
+        # 找不到就等于没有源。所以这里要求整整指向索引文件。
+        grep -qF "file://$PKG_CACHE_ACT/packages.adb" "$PKG_CACHE_CONF" 2>/dev/null || return 1
+    else
+        grep -qF "file://$PKG_CACHE_ACT" "$PKG_CACHE_CONF" 2>/dev/null || return 1
+    fi
     _pcl_n=$(grep -cE "$PCR_PAT" "$PKG_CACHE_CONF" 2>/dev/null)
     [ "${_pcl_n:-0}" -le 1 ] || return 1
     return 0

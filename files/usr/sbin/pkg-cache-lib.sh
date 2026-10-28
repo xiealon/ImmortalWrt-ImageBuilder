@@ -27,11 +27,15 @@ pcl_log() {
 }
 
 # ---- 包管理器：25.12 起 apk，24.10 及以前 opkg ----
-PKG_MGR=""
-if command -v apk >/dev/null 2>&1; then
-    PKG_MGR="apk"
-elif command -v opkg >/dev/null 2>&1; then
-    PKG_MGR="opkg"
+# PKG_MGR_OVERRIDE 只给夹具用：生产环境为空，仍按真实二进制判断。
+# 没有它的话，在一台两个包管理器都没有的机器上，四个脚本里三条分支都测不到。
+PKG_MGR="${PKG_MGR_OVERRIDE:-}"
+if [ -z "$PKG_MGR" ]; then
+    if command -v apk >/dev/null 2>&1; then
+        PKG_MGR="apk"
+    elif command -v opkg >/dev/null 2>&1; then
+        PKG_MGR="opkg"
+    fi
 fi
 OPKG_BIN="${OPKG_BIN:-opkg}"
 

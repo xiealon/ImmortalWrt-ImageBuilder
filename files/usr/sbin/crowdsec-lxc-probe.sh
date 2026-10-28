@@ -574,12 +574,20 @@ if command -v apk >/dev/null 2>&1; then
 else
     PKG_CACHE_RO_P="${PKG_CACHE_RO:-$ROMDIR/root/pkg-cache}"
     PKG_CACHE_P="${PKG_CACHE:-/root/pkg-cache}"
-    PKG_IDX="Packages"
+    # opkg 的 file:// 源只认 Packages.gz：给裸 Packages 一律 update 失败
+    # （copy_file: .../Packages.gz: No such file or directory）。判据必须一致，
+    # 否则会把「有 Packages 但 opkg 读不了」的目录当成可用源，报「一切正常」。
+    PKG_IDX="Packages.gz"
     PKG_EXT="ipk"
     # CS_PROBE_PKG_CONF 只给夹具用：生产环境为空，读的仍是 /etc/opkg/customfeeds.conf
     PKG_CF="${CS_PROBE_PKG_CONF:-/etc/opkg/customfeeds.conf}"
 fi
 PKG_STATE="${CS_PROBE_PKG_STATE:-/tmp/crowdsec-probe.pkgcache}"
+# 【v.180.133】包库逻辑已拆成独立脚本：check 只判断（只读）、fix 按
+# resolve→挂源→铺索引 的顺序修。探针只负责「发现坏就叫一次修」。
+# 脚本不存在时退化为旧行为（只报告不修），老固件不会因此报错。
+PKG_CHECK_BIN="${CS_PROBE_PKG_CHECK:-/usr/sbin/pkg-cache-check.sh}"
+PKG_FIX_BIN="${CS_PROBE_PKG_FIX:-/usr/sbin/pkg-cache-fix.sh}"
 
 _pkgcache_probe() {
     _pk_msg=""
@@ -613,6 +621,19 @@ _pkgcache_probe() {
                     ;;
                 esac
             done < "$PKG_CF"
+        fi
+    fi
+    # 【v.180.133】异常不再只报告：叫一次 pkg-cache-fix.sh（幂等）。
+    # 节流靠下面那个状态文件 —— 修不好时 _pk_msg 不变，下一轮与 _pk_prev
+    # 相同会直接 return，不会每分钟重跑修复、也不会刷日志。
+    if [ -n "$_pk_msg" ] && [ -x "$PKG_FIX_BIN" ]; then
+        plog "【包源】$_pk_msg；尝试修复（$PKG_FIX_BIN）"
+        if "$PKG_FIX_BIN" >/dev/null 2>&1; then
+            _pk_msg=""
+            rm -f "$PKG_STATE" 2>/dev/null
+            plog "【包源】修复完成"
+        else
+            plog "【包源】修复失败，需人工介入（$PKG_FIX_BIN 返回非 0）"
         fi
     fi
     _pk_prev=""

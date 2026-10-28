@@ -16,10 +16,12 @@
 #      纯前端包，无二进制、无 init。只调单包恢复、不递归 —— 它的 Depends 里有
 #      luci-base，递归会一路碰 rpcd / ubus / ucode 一大片基础系统，那是砸系统。
 #
-#   ③ uci 配置（主段 + 13 条写死上游 + dnsmasq 让出 53）
+#   ③ uci 配置（主段 + 13 条写死上游）
 #      2026-10-29 起从 bootstrap 整段搬来。bootstrap 只保留六件事：网络配置（含防火墙）、
 #      网桥配置、容器网络配置、lxc 与 bouncer 恢复、crowdsec 容器恢复、
 #      crowdsec 与 bouncer 的本地联动配置。smartdns 归本脚本 + 探针。
+#      dnsmasq 让出 53 不在这里做：port=53 且 auto_set_dnsmasq=1 时由 smartdns
+#      的 init 自己完成（见下方 _sd_restore_dnsmasq 上方的依据说明）。
 #      判据是「验证包在位就写」，不逐项比对配置差异 —— 上游表写死，
 #      覆盖式写入。副作用：在 LuCI 里手改的上游会被下一轮冲掉（与原
 #      bootstrap 的 build_smartdns_upstream 行为一致）。
@@ -32,7 +34,8 @@
 #   pkg-restore-smartdns.sh --pkg        只装本体（含依赖树）
 #   pkg-restore-smartdns.sh --conf       只补 /etc/smartdns/ 规则文件
 #   pkg-restore-smartdns.sh --luci       只补界面
-#   pkg-restore-smartdns.sh --config     写 uci 配置（主段 + 13 条写死上游 + dnsmasq 让出 53）并 commit/重启
+#   pkg-restore-smartdns.sh --config     写 uci 配置（主段 + 13 条写死上游）并 commit/重启 smartdns
+#                                        （dnsmasq 让位由 smartdns 的 init 自动完成，本脚本不碰 dhcp）
 #   pkg-restore-smartdns.sh --repair     整体自愈：装包 + 规则文件 + 配置 + 重启（探针用）
 #
 # 环境变量：ROMDIR（默认 /rom）、PKGROOT（默认空）、RESTORE_BIN（默认 pkg-restore.sh）
@@ -154,40 +157,33 @@ _sd_main_seg() {
         | sed -n 's/^smartdns\.\([^.=]*\)=smartdns$/\1/p' | head -n1
 }
 
-# 让 dnsmasq 只做 DHCP、不做 DNS：所有 dnsmasq 段写 port=0（OpenWrt 官方「禁用 DNS」写法）。
-# 段名不写死：@dnsmasq[0] 的内部名（cfg01411c 之类）重建配置就会变，一律遍历。
+# 【v.180.156】不再手动把 dnsmasq 的 53 让出来 —— smartdns 的 init 自己会做。
 #
-# 【为什么记原值】让出 53 是「先拆后建」：一旦 smartdns 没能在 _sd_apply 里接管，
-# dnsmasq 已经 port=0、smartdns 又没在听 —— 整机没有 DNS，比修之前更糟。
-# 所以每个段改动前把原值记进 _sdr_bak（形如 "段名=值 "，无值记 NONE），
-# 由 _sd_rollback_53 精确还原。sh 没有 local，这些变量就是进程内的全局。
-_sd_release_53() {
-    _sdr_n=0
-    _sdr_bak=""
-    for _sdr_dm in $(uci show dhcp 2>/dev/null | grep -E '=dnsmasq$' | cut -d. -f2 | cut -d= -f1); do
-        _sdr_v=$(uci -q get "dhcp.$_sdr_dm.port" 2>/dev/null)
-        [ -n "$_sdr_v" ] || _sdr_v=NONE
-        _sdr_bak="$_sdr_bak$_sdr_dm=$_sdr_v "
-        uci -q set "dhcp.$_sdr_dm.port=0" || return 1
-        _sdr_n=$((_sdr_n + 1))
-    done
-    [ "$_sdr_n" -gt 0 ] || log "没有 dnsmasq 段，53 无需让出"
-    return 0
-}
-
-# 还原 _sd_release_53 记下的原值：smartdns 没接管成功时把 53 还给 dnsmasq。
-# 不做这一步的后果是「修 DNS 修成整机没 DNS」，最后只能靠重刷固件。
-_sd_rollback_53() {
-    [ -n "${_sdr_bak:-}" ] || return 0
-    for _srb_p in $_sdr_bak; do
-        _srb_dm=${_srb_p%%=*}
-        _srb_v=${_srb_p#*=}
-        if [ "$_srb_v" = "NONE" ]; then
-            uci -q delete "dhcp.$_srb_dm.port" 2>/dev/null
-        else
-            uci -q set "dhcp.$_srb_dm.port=$_srb_v" 2>/dev/null
-        fi
-    done
+# 依据（pymumu/smartdns，Release46.1 与 Release48.4 的 package/openwrt/files/
+# etc/init.d/smartdns 逐字相同，ImmortalWrt 24.10 用 48.4）：
+#   L733  config_get auto_set_dnsmasq "$section" "auto_set_dnsmasq" "1"   ← 默认开
+#   L891  [ "$auto_set_dnsmasq" = "1" ] && set_main_dns                    ← port=53 时
+#   L78   [ "$dnsmasq_port" = "53" ] && set dhcp.@dnsmasq[0].port=0        ← 就是这里让的位
+# 随后它还会补 dhcp.lan.dhcp_option="6,$hostip"、把 dns_redirect 关掉、
+# uci commit dhcp 并 restart dnsmasq；且幂等（uci_batch 为空直接 return，不重启）。
+# LuCI 那句「端口设为 53 时自动配置为主 DNS」说的就是这段。
+#
+# 所以本脚本只要保证 port=53 且 auto_set_dnsmasq=1，restart smartdns 时由 init
+# 完成让位。原来的 _sd_release_53 是重复劳动（还会让 dnsmasq 多重启一次），已删。
+#
+# 前提（init 里的硬条件）：set_main_dns 开头 `[ -z "$hostip" ] && return`，
+# hostip 取自 network.lan.ipaddr。lan 没静态地址时 init 静默跳过、谁都不让位，
+# 那时 53 仍被 dnsmasq 占着 —— 这种情形由 _sd_apply 的失败分支报出来。
+#
+# 回滚保留：init 让出 53 后若 smartdns 起不来，整机就是没有 DNS，必须还回去。
+# 原值由 _sd_apply 在 restart 之前记进 _sda_dm_port。
+_sd_restore_dnsmasq() {
+    if [ -n "${_sda_dm_port:-}" ] && [ "$_sda_dm_port" != "53" ]; then
+        uci -q set "dhcp.@dnsmasq[0].port=$_sda_dm_port" 2>/dev/null
+    else
+        # 原来是没设（等价 53）→ 删掉字段即恢复默认
+        uci -q delete "dhcp.@dnsmasq[0].port" 2>/dev/null
+    fi
     uci commit dhcp >/dev/null 2>&1
     [ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq restart >/dev/null 2>&1
     log "已回滚：dnsmasq 重新占用 53（smartdns 未接管，避免整机无 DNS）"
@@ -210,6 +206,10 @@ _sd_cfg_main() {
     # bind_device=0 → 只生成 `bind [::]:53`，br-lan / lxcbr0 / docker0 一律可达。
     # 设成 1 时 init 只绑 br-lan + lo，容器拿 lxcbr0 地址来查会被丢掉。
     uci -q set "smartdns.$_sdc_seg.bind_device=0" || return 1
+    # auto_set_dnsmasq=1（init 的默认值，这里显式写死）：port=53 时由 init 负责
+    # 把 dhcp.@dnsmasq[0].port 置 0 并重启 dnsmasq。显式写是为了防止在 LuCI 里
+    # 误关一次就永久失效 —— 与本脚本其它字段「写死纠正」的口径一致。
+    uci -q set "smartdns.$_sdc_seg.auto_set_dnsmasq=1" || return 1
     uci -q set "smartdns.$_sdc_seg.cache_size=32768" || return 1
     uci -q set "smartdns.$_sdc_seg.serve_expired=1" || return 1
     uci -q set "smartdns.$_sdc_seg.prefetch_domain=1" || return 1
@@ -276,32 +276,35 @@ SD_UPSTREAM_EOF
     return 0
 }
 
-# commit + 重启 + 等端口
+# commit + 重启 + 等端口。
+# 不再手动 restart dnsmasq：init 的 start_service 只要见到 port=53 且
+# auto_set_dnsmasq=1，就会自己把 dnsmasq 的 port 置 0 并重启它，顺序由 init 保证。
+# 我们只 restart smartdns，然后等 53 真的在听。
 _sd_apply() {
-    uci commit smartdns || { log "uci commit smartdns 失败"; _sd_rollback_53; return 1; }
-    # dhcp 只有让出 53 时才被改；没改也要 commit —— uci 对无改动是空操作、仍返回 0
-    uci commit dhcp || { log "uci commit dhcp 失败"; _sd_rollback_53; return 1; }
-    # 顺序：dnsmasq 先放掉 53，smartdns 再接管。反过来会出现短暂「两边都没在听」。
-    [ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq restart >/dev/null 2>&1
-    [ -x /etc/init.d/smartdns ] && /etc/init.d/smartdns restart >/dev/null 2>&1
+    uci commit smartdns || { log "uci commit smartdns 失败"; _sd_discard; return 1; }
+    # 让位前的端口，供失败时 _sd_restore_dnsmasq 还原
+    _sda_dm_port=$(uci -q get dhcp.@dnsmasq[0].port 2>/dev/null)
+    [ -x /etc/init.d/smartdns ] || { log "没有 /etc/init.d/smartdns，无法重启"; return 1; }
+    /etc/init.d/smartdns restart >/dev/null 2>&1
     _sda_i=0
-    while [ "$_sda_i" -lt 10 ]; do
+    while [ "$_sda_i" -lt 15 ]; do
         _sd_serve && return 0
         sleep 1
         _sda_i=$((_sda_i + 1))
     done
-    log "配置已写入，但 53 端口 10 秒内没有监听（配置语法或动态库问题）"
-    # 让出 53 已经 commit 了，此刻整机是真的没有 DNS —— 必须把 53 还给 dnsmasq
-    _sd_rollback_53
+    log "配置已写入，但 53 端口 15 秒内没有监听（端口被占、配置语法或动态库问题）"
+    # 走到这里时 init 可能已经把 dnsmasq 的 53 让出去了 —— 整机是真的没有 DNS
+    _sd_restore_dnsmasq
     return 1
 }
 
-# 丢弃尚未 commit 的改动。/tmp/.uci 是 uci 的暂存目录，本进程 exit 后脏数据仍在，
-# 下次任何人 commit smartdns / dhcp 都会把它带进去 —— 半套配置上线的后果比不写更糟。
-# 只用在「还没 commit 就失败」的路径；已经 commit 的失败走 _sd_rollback_53。
+# 丢弃尚未 commit 的 smartdns 改动。/tmp/.uci 是 uci 的暂存目录，本进程 exit 后
+# 脏数据仍在，下次任何人 commit smartdns 都会把它带进去 —— 半套配置上线的后果比不写更糟。
+# 只 revert smartdns：dhcp 由 smartdns 的 init 改，本脚本不再碰它，
+# 贸然 revert dhcp 会把别人（LuCI 编辑中）尚未提交的改动一起丢掉。
+# 只用在「还没 commit 就失败」的路径；已经 commit 的失败走 _sd_restore_dnsmasq。
 _sd_discard() {
     uci -q revert smartdns 2>/dev/null
-    uci -q revert dhcp 2>/dev/null
     return 0
 }
 
@@ -315,10 +318,9 @@ _sd_config() {
     fi
     _sd_conf
     _sd_cfg_main || { log "主配置段写入失败"; _sd_discard; return 1; }
-    _sd_cfg_upstream || { log "上游表写入失败，不接管 DNS（dnsmasq 保持 53）"; _sd_discard; return 1; }
-    _sd_release_53 || { log "dnsmasq 让出 53 失败"; _sd_discard; return 1; }
+    _sd_cfg_upstream || { log "上游表写入失败，不接管 DNS"; _sd_discard; return 1; }
     _sd_apply || return 1
-    log "smartdns 已接管 DNS：13 条上游（国内 9 UDP / 境外 4 DoT），dnsmasq 退为纯 DHCP"
+    log "smartdns 已接管 DNS：13 条上游（国内 9 UDP / 境外 4 DoT），dnsmasq 由 init 让出 53"
     return 0
 }
 

@@ -30,7 +30,22 @@
 set -u
 ROMDIR="${ROMDIR:-/rom}"
 PKGROOT="${PKGROOT:-}"
-RESTORE_BIN="${RESTORE_BIN:-/usr/sbin/pkg-restore.sh}"
+
+# 通用恢复脚本的查找顺序（v.180.147）：
+#   ① 显式 RESTORE_BIN
+#   ② /usr/sbin/pkg-restore.sh —— 固件里的正式位置
+#   ③ 与本脚本同目录 —— 两个脚本一起被拷到 /tmp 单独验时的情况。
+#      写死 ② 的后果在 2026-10-29 真机暴露过：从 /tmp 跑这个脚本，
+#      _sd_pkg 直接报「找不到 /usr/sbin/pkg-restore.sh」并返回 1，
+#      smartdns 本体一个都没装回来，只剩 --conf 补了规则文件 —— 半残。
+RESTORE_BIN="${RESTORE_BIN:-}"
+if [ -z "$RESTORE_BIN" ]; then
+    if [ -x /usr/sbin/pkg-restore.sh ]; then
+        RESTORE_BIN=/usr/sbin/pkg-restore.sh
+    else
+        RESTORE_BIN="$(dirname "$0")/pkg-restore.sh"
+    fi
+fi
 
 log() { printf '[PKG] %s\n' "$*"; }
 

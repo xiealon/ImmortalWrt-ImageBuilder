@@ -143,9 +143,8 @@ log() { printf '[APP] %s\n' "$*"; }
 # 包管理器：两个都不在 → 判断不了。返回 0 且置 _PA_PM，否则返回 1。
 _PA_PM=""
 _pa_pm() {
-    if command -v opkg >/dev/null 2>&1; then _PA_PM=opkg; return 0; fi
-    if command -v apk >/dev/null 2>&1;  then _PA_PM=apk;  return 0; fi
-    return 1
+    _PA_PM=apk
+    return 0
 }
 
 # 已装包名表缓存：一次全表扫描，四次判定共用（同 pkg-restore.sh 的 _PR_CACHE）

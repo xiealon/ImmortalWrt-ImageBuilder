@@ -685,41 +685,6 @@ _pkgcache_feed_audit() {
         fi
         ;;
     esac
-    if command -v apk >/dev/null 2>&1; then
-        _pfa_conf="$ROOT/etc/apk/repositories"
-        # 【v.180.141】apk-repositories(5) 的路径规则：一行 `file://<目录>`
-        # 属于「repository 类型」，索引位置是 $base_url/$arch/Packages.adb ——
-        # 也就是 /rom/root/apk-cache/x86_64/Packages.adb，而我们的索引是
-        # /rom/root/apk-cache/packages.adb（无 arch 子目录、小写）。目录写法的
-        # 源在真机上永远找不到索引，本地源等于不存在。
-        # `ndx <索引文件>` 才是对的：base_url = 去掉最后一段 = 包目录，
-        # 默认包路径 $base_url/$name-$version.apk 正好与我们的布局一致。
-        # 正则同时匹配旧的目录写法，否则升级后旧行删不掉，会残留两条源。
-        _pfa_pat='^(ndx[[:space:]]+)?file://.*/(apk|pkg)-cache(/packages\.adb)?/?$'
-        _pfa_idx=packages.adb
-        _pfa_ro="${PKG_CACHE_RO:-$ROM_DIR/root/apk-cache}"
-        _pfa_ov="${PKG_CACHE:-$ROOT/root/apk-cache}"
-        _pfa_what="apk 源"
-        _pfa_fmt='ndx file://%s/packages.adb\n'
-        # 【v.180.183】apk 侧改成「只删不写」（用户 2026-10-29 定）。
-        # 起因是真机实测：apk update 每次都打
-        #   WARNING: opening file:///rom/root/apk-cache/packages.adb: UNTRUSTED signature
-        # 根因是这份索引由 build25.sh 用 `apk mkpkg --allow-untrusted` 生成，
-        # 没有可信签名，apk-tools 3.x 直接把这个源整条跳过。实测 `apk policy daed`：
-        #   1.27.0-r1      → 官方源
-        #   2026.06.14-r7  → lib/apk/db/installed
-        # 没有任何一条来自 file:///rom/root/apk-cache —— 源挂着，但等于不存在。
-        # 也就是说这行配了也白配，唯一效果是每次 apk 操作刷一条警告，
-        # 还会让 `apk update` 的输出里混进「错误」字样，看着像失败。
-        # 【v.180.184】实测修正：这份索引并非「等于不存在」——
-        #   `apk --allow-untrusted policy hysteria` 能列出 file:// 的 2.9.2-r1 /
-        #   2.9.3-r1，只是不带 --allow-untrusted 时被跳过。问题仅在于
-        #   「全局挂这条不可信源会让每次 apk 操作刷一条警告」。
-        # 恢复路径也不靠全局这条：pkg-cache-restore.sh 自己写临时 repositories 文件
-        #   （一行 file://<目录>/packages.adb），--repositories-file 只喂本地源，
-        #   并显式 --allow-untrusted。所以这里仍是只清理、不写入。
-        _pfa_write=0
-    else
         _pfa_conf="$ROOT/etc/opkg/customfeeds.conf"
         _pfa_pat='^src/gz[[:space:]]*pkgcache[[:space:]]'
         # 判据必须与 opkg 的真实要求对齐：opkg 只吃 Packages.gz，不认裸 Packages。
@@ -736,7 +701,6 @@ _pkgcache_feed_audit() {
         #      删掉就等于断了「源装」这条路，连带依赖也解析不出来；
         #   ③ 24.10 线没有真机可测，动它等于盲改。
         _pfa_write=1
-    fi
     [ -f "$_pfa_conf" ] || return 0
     # 【v.180.133】原来这里还有一句
     #   grep -qE "$_pfa_pat" "$_pfa_conf" 2>/dev/null || return 0

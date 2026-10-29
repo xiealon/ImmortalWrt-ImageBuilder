@@ -736,12 +736,8 @@ PKGROOT="${PKGROOT:-}"
 # 和 opkg 那套（.ipk / Packages 纯文本 / opkg）没有任何兼容性。但「被卸的包用
 # 固件自带的装回来」两条线是同一个需求，所以不拆成两份脚本 —— 只在这里分流一次，
 # 其余逻辑（/rom 优先解析、死源清理、guard/probe 守护）完全共用，改一处两边都受益。
-_PKG_MGR=""
-if command -v apk >/dev/null 2>&1; then
-    _PKG_MGR="apk"
-elif command -v opkg >/dev/null 2>&1; then
-    _PKG_MGR="opkg"
-fi
+# 24.10 只有 opkg：两份 files 已按版本拆开，不再运行时探测。
+_PKG_MGR="opkg"
 case "$_PKG_MGR" in
 apk)
     _PKG_DEF_OV=/root/apk-cache
@@ -1532,7 +1528,7 @@ build_pkg_base() {
     #   _pr_lxc 对已装包逐个 _pr_pkg 跳过，幂等，不会因为多跑一次而重装东西。
     if ! _lxc_missing_deps || [ -n "$_LXC_MISSING_PKGS" ]; then
         _rom_restore_lxc \
-            || log "[PKG] 只读基座里没有 lxc 的安装清单（$ROMDIR/usr/lib/opkg/info/lxc-*.list）"
+            || log "[PKG] 只读基座里没有 lxc 的安装清单（$ROMDIR/lib/apk/packages 与 $ROMDIR/usr/lib/opkg/info 都没扫到 lxc）"
     fi
     hash -r 2>/dev/null || true
     if _pkg_missing_all; then

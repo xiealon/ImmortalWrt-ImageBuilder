@@ -491,7 +491,7 @@ _kmods_watch() {
         if [ "${P_KMOD_NOSRC:-0}" != "1" ]; then
             P_KMOD_NOSRC=1
             P_ACTION="kmods-nosrc"
-            plog "【依赖文件】只读基底里没有包文件清单（/rom/lib/apk/packages），判不了（$_kd_out）"
+            plog "【依赖文件】只读基底里没有包文件清单（/rom/lib/apk/packages、/rom/usr/lib/opkg/info 都没有），判不了（$_kd_out）"
         fi
         return 0
     fi
@@ -826,24 +826,12 @@ probe_tick() {
 # 这里只做「看一眼、异常才说话」：状态变化时才写日志，防止每分钟刷一条。
 # 【v.180.130】按包管理器选路径：25.12 是 apk（.apk / packages.adb / /etc/apk/repositories），
 # 24.10 及以前是 opkg（.ipk / Packages / /etc/opkg/customfeeds.conf）。
-if command -v apk >/dev/null 2>&1; then
     PKG_CACHE_RO_P="${PKG_CACHE_RO:-$ROMDIR/root/apk-cache}"
     PKG_CACHE_P="${PKG_CACHE:-/root/apk-cache}"
     PKG_IDX="packages.adb"
     PKG_EXT="apk"
     # CS_PROBE_PKG_CONF 只给夹具用：生产环境为空，读的仍是 /etc/apk/repositories
     PKG_CF="${CS_PROBE_PKG_CONF:-/etc/apk/repositories}"
-else
-    PKG_CACHE_RO_P="${PKG_CACHE_RO:-$ROMDIR/root/pkg-cache}"
-    PKG_CACHE_P="${PKG_CACHE:-/root/pkg-cache}"
-    # opkg 的 file:// 源只认 Packages.gz：给裸 Packages 一律 update 失败
-    # （copy_file: .../Packages.gz: No such file or directory）。判据必须一致，
-    # 否则会把「有 Packages 但 opkg 读不了」的目录当成可用源，报「一切正常」。
-    PKG_IDX="Packages.gz"
-    PKG_EXT="ipk"
-    # CS_PROBE_PKG_CONF 只给夹具用：生产环境为空，读的仍是 /etc/opkg/customfeeds.conf
-    PKG_CF="${CS_PROBE_PKG_CONF:-/etc/opkg/customfeeds.conf}"
-fi
 PKG_STATE="${CS_PROBE_PKG_STATE:-/tmp/crowdsec-probe.pkgcache}"
 # 【v.180.133】包库修复拆成独立脚本：fix 按 resolve→挂源→铺索引 的顺序修，
 # 探针只负责「发现坏就叫一次修」。脚本不存在时退化为旧行为（只报告不修）。

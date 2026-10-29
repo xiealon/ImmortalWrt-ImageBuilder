@@ -57,18 +57,8 @@ log() { printf '[PKG] %s\n' "$*"; }
 _PR_CACHE=""
 
 _pr_installed() {
-    if command -v opkg >/dev/null 2>&1; then
-        if [ -z "$_PR_CACHE" ]; then
-            _PR_CACHE=$(opkg list-installed 2>/dev/null | sed -n 's/ - .*//p')
-        fi
-        printf '%s\n' "$_PR_CACHE" | grep -qx "$1"
-        return $?
-    fi
-    if command -v apk >/dev/null 2>&1; then
-        apk info -e "$1" >/dev/null 2>&1
-        return $?
-    fi
-    return 1
+    # 25.12 只有 apk：apk info -e 是单包判定，不需要 opkg 那种全表缓存。
+    apk info -e "$1" >/dev/null 2>&1
 }
 
 # 记账说已装、文件却不在的情形（手删二进制，包仍在册）。
@@ -89,10 +79,7 @@ _pr_files_ok() {
     #   pkg-restore.sh --lxc-missing → 输出空（包还在册，判据看不见）
     #   pkg-restore.sh --lxc         → 34 个包全「已安装，跳过」，文件没补回来
     # apk 的清单在 /rom/lib/apk/packages/<包>.list，同样一行一个绝对路径。
-    _pfo_l="$ROMDIR/usr/lib/opkg/info/$1.list"
-    if [ ! -f "$_pfo_l" ]; then
-        _pfo_l="$ROMDIR/lib/apk/packages/$1.list"
-    fi
+    _pfo_l="$ROMDIR/lib/apk/packages/$1.list"
     [ -f "$_pfo_l" ] || return 0
     while IFS= read -r _pfo_f; do
         case "$_pfo_f" in
@@ -142,18 +129,9 @@ _pr_pkg() {
 # 连依赖一起恢复（最多三层，防止环）。
 # libc / libpthread / busybox / kernel / kmod-* 一律跳过：动它们不是恢复是砸系统。
 _pr_tree() {
-    _rrt_d="${2:-0}"
-    [ "$_rrt_d" -le 2 ] || return 0
+    # 25.12 是 apk：包库里没有 Depends 文本（installed.adb 是二进制），
+    # 依赖由 apk add 自己解，这里只做本包恢复。
     _pr_pkg "$1"
-    _rrt_ctl="$ROMDIR/usr/lib/opkg/info/$1.control"
-    [ -f "$_rrt_ctl" ] || return 0
-    for _rrt_x in $(sed -n 's/^Depends:[[:space:]]*//p' "$_rrt_ctl" 2>/dev/null | head -n1 | tr ',' ' '); do
-        case "$_rrt_x" in
-            libc|libpthread|libgcc*|librt|libm|kernel|kmod-*|busybox*) continue ;;
-        esac
-        [ -f "$ROMDIR/usr/lib/opkg/info/$_rrt_x.list" ] || continue
-        _pr_tree "$_rrt_x" $((_rrt_d + 1))
-    done
     return 0
 }
 
@@ -191,10 +169,6 @@ _pr_lxc_extra() {
     #     装回来只补 opkg world 一条记账，不动任何文件。删掉的后果不是功能坏了，
     #     而是 LuCI 软件包页面显示「未安装」、依赖 lxc 的包重装时撞 broken dependency。
     for _lx_n in lxc rpcd-mod-lxc luci-app-lxc luci-i18n-lxc-zh-cn; do
-        if [ -f "$ROMDIR/usr/lib/opkg/info/$_lx_n.list" ]; then
-            printf '%s\n' "$_lx_n"
-            continue
-        fi
         for _lx_f in "$ROMDIR"/root/apk-cache/"$_lx_n"-*.apk; do
             [ -f "$_lx_f" ] || continue
             printf '%s\n' "$_lx_n"
@@ -204,11 +178,6 @@ _pr_lxc_extra() {
 }
 
 _pr_lxc_names() {
-    for _pl_l in "$ROMDIR"/usr/lib/opkg/info/lxc-*.list; do
-        [ -f "$_pl_l" ] || continue
-        _pl_n="${_pl_l##*/}"
-        printf '%s\n' "${_pl_n%.list}"
-    done
     for _pl_a in "$ROMDIR"/root/apk-cache/lxc-*.apk "$ROMDIR"/root/apk-cache/liblxc*.apk; do
         [ -f "$_pl_a" ] || continue
         _pl_n="${_pl_a##*/}"
@@ -226,7 +195,7 @@ _pr_lxc() {
         _rl_any=1
     done
     [ "$_rl_any" = 1 ] || {
-        log "只读基座里既没有 lxc-*.list 也没有 apk-cache 里的 lxc 包（$ROMDIR）"
+        log "只读基座里没有 lxc 的 apk 清单（$ROMDIR/lib/apk/packages/lxc*.list）"
         return 1
     }
     _pr_tree liblxc
@@ -267,9 +236,7 @@ _pr_lxc_missing() {
 _pr_lxc_files() {
     _plf_m=""
     for _plf_f in "$ROMDIR"/lib/apk/packages/lxc*.list \
-                  "$ROMDIR"/lib/apk/packages/liblxc.list \
-                  "$ROMDIR"/usr/lib/opkg/info/lxc-*.list \
-                  "$ROMDIR"/usr/lib/opkg/info/liblxc.list; do
+                  "$ROMDIR"/lib/apk/packages/liblxc.list; do
         [ -f "$_plf_f" ] || continue
         _plf_p="${_plf_f##*/}"
         _plf_p="${_plf_p%.list}"
@@ -340,7 +307,6 @@ _pr_host() {
 # 实测（24.10.6 / r33869）：/rom/lib/apk/packages 不存在，
 # /rom/usr/lib/opkg/info 有 692 份 .list，18 个保护包一份都不少。
 _DEPS_ROM_LIST="$ROMDIR/lib/apk/packages"
-[ -d "$_DEPS_ROM_LIST" ] || _DEPS_ROM_LIST="$ROMDIR/usr/lib/opkg/info"
 
 # 【v.180.182】补 v2ray-geoip / v2ray-geosite（用户 2026-10-29 定）。
 # 这两个是 daed 的规则来源：daed 不直接读它们，读的是两条软链接
@@ -474,13 +440,11 @@ case "${1:-}" in
     #   0 = 文件齐全   1 = 有缺（输出缺文件包名）   2 = 判不了（一张清单都没有）
     _plf_n=0
     for _plf_x in "$ROMDIR"/lib/apk/packages/lxc*.list \
-                  "$ROMDIR"/lib/apk/packages/liblxc.list \
-                  "$ROMDIR"/usr/lib/opkg/info/lxc-*.list \
-                  "$ROMDIR"/usr/lib/opkg/info/liblxc.list; do
+                  "$ROMDIR"/lib/apk/packages/liblxc.list; do
         [ -f "$_plf_x" ] && _plf_n=$((_plf_n + 1))
     done
     if [ "$_plf_n" = "0" ]; then
-        echo "只读基底里没有 lxc 包清单（$ROMDIR）" >&2
+        echo "只读基底里没有 lxc 的 apk 清单（$ROMDIR/lib/apk/packages/lxc*.list）" >&2
         exit 2
     fi
     _plf_out="$(_pr_lxc_files)"

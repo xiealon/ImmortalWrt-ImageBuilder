@@ -685,7 +685,6 @@ _pkgcache_feed_audit() {
         fi
         ;;
     esac
-    if command -v apk >/dev/null 2>&1; then
         _pfa_conf="$ROOT/etc/apk/repositories"
         # 【v.180.141】apk-repositories(5) 的路径规则：一行 `file://<目录>`
         # 属于「repository 类型」，索引位置是 $base_url/$arch/Packages.adb ——
@@ -719,24 +718,6 @@ _pkgcache_feed_audit() {
         #   （一行 file://<目录>/packages.adb），--repositories-file 只喂本地源，
         #   并显式 --allow-untrusted。所以这里仍是只清理、不写入。
         _pfa_write=0
-    else
-        _pfa_conf="$ROOT/etc/opkg/customfeeds.conf"
-        _pfa_pat='^src/gz[[:space:]]*pkgcache[[:space:]]'
-        # 判据必须与 opkg 的真实要求对齐：opkg 只吃 Packages.gz，不认裸 Packages。
-        # 用 Packages 当判据的话，guard 会把源指到一个「有索引但 opkg 读不了」的目录，
-        # update 照样失败 —— v.180.133 之前的真机故障就是这么来的。
-        _pfa_idx=Packages.gz
-        _pfa_ro="${PKG_CACHE_RO:-$ROM_DIR/root/pkg-cache}"
-        _pfa_ov="${PKG_CACHE:-$ROOT/root/pkg-cache}"
-        _pfa_what="pkgcache 源"
-        _pfa_fmt='src/gz pkgcache file://%s\n'
-        # opkg 侧保持原行为，不跟 apk 一起删。理由三条：
-        #   ① opkg 没有签名问题 —— 装包时用 --no-check-signature，本地源照常可用；
-        #   ② opkg 没有 apk 的 --repository 参数，源只能写在 conf 里，
-        #      删掉就等于断了「源装」这条路，连带依赖也解析不出来；
-        #   ③ 24.10 线没有真机可测，动它等于盲改。
-        _pfa_write=1
-    fi
     [ -f "$_pfa_conf" ] || return 0
     # 【v.180.133】原来这里还有一句
     #   grep -qE "$_pfa_pat" "$_pfa_conf" 2>/dev/null || return 0

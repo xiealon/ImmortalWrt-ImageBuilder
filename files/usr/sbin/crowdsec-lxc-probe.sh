@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.185"
+SCRIPT_VER="2026-10-29.180.186"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -198,19 +198,46 @@ _ensure_boot() {
 # 判据取向（只认本地故障，这一点决定了它不会误刷）：
 #   · 进程不在        → 本机问题，重跑引导有意义
 #   · 53 没在监听     → 本机问题（起不来 / bind 绑到具体网卡）
-#   · 进程在、53 在听 → 一律算好。上游全挂、外网不通也一样「算好」——
+#   · 53 有人听但不是它 → 本机问题（见 v.180.186）
+#   · 进程在、53 归它 → 一律算好。上游全挂、外网不通也一样「算好」——
 #     那是网络问题，重跑引导修不好，每轮触发只会刷日志、白撞冷却。
+#
+# 【v.180.186】补上「53 到底是谁在听」这一维。
+# 原来判据是两条独立的判据：pidof 有 smartdns + netstat 里出现 :53。
+# 两者都满足就算好，可它们说的不是同一件事 —— 谁在听根本没人问。
+# 于是有一个很难发现的假阳性：smartdns 进程活着，但没绑上 53
+# （port 被改成别的、或启动竞态里 dnsmasq 还没让位），而 dnsmasq 正占着 53。
+# 此时探针判「ok」，DNS 也确实能用，但 smartdns 的分流与拦截一条都没生效 ——
+# 比彻底挂掉更隐蔽，而且永远不会被修。
+# 现在按 socket inode 反查归属：
+#   /proc/net/udp{,6} 里 local port=0035 且 st=07 的 inode
+#   → 遍历 /proc/<smartdns pid>/fd/*，找 socket:[<inode>]
+# 只有真的是它拿着这个 socket 才算可用。实测（192.168.1.201，2026-10-29）：
+#   53 → inode 20605 → pid 17467 comm=smartdns，判定 TRUE；
+#   smartdns 的 fd 共 26 个，整段查完约 0.01s，每 60s 一轮可忽略。
+# 与 pkg-restore-smartdns.sh 的 _sd_serve 保持同一判据（两处同步改）。
 _dns_ok() {
-    if ! pidof smartdns >/dev/null 2>&1; then
+    _do_pid=$(pidof smartdns 2>/dev/null | awk '{print $1}')
+    if [ -z "$_do_pid" ]; then
         DNS_WHY="进程不在"
         return 1
     fi
-    if ! netstat -lnu 2>/dev/null | grep -qE ':53[[:space:]]'; then
+    _do_ino=$(awk 'NR>1 && $4=="07" { n=split($2,a,":"); if (a[n]=="0035") print $10 }' \
+        /proc/net/udp /proc/net/udp6 2>/dev/null)
+    if [ -z "$_do_ino" ]; then
         DNS_WHY="53 未监听（UDP）"
         return 1
     fi
-    DNS_WHY=""
-    return 0
+    for _do_i in $_do_ino; do
+        for _do_f in /proc/"$_do_pid"/fd/*; do
+            if [ "$(readlink "$_do_f" 2>/dev/null)" = "socket:[$_do_i]" ]; then
+                DNS_WHY=""
+                return 0
+            fi
+        done
+    done
+    DNS_WHY="53 被别的进程占着（smartdns 没绑上）"
+    return 1
 }
 
 # ---- 修复一律交脚本（v.180.158）----

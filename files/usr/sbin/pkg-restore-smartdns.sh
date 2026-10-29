@@ -89,12 +89,24 @@ _sd_pkg_ok() {
     return 0
 }
 
-# 只读判定，不启动、不重启。判据与 bootstrap 的 verify_sd_serve 同口径（pidof + 53）。
-# 重启只发生在 --config / --repair 走到末尾 _sd_apply 时。
+# 只读判定，不启动、不重启。重启只发生在 --config / --repair 走到末尾 _sd_apply 时。
+# 【v.180.186】判据补上「53 是谁在听」，与探针的 _dns_ok 完全同步：
+#   pidof 有进程 + netstat 里有 :53 这两条是独立的，合起来并不能说明
+#   「smartdns 真的绑上了 53」—— dnsmasq 占着 53 时旧判据照样通过。
+#   现在按 socket inode 反查：/proc/net/udp{,6} 里 local port=0035 且 st=07
+#   的 inode，再在 /proc/<smartdns pid>/fd/* 里找 socket:[<inode>]。
 _sd_serve() {
-    pidof smartdns >/dev/null 2>&1 || return 1
-    netstat -lnu 2>/dev/null | grep -qE ':53[[:space:]]' || return 1
-    return 0
+    _ss_pid=$(pidof smartdns 2>/dev/null | awk '{print $1}')
+    [ -n "$_ss_pid" ] || return 1
+    _ss_ino=$(awk 'NR>1 && $4=="07" { n=split($2,a,":"); if (a[n]=="0035") print $10 }' \
+        /proc/net/udp /proc/net/udp6 2>/dev/null)
+    [ -n "$_ss_ino" ] || return 1
+    for _ss_i in $_ss_ino; do
+        for _ss_f in /proc/"$_ss_pid"/fd/*; do
+            [ "$(readlink "$_ss_f" 2>/dev/null)" = "socket:[$_ss_i]" ] && return 0
+        done
+    done
+    return 1
 }
 
 # 本体：走通用恢复的依赖树，两个依赖都是普通包，递归即可

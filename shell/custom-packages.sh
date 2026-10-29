@@ -37,7 +37,18 @@ CUSTOM_PACKAGES="$CUSTOM_PACKAGES keepalived luci-app-keepalived luci-i18n-keepa
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-fs-cifs cifsmount luci-app-cifs-mount luci-i18n-cifs-mount-zh-cn"
 
-CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-nft-tproxy kmod-nft-socket luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn xray-core xray-plugin v2ray-plugin v2ray-geoip v2ray-geosite shadowsocks-rust-sslocal shadowsocks-rust-ssserver shadowsocksr-libev-ssr-redir shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-server trojan-plus tuic-client shadow-tls naiveproxy simple-obfs-client microsocks dns2socks ipt2socks chinadns-ng tcping libopenssl3"
+# 【v.180.165】ssrp 整组移除（用户 2026-10-29 定：daed 已可用，ssr-plus 的依赖
+# 太长、探针每轮都要逐个核对，收益不值）。移除的是 ssrp 专属的：
+#   界面     luci-app-ssr-plus / luci-i18n-ssr-plus-zh-cn
+#   内核插件 xray-core / xray-plugin / v2ray-plugin
+#   协议端   shadowsocks-rust-sslocal / ssserver、shadowsocksr-libev-ssr-redir/local/server
+#   协议插件 trojan-plus / tuic-client / shadow-tls / naiveproxy / simple-obfs-client
+# 刻意保留下面这些，删了会连带别处：
+#   v2ray-geoip / v2ray-geosite —— mosdns 的规则来源。装，但不纳入探针保护：
+#                                  上游一直更新，锁死会把人拽回旧版
+#   microsocks / dns2socks / ipt2socks / chinadns-ng —— 通用 DNS 与 socks 工具
+#   tcping / libopenssl3 —— 通用件
+CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-nft-tproxy kmod-nft-socket v2ray-geoip v2ray-geosite microsocks dns2socks ipt2socks chinadns-ng tcping libopenssl3"
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES kmod-usb-printer luci-app-usb-printer luci-i18n-usb-printer-zh-cn"
 

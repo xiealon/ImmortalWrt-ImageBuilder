@@ -3,7 +3,8 @@
 #
 # 为什么有这支脚本（用户 2026-10-29 定，判据取向见 crowdsec-lxc-probe.sh L219-231）：
 #   探针只做两件事 —— 探测 + 拉脚本，自己不动手装包。
-#   daed / ssrp / mosdns / clashoo 这四个应用不像 smartdns 那样接管 53，
+#   daed / mosdns / clashoo 这三个应用不像 smartdns 那样接管 53
+#   （ssrp 已于 v.180.165 整组移除，理由见清单处的说明），
 #   所以不判进程、不判端口，只判包在不在册；缺了由本脚本装回。
 #   【v.180.164】判定粒度从「主程序一个包」扩到「主程序 + 依赖内核 + LuCI 界面」：
 #   实测 opkg remove --force-depends clashoo 能一次删掉 44MB 内核而壳与 i18n 不动，
@@ -55,8 +56,18 @@ _RESTORE="${RESTORE_BIN:-/usr/sbin/pkg-restore.sh}"
 #   clashoo 组：内核就在主包里（control: Provides: mihomo, clash-meta，Installed-Size 46.5MB）
 #   daed 组：  eBPF 程序，vmlinux-btf 是运行时前提，缺了 daed 直接起不来
 #   mosdns 组：geo 数据包是规则来源，缺了 mosdns 空转
-#   ssrp 组：  26.x 的 ssr-plus 是 LuCI 应用，内核（xray-core / sing-box / 各类插件）
-#              由它 Depends 拉 —— 界面在、内核没了，这是最容易发生的半损坏态
+#   ssrp 组：已整组移除，见下方 v.180.165 说明
+#
+# 【v.180.165】ssrp 组整组删除（用户 2026-10-29 定）。理由两条：
+#   ① daed 已经能替代它，没有必要再维护一套 ssr-plus；
+#   ② ssr-plus 的依赖链太长 —— xray-core / xray-plugin / v2ray-plugin /
+#      三套 shadowsocksr-libev / trojan-plus / tuic / shadow-tls / naiveproxy /
+#      simple-obfs-client，每轮 _pa_missing 都要逐包问一次包管理器，
+#      探针负担和它带来的价值完全不成正比。
+# 两条构建线都不再装它：
+#   · 24.10：shell/custom-packages.sh 里那一行已删；
+#   · 25.12：本来就没装，但包库里有对应 apk（build25.sh 收的兜底包）。
+# 所以即使包库还留着这些 apk，也不会再被判成「该有」—— 判据见 _pa_should。
 #
 # 门槛仍在 _pa_should：只有 /rom 侧留了痕迹（info/<包>.list 或包库里那份 ipk）
 # 才判「该有」。所以这张表可以照全量写，固件没带的包会显示「固件未带」而不是
@@ -68,15 +79,22 @@ _PA_CLASHOO="clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn"
 # 裸名在 25.12 固件里查不到 info/<包>.list，_pa_should 判「固件未带」自动跳过，
 # 所以这行在两条线上都安全，不需要构建期分流。
 _PA_DAED="daed daed-geoip daed-geosite vmlinux-btf luci-app-daed luci-i18n-daed-zh-cn"
-_PA_MOSDNS="mosdns v2ray-geoip v2ray-geosite luci-app-mosdns luci-i18n-mosdns-zh-cn"
-# ssrp 组在 25.12 线整个不装（apk-custom-packages.sh 里没有 luci-app-ssr-plus，
-# 也没有 trojan-plus / shadowsocksr-libev-*）。但注意：这些包的 apk 确实躺在
-# /rom/root/apk-cache 里（build25.sh 把它们收进包库当兜底），所以「包库里有」
-# 绝不能当作「固件该有」—— 那会把整组判成缺失并强行装上，详见 _pa_should。
-_PA_SSRP="luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn xray-core xray-plugin sing-box
-trojan-plus shadowsocksr-libev-ssr-redir shadowsocksr-libev-ssr-local
-shadowsocksr-libev-ssr-server"
-_PA_LIST="${CS_PROBE_APPS:-$_PA_CLASHOO $_PA_DAED $_PA_MOSDNS $_PA_SSRP}"
+# 【v.180.166】mosdns 组不再包含 v2ray-geoip / v2ray-geosite。
+# 用户 2026-10-29 定：这两个是通用的 geo 数据包，上游一直在更新，不该被
+# 「缺了就按本地包库装回旧版」的判据锁死 —— 那样用户换了新版反而会被探针
+# 拽回去。它们仍然由构建装进固件（shell/custom-packages.sh），只是不再纳入
+# 探针的保护范围：被卸掉时不补、不报缺失。
+_PA_MOSDNS="mosdns luci-app-mosdns luci-i18n-mosdns-zh-cn"
+# 通用件组（v.180.166）：不属于哪一个应用，但被多处依赖，缺了会安静地坏。
+# ssrp 移除时这些包在构建清单里被刻意留下（shell/custom-packages.sh 有说明），
+# 留下来就必须一起保护 —— 只留不护，被删掉时探针不会去装回来。
+# sing-box 原先挂在 ssrp 组里，但它本身是通用代理内核，与 ssrp 无关。
+# geo 数据（v2ray-geoip / v2ray-geosite）整体不进保护清单：它们是通用数据包，
+# 上游一直在更新，「缺了就按本地包库装回旧版」的判据会把人拽回老版本。
+# daed-geoip / daed-geosite 不在此列 —— 它们是 daed 自身的运行依赖，
+# 跟着 daed 一起判。
+_PA_COMMON="sing-box microsocks dns2socks ipt2socks chinadns-ng tcping libopenssl3"
+_PA_LIST="${CS_PROBE_APPS:-$_PA_CLASHOO $_PA_DAED $_PA_MOSDNS $_PA_COMMON}"
 
 log() { printf '[APP] %s\n' "$*"; }
 

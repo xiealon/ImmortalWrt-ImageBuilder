@@ -289,9 +289,25 @@ _pr_host() {
 # 归纳成一条规则：/etc/config/ 下的一切归 bootstrap，文件级保护只管程序文件。
 _DEPS_ROM_LIST="$ROMDIR/lib/apk/packages"
 
+# 【v.180.182】补 v2ray-geoip / v2ray-geosite（用户 2026-10-29 定）。
+# 这两个是 daed 的规则来源：daed 不直接读它们，读的是两条软链接
+#   /usr/share/daed/geoip.dat   -> ../v2ray/geoip.dat
+#   /usr/share/daed/geosite.dat -> ../v2ray/geosite.dat
+# 所以真正会「没」的是 /usr/share/v2ray/ 下这两个实体文件（各 19MB / 10MB）。
+# 为什么放在文件级而不是包级：
+#   包级判据（_pa_data_ok 的软链接可读）能发现断链，但恢复动作是装 daed-geoip ——
+#   包本来就已装，装包是空操作，修不好。实测过这个组合：能发现、修不了。
+# 为什么不会锁版本（这是最初不肯纳入的理由）：
+#   判据只判「存在且非空」，不比内容、不比 md5、不比大小。用户从 clashoo 或
+#   手动换了新版 → 文件非空 → 判据恒真 → 一个字都不动。只有被删/被清空
+#   （whiteout 那种）才从 /rom 拷回出厂版救急，拷完用户自己再更新即可。
+# 不纳入 daed-geoip / daed-geosite 这两个包：它们的 list 里就是上面那两条软链接，
+# 而 cp 会跟随软链接，把 19MB 实体写进链接、绕开包结构 —— 交给 v2ray 那两个
+# 实体文件去管，软链接自然跟着好。
 _DEPS_PKGS="kmod-dummy kmod-nft-socket kmod-nft-tproxy kmod-sched-bpf
 kmod-sched-core kmod-veth kmod-inet-diag kmod-tun kmod-netlink-diag
-ca-bundle libcap yq ip-full firewall4 coreutils-nohup libopenssl3"
+ca-bundle libcap yq ip-full firewall4 coreutils-nohup libopenssl3
+v2ray-geoip v2ray-geosite"
 
 # 输出「基底有、运行侧缺或为空」的绝对路径。返回 2 = 基底里一份清单都没有。
 # 用 while read 而不是 for 展开：清单里可能出现带空格的路径。

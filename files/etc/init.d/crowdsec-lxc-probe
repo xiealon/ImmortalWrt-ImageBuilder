@@ -11,7 +11,7 @@
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.183"
+SCRIPT_VER="2026-10-29.180.184"
 
 START=99
 USE_PROCD=1

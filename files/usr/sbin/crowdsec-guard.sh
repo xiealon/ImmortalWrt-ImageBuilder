@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.183"
+SCRIPT_VER="2026-10-29.180.184"
 # 【v.180.152】补进 v.180.146~151 新增的 6 个恢复脚本。
 # 【v.180.162】再加 pkg-restore-apps.sh（应用主程序恢复），共 7 个。
 # 增删恢复脚本时必须同步这张清单 —— 漏一个是「脚本自己也会被删掉」的静默失效：
@@ -684,9 +684,13 @@ _pkgcache_feed_audit() {
         # 没有任何一条来自 file:///rom/root/apk-cache —— 源挂着，但等于不存在。
         # 也就是说这行配了也白配，唯一效果是每次 apk 操作刷一条警告，
         # 还会让 `apk update` 的输出里混进「错误」字样，看着像失败。
-        # 恢复路径本来就不靠它：pkg-cache-restore.sh 装包一律
-        #   apk add --allow-untrusted --no-network --repository "file://$PKG_CACHE_ACT"
-        # 显式指定 + 显式放行，与这个全局源无关。所以这里改成只清理、不写入。
+        # 【v.180.184】实测修正：这份索引并非「等于不存在」——
+        #   `apk --allow-untrusted policy hysteria` 能列出 file:// 的 2.9.2-r1 /
+        #   2.9.3-r1，只是不带 --allow-untrusted 时被跳过。问题仅在于
+        #   「全局挂这条不可信源会让每次 apk 操作刷一条警告」。
+        # 恢复路径也不靠全局这条：pkg-cache-restore.sh 自己写临时 repositories 文件
+        #   （一行 file://<目录>/packages.adb），--repositories-file 只喂本地源，
+        #   并显式 --allow-untrusted。所以这里仍是只清理、不写入。
         _pfa_write=0
     else
         _pfa_conf="$ROOT/etc/opkg/customfeeds.conf"

@@ -10,9 +10,13 @@
 #   "not available from any configured src"。所以本脚本在装之前自己调 fix，
 #   而不是指望调用方记得 —— 顺序错了的代价是「装不上还查不出原因」。
 #
-# 两条装法，按顺序试：
-#   ① 绝对路径直装 —— 不走源、不读索引、不联网，快且稳
-#   ② 走本地源 —— 依赖由包管理器自己解（直装不解依赖）
+# 装法按包管理器分开（两边的可用路径完全不同，别混着看）：
+#   opkg（24.10）：① 绝对路径直装 —— 不走源、不读索引，快且稳
+#                 ② 走本地源 —— 依赖由包管理器自己解
+#   apk （25.12）：repositories 文件里写 `file://<目录>/packages.adb`，
+#                 用 --repositories-file 只喂本地这一个源（等效离线）；
+#                 「记账有、文件被删」走 apk fix，不是 apk add。
+#                 详见 _pcr_install 里 v.180.184 的实测记录。
 #
 # 退出码：0 成功 / 1 失败 / 2 用法错误
 
@@ -61,20 +65,58 @@ _pcr_install() {
         return 0
     fi
 
-    # ① 绝对路径直装
+    # 【v.180.184】apk 分支按 25.12 真机实测重写（apk-tools 3.0.5，2026-10-29）。
+    # 旧写法两条路都是死的，日志却像「都试过了」：
+    #   ① `apk add <绝对路径.apk>`：包能读、依赖能算出来，但依赖必须「从源里取」，
+    #      --no-network 一句 "masked in: --no-network" 把包括 file:// 在内的所有源
+    #      一起屏蔽 → 必然失败（实测 rc=17，bandix 一次列出 7 个被 mask 的依赖）。
+    #   ② `--repository file://<目录>`：apk 按 v2 布局只找 <目录>/<arch>/APKINDEX.tar.gz，
+    #      我们的索引是 <目录>/packages.adb → 报 "APKINDEX.tar.gz: No such file"。
+    # 正解是 repositories 文件语法：一行 `file://<目录>/packages.adb`（写索引文件
+    # 本身，不带 ndx 前缀、也不写目录），再用 --repositories-file 指到只含这一行的
+    # 临时文件 —— 唯一源是本地，等效离线，于是不需要 --no-network，也就不会被 mask。
+    #
+    # 另一条必须分开：apk add 对已装包是 no-op。「记账有、文件被删」用 add 永远修不
+    # 回来（实测 rc=0、什么都没做），只有 apk fix 会按校验和重装（实测删掉
+    # /usr/bin/dns2socks 后 fix 打出 "Reinstalling dns2socks (2.1-r2)" 并真的补回）。
+    # 退出码实测：fix 包不在库=1；fix 有包但未装=0 且静默跳过；add 依赖不全=4；
+    # 成功=0。所以 fix 只在「确实已装」时用，不会出现假成功。
     if [ "$PKG_MGR" = "apk" ]; then
-        # [0-9] 卡住版本号起点：lxc-6.0.5-r1.apk 命中，lxc-attach-*.apk 不会误命中
-        _pcr_f=$(ls "$PKG_CACHE_ACT/$_pcr_p"-[0-9]*.apk 2>/dev/null | head -n1)
-        if [ -n "$_pcr_f" ] && apk add --allow-untrusted --no-network "$_pcr_f" >/dev/null 2>&1; then
-            pcl_log "直装成功：$_pcr_p"
+        _pcr_repos="${TMPDIR:-/tmp}/pkg-cache-restore.repos"
+        printf 'file://%s/%s\n' "$PKG_CACHE_ACT" "$PKG_IDX" > "$_pcr_repos" 2>/dev/null || {
+            pcl_log "写不出临时源文件：$_pcr_repos"
+            return 1
+        }
+        _pcr_use_fix=0
+        if [ "${PCR_FORCE:-0}" = "1" ] && pcl_installed "$_pcr_p"; then
+            _pcr_use_fix=1
+        fi
+        if [ "$_pcr_use_fix" = "1" ]; then
+            if apk fix --allow-untrusted --repositories-file "$_pcr_repos" "$_pcr_p" >/dev/null 2>&1; then
+                pcl_log "强制重装成功：$_pcr_p（按校验和复检文件）"
+                rm -f "$_pcr_repos"
+                return 0
+            fi
+            pcl_log "强制重装失败：$_pcr_p（本地库没有它，或索引读不了）"
+            rm -f "$_pcr_repos"
+            return 1
+        fi
+        if apk add --allow-untrusted --repositories-file "$_pcr_repos" "$_pcr_p" >/dev/null 2>&1; then
+            pcl_log "本地源装回：$_pcr_p"
+            rm -f "$_pcr_repos"
             return 0
         fi
-        # ② 走本地源
-        if apk add --allow-untrusted --no-network \
-                --repository "file://$PKG_CACHE_ACT" "$_pcr_p" >/dev/null 2>&1; then
-            pcl_log "源装成功：$_pcr_p"
+        # 本地库只收应用包（实测 114 个），系统依赖（conntrack / iw / zoneinfo-all
+        # 这类）不在里面，只能走系统已配置的全部源补 —— 这一句会联网，日志写清楚，
+        # 免得事后把「恢复时连过网」当成异常。
+        pcl_log "本地库解不了 $_pcr_p 的依赖，改走系统源（会联网）"
+        if apk add --allow-untrusted "$_pcr_p" >/dev/null 2>&1; then
+            pcl_log "系统源装回：$_pcr_p"
+            rm -f "$_pcr_repos"
             return 0
         fi
+        rm -f "$_pcr_repos"
+        pcl_log "恢复失败：$_pcr_p（本地库与系统源都没有它）"
         return 1
     fi
 

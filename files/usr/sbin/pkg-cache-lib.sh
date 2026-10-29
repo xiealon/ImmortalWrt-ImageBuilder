@@ -155,8 +155,13 @@ pcl_feed_ok() {
         # apk-tools 3.x 把整条源跳过。`apk policy daed` 实测：官方源一条、
         # installed 一条，没有任何一条来自 file:///rom/root/apk-cache ——
         # 源挂着但等于不存在，唯一效果是刷警告、让 update 输出里混进「错误」。
-        # 装包本来就不靠它：pkg-cache-restore.sh 一律
-        #   apk add --allow-untrusted --no-network --repository "file://$PKG_CACHE_ACT"
+        # 【v.180.184】补一条实测修正，免得把「源无效」当成结论：
+        #   `apk --allow-untrusted policy hysteria` 能列出 file:// 的 2.9.2-r1 /
+        #   2.9.3-r1 —— 这份索引不是不能用，只是**不带 --allow-untrusted 时被跳过**。
+        #   所以真正的问题是「全局挂一条不可信源，每次 apk 操作都刷警告」，不是源无效。
+        # 装包也不靠全局这条：pkg-cache-restore.sh 自己写一个临时 repositories 文件
+        #   （一行 file://<目录>/packages.adb），用 --repositories-file 只喂本地源，
+        #   并显式 --allow-untrusted。
         # 所以这里的「健康」= 配置里没有我们那一行；有就返回 1，交给 feed_ensure 清掉。
         grep -qE "$PCR_PAT" "$PKG_CACHE_CONF" 2>/dev/null && return 1
         return 0

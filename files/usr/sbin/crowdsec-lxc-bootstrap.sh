@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-29.180.183"
+SCRIPT_VER="2026-10-29.180.184"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -899,9 +899,15 @@ _pkgcache_lists_ensure() {
 #    参数支持与否先探测一次；老版本 opkg 没这开关就不带，别为个参数把整条路堵死。
 _PKG_SIGOPT=""
 
-# apk 侧装回。与 opkg 侧最大的区别是 --no-network：
-# 它把「这次操作会不会联网」变成显式约束，而不是靠「不跑 update」间接保证。
-# 两种包管理器的记账位置也不同（apk 写 /etc/apk/world），但对外效果一样：
+# apk 侧装回。25.12 真机实测（apk-tools 3.0.5）把原来两条路全否了：
+#   ① `apk add <绝对路径.apk>`：依赖要「从源里取」，--no-network 一句
+#      "masked in: --no-network" 连 file:// 一起屏蔽 → 必失败（rc=17）。
+#   ② `--repository file://<目录>`：只按 v2 布局找 <目录>/<arch>/APKINDEX.tar.gz，
+#      我们的索引是 <目录>/packages.adb → 报 "No such file"。
+# 现在只走一条：repositories 文件里写 `file://<目录>/packages.adb`，用
+# --repositories-file 只喂本地这一个源。唯一源是本地 → 不会联网，
+# 不需要 --no-network，也就不会被 mask。
+# 记账位置与 opkg 不同（apk 写 /etc/apk/world），对外效果一样：
 # 包管理器认这个包是装着的，LuCI 软件包页面看得见。
 _pkgcache_install_apk() {
     _pci_pkg="$1"
@@ -912,24 +918,30 @@ _pkgcache_install_apk() {
     if [ "${PCR_FORCE:-0}" != "1" ] && apk info -e "$_pci_pkg" >/dev/null 2>&1; then
         return 0
     fi
-    # ① 绝对路径直装。glob 用 [0-9] 卡住版本号起点：
-    #    lxc-6.0.5-r1.apk 能命中，lxc-attach-6.0.5-r1.apk 不会误命中
-    _pci_apk=$(ls "$_PKG_CACHE_ACT/${_pci_pkg}"-[0-9]*.apk 2>/dev/null | head -n1)
-    if [ -n "$_pci_apk" ]; then
-        if apk add --allow-untrusted --no-network "$_pci_apk" >/dev/null 2>&1; then
-            log "[PKG] 本地 apk 直装成功：$_pci_pkg（/etc/apk/world 记账正确，LuCI 可见）"
+    # 【v.180.184】apk add 对已装包是 no-op —— 「记账有、文件被删」只有 apk fix
+    # 会按校验和重装（实测删掉 /usr/bin/dns2socks 后 fix 打出 Reinstalling 并补回）。
+    _pci_repos="${TMPDIR:-/tmp}/bootstrap-pkg.repos"
+    printf 'file://%s/%s\n' "$_PKG_CACHE_ACT" "$_PKG_IDX" > "$_pci_repos" 2>/dev/null || {
+        log "[PKG] 写不出临时源文件：$_pci_repos"
+        return 1
+    }
+    if [ "${PCR_FORCE:-0}" = "1" ] && apk info -e "$_pci_pkg" >/dev/null 2>&1; then
+        if apk fix --allow-untrusted --repositories-file "$_pci_repos" "$_pci_pkg" >/dev/null 2>&1; then
+            log "[PKG] 本地 apk 强制重装成功：$_pci_pkg"
+            rm -f "$_pci_repos"
             return 0
         fi
-        log "[PKG] 本地 apk 直装失败（依赖缺失？）：$_pci_pkg，改走本地源"
+        log "[PKG] 本地 apk 强制重装失败：$_pci_pkg（本地库没有它）"
+        rm -f "$_pci_repos"
+        return 1
     fi
-    # ② 走本地 apk 源，依赖由 apk 自己解
-    _pkgcache_feed_ensure || return 1
-    if apk add --allow-untrusted --no-network \
-            --repository "file://$_PKG_CACHE_ACT" "$_pci_pkg" >/dev/null 2>&1; then
-        log "[PKG] 本地 apk 源装回成功：$_pci_pkg"
+    if apk add --allow-untrusted --repositories-file "$_pci_repos" "$_pci_pkg" >/dev/null 2>&1; then
+        log "[PKG] 本地 apk 源装回成功：$_pci_pkg（/etc/apk/world 记账正确，LuCI 可见）"
+        rm -f "$_pci_repos"
         return 0
     fi
-    log "[PKG] 本地 apk 源装不回 $_pci_pkg（缺依赖或索引不健康），放弃 —— 不再拷文件兜底"
+    rm -f "$_pci_repos"
+    log "[PKG] 本地 apk 装不回 $_pci_pkg（本地库缺它或缺依赖），放弃 —— 不再拷文件兜底"
     return 1
 }
 

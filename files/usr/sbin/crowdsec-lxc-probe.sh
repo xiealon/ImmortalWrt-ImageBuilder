@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.184"
+SCRIPT_VER="2026-10-29.180.185"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -434,8 +434,9 @@ _apps_watch() {
 }
 
 # ---- 应用依赖的文件级通道（v.180.181）----
-# 盯 16 个包、70 个文件：9 个 kmod 的 26 个 .ko 与 9 个 modules.d 配置，
-# 加 ca-bundle / libcap / yq / ip-full / firewall4 / coreutils-nohup / libopenssl3。
+# 盯 18 个包、72 个文件：9 个 kmod 的 26 个 .ko 与 9 个 modules.d 配置，
+# 加 ca-bundle / libcap / yq / ip-full / firewall4 / coreutils-nohup / libopenssl3，
+# 以及 v2ray-geoip / v2ray-geosite 的两个 .dat（v.180.182 补入，daed 的规则来源）。
 # **不含内核本体**（/boot/vmlinuz 与其余模块都不管，内核坏了重刷固件）。
 # **不含 /etc/config/**（UCI 配置归 bootstrap 管，恢复出厂基底反而会拆掉 lxc zone）。
 # 为什么必须走文件级：kmod-* 在固件出厂库里有、包库里没有 apk，apk add 无处可装；

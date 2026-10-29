@@ -93,7 +93,8 @@ _RESTORE="${RESTORE_BIN:-/usr/sbin/pkg-restore.sh}"
 # 留在这里只能报「缺」不能修。更要紧的是「包在册、模块文件被 whiteout」这种
 # 形态，apk info -e 照样返回成功，包级判据根本看不见。
 # 所以交给 --deps：清单不写死，直接读 /rom/lib/apk/packages/<包>.list，
-# 从 /rom 逐文件拷回。9 个 kmod 包的 26 个 .ko 与 9 个 modules.d 配置都在里面。
+# 从 /rom 逐文件拷回。9 个 kmod 包的 26 个 .ko 与 9 个 modules.d 配置、
+# 以及 v2ray-geoip / v2ray-geosite 的两个 .dat 都在里面（共 18 包 / 72 文件）。
 # 范围只有应用要用的这些：不含内核本体（坏了重刷固件），也不含 /etc/config/
 # （UCI 配置归 bootstrap 管，见 pkg-restore.sh v.180.181 说明）。
 #

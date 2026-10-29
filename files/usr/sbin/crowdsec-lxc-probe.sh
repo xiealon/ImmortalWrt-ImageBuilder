@@ -88,7 +88,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.190"
+SCRIPT_VER="2026-10-29.180.191"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -297,9 +297,10 @@ _sd_run() {
 }
 
 # 持锁跑一轮 bootstrap，等它结束，回收锁。返回它的退出码；77 = 抢锁失败。
-# 抽出来是因为现在有两条通道要跑同一件事（last_pull 停滞 / DNS 不可用），
+# 抽出来是因为有两条通道要跑同一件事（last_pull 停滞 / 补印复验），
 # 各写一遍的话，「pid 写进锁」这类容易写错的细节迟早会分叉 ——
 # 陈旧锁判定依据的是持有者 pid，不是探针自己，写错了会让锁被误判成陈旧。
+# 【v.180.191】DNS 通道已退出本函数（见 _dns_watch），现在是这两条在用。
 _run_fix() {
     # 先保证要跑的东西在：不在就什么都别谈。返回 78 与抢锁失败的 77 区分开 ——
     # 两者的日志和处置完全不同（一个是「等下一轮」，一个是「要重刷固件」）。
@@ -320,13 +321,15 @@ _run_fix() {
     return "$_rf_rc"
 }
 
-# DNS 通道：连续 PROBE_STALL_ROUNDS 轮不可用 → 冷却检查 → 拉 smartdns 脚本修 →
-# 脚本修不好才跑一轮引导 → 每一步都看现场复验。
+# DNS 通道：连续 PROBE_STALL_ROUNDS 轮不可用 → 冷却检查 → 交 pkg-restore-smartdns.sh --repair。
+# 【v.180.191】只有这一级，不再跑 bootstrap —— 它与 smartdns 已经彻底分开，
+# 理由写在函数体里「到此为止，不再拉 bootstrap」那段。这也让 DNS 通道
+# 不再持 bootstrap 的锁：修 DNS 不会和 last_pull 那条链路抢锁。
 # 计数与锁存都是独立的（P_DNS_*）：与 last_pull 那条链路根因完全不同，
 # 共用一个计数器的话，修 DNS 会把「容器拉不动」的累计清零，反过来也一样 ——
 # 这正是 v.108.58 在两个锁存上踩过的坑（P_HUMAN 归补印、P_HUMAN_PULL 归停滞）。
-# 复验不看退出码看现场：引导可能 exit 0（它只重走网络与容器，与 DNS 无关），
-# 也可能 exit 1 而 DNS 其实已恢复，唯一可信的判据是再问一次 _dns_ok。
+# 复验不看退出码看现场：--repair 可能 exit 0 而 53 根本没起（比如被别的进程占着），
+# 所以 _sd_run 内部最后一步一定是 _dns_ok，外面只认这一步。
 _dns_watch() {
     if _dns_ok; then
         if [ "${P_DNS_BAD:-0}" -gt 0 ]; then
@@ -359,41 +362,31 @@ _dns_watch() {
     # 重跑引导对「配置被写坏」这类故障已经无能为力（它只重走网络与容器）。
     # 放在冷却闸门之后调，是因为 --repair 会重写 uci 并重启服务，不能每轮都来一次。
     P_ACTION="dns-script-repair"
-    plog "【DNS】smartdns 连续 ${PROBE_STALL_ROUNDS} 轮不可用（$DNS_WHY），先交 pkg-restore-smartdns.sh --repair"
+    plog "【DNS】smartdns 连续 ${PROBE_STALL_ROUNDS} 轮不可用（$DNS_WHY），交 pkg-restore-smartdns.sh --repair"
     if _sd_run --repair; then
         P_DNS_FIX=0
         P_ACTION="dns-script-fixed"
-        plog "【DNS】脚本修复成功：smartdns 已恢复（bootstrap 未参与）"
+        plog "【DNS】脚本修复成功：smartdns 已恢复"
         return 0
     fi
-    P_ACTION="dns-trigger"
-    plog "【DNS】脚本未能修好（$DNS_WHY），持锁重跑 $BOOT 复验/修复"
-    _run_fix
-    _dw_rc=$?
-    if [ "$_dw_rc" = 78 ]; then
-        P_ACTION="dns-boot-missing"
-        return 0
-    fi
-    if [ "$_dw_rc" = 77 ]; then
-        P_ACTION="dns-lock-fail"
-        return 0
-    fi
-    if [ "$_dw_rc" = 124 ]; then
-        plog "【DNS】【超时】bootstrap 超过 ${_BOOT_MAX:-$PROBE_FIX_MAX}s 未返回，已终止（锁已回收）"
-    fi
-    if _dns_ok; then
-        P_DNS_FIX=0
-        plog "【DNS】已恢复（bootstrap 退出 $_dw_rc）"
-        return 0
-    fi
+    # 【v.180.191】到此为止，不再拉 bootstrap。
+    # 原来这里还会 _run_fix 跑一遍完整引导（上限 900s，正常 5~6 分钟）。删掉的理由：
+    #   · bootstrap 自 v.180.157 起一行 smartdns 恢复代码都没有（全脚本只剩注释
+    #     说明「已移出」），六件事扫下来没有一件能让 53 回来；
+    #   · 它唯一沾边的动作是 dhcp 分组 flush 时 restart dnsmasq，而 dnsmasq 让不让
+    #     53 由 smartdns 自己的 init（auto_set_dnsmasq）决定，restart 解决不了抢占；
+    #   · 它真帮得上的那些情形（网卡没起、network 配置坏了）会让 last_pull 一起坏，
+    #     last_pull 停滞通道早就在跑同一个 bootstrap —— 这里再跑一遍只是白等 5 分钟，
+    #     顺带动一次容器与网桥，把一次局部故障放大成一次全局抖动。
+    # 判据仍看现场：_sd_run 内部最后一步就是 _dns_ok，脚本 exit 0 不算数。
     P_DNS_FIX=$((${P_DNS_FIX:-0} + 1))
     if [ "$P_DNS_FIX" -ge "$PROBE_FAIL_ALERT" ]; then
         P_ACTION="dns-need-human"
         P_HUMAN_DNS=1
-        plog "【DNS】【需人工介入】bootstrap 连续 $P_DNS_FIX 次未能让 smartdns 恢复（本次 $_dw_rc，仍 $DNS_WHY）。先查 $BOOT_LOG，再看 /etc/config/smartdns 是否被手工改坏"
+        plog "【DNS】【需人工介入】--repair 连续 $P_DNS_FIX 次未能让 smartdns 恢复（仍 $DNS_WHY）。依次查：/etc/config/smartdns 是否被手工改坏、/etc/smartdns 下规则文件是否被遮、53 是否被别的进程占着"
     else
         P_ACTION="dns-fix-fail"
-        plog "【DNS】bootstrap 退出 $_dw_rc，smartdns 仍不可用（连续第 $P_DNS_FIX/${PROBE_FAIL_ALERT} 次，日志见 $BOOT_LOG）"
+        plog "【DNS】--repair 未能让 smartdns 恢复（仍 $DNS_WHY，连续第 $P_DNS_FIX/${PROBE_FAIL_ALERT} 次）"
     fi
     return 0
 }

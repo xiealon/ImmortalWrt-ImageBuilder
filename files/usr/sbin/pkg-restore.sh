@@ -9,6 +9,12 @@
 #   ③ 两个判据混用会死循环：端口不通 -> 判缺 -> 装包 -> 端口还是不通（配置错）
 #      -> 再判缺 -> 再装，永远修不好。
 #
+# 上面三条管的是「该不该装」。另有一层「已装了、关键文件却被删」——
+# 由 _pr_files_ok 在「已装在册」之后补一刀（v.180.161 起）：文件缺就走
+# PCR_FORCE 按包内清单覆盖回来，不卸载、不联网。它只扫 /usr/bin、/usr/sbin、
+# /etc/init.d、/lib/*.so* 这类可执行与库，数据文件与 /etc/config 一概不碰 ——
+# 所以不会退化成「逐文件比对」。
+#
 # 用法：
 #   pkg-restore.sh <包名>              装回（已装则跳过）
 #   pkg-restore.sh --tree <包名>       连同 Depends 递归（最多 3 层）
@@ -71,7 +77,19 @@ _pr_installed() {
 #   取 /rom 侧而不是运行侧：opkg remove 会把运行侧的 .list 一起删掉，
 #   而 /rom 是只读基底，固件原始清单永远在。
 _pr_files_ok() {
+    # 【v.180.188】双通路：24.10 的 opkg 清单 与 25.12 的 apk 清单。
+    # 原来只认 /rom/usr/lib/opkg/info/<包>.list。25.12 上这个目录整个不存在，
+    # 于是每个包都在下一行 return 0（判「文件齐」），强制重装那条路永远走不到 ——
+    # 而 _lxc_missing_deps 判出「二进制被删」也没用，恢复动作在这句上静默失效。
+    # 2026-10-29 真机复现（192.168.1.201）：
+    #   rm /usr/bin/lxc-info
+    #   pkg-restore.sh --lxc-missing → 输出空（包还在册，判据看不见）
+    #   pkg-restore.sh --lxc         → 34 个包全「已安装，跳过」，文件没补回来
+    # apk 的清单在 /rom/lib/apk/packages/<包>.list，同样一行一个绝对路径。
     _pfo_l="$ROMDIR/usr/lib/opkg/info/$1.list"
+    if [ ! -f "$_pfo_l" ]; then
+        _pfo_l="$ROMDIR/lib/apk/packages/$1.list"
+    fi
     [ -f "$_pfo_l" ] || return 0
     while IFS= read -r _pfo_f; do
         case "$_pfo_f" in

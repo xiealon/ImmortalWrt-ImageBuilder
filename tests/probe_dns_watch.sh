@@ -115,7 +115,7 @@ LOCK="$TMPD/lock"
 STATE_FILE="$TMPD/state"
 PROBE_STALL_ROUNDS=3
 PROBE_COOLDOWN=600
-PROBE_FAIL_ALERT=5
+PROBE_FAIL_ALERT=3
 PROBE_FIX_MAX=900
 BOOT_FIXES=0
 export BOOT_FIXES
@@ -185,10 +185,10 @@ ck "R34.5p 现场已恢复 -> 失败计数清零" "$P_DNS_FIX" "0"
 # 连续失败达阈值 -> 锁存停手
 BOOT_FIXES=0
 rm -f "$TMPD/pid"
-P_DNS_FIX=4
+P_DNS_FIX=2
 FAKE_NOW=1700002000
 _dns_watch; _dns_watch; _dns_watch
-ck "R34.5q 连续第 5 次失败 -> 需人工介入" "$P_ACTION" "dns-need-human"
+ck "R34.5q 连续第 3 次失败 -> 需人工介入" "$P_ACTION" "dns-need-human"
 ck "R34.5r 锁存位已置" "$P_HUMAN_DNS" "1"
 FAKE_NOW=1700009000
 _dns_watch

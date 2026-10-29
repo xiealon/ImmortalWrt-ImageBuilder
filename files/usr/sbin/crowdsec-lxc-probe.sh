@@ -18,7 +18,7 @@
 #   CS_PROBE_STALL_ROUNDS 连续停滞几轮才动作（默认 3，防容器刚起的拉取周期误报）
 #   CS_PROBE_COOLDOWN     触发后冷却秒（默认 600，防爆冲）
 #   CS_PROBE_LOCK_STALE   锁最长存活秒（默认 1800），超过视为陈旧锁回收
-#   CS_PROBE_FAIL_ALERT   连续修复失败几次后报「需人工介入」（默认 5）
+#   CS_PROBE_FAIL_ALERT   连续修复失败几次后报「需人工介入」（默认 3）
 # 启动时机：init.d START=99 开机拉起。首启时安装可能尚未完成——无 installed
 #   标记则静默等待（每分钟一次文件存在检查，零成本），不误判停滞。
 # 【v.106 修掉的静默失效】原来锁只是一个 mkdir 出来的空目录：bootstrap 被
@@ -52,7 +52,12 @@ PROBE_INTERVAL="${CS_PROBE_INTERVAL:-60}"
 PROBE_STALL_ROUNDS="${CS_PROBE_STALL_ROUNDS:-3}"
 PROBE_COOLDOWN="${CS_PROBE_COOLDOWN:-600}"
 PROBE_LOCK_STALE="${CS_PROBE_LOCK_STALE:-1800}"
-PROBE_FAIL_ALERT="${CS_PROBE_FAIL_ALERT:-5}"
+# 【2026-10-29 用户定】连续修复失败 3 次就锁存 need-human，原来是 5。
+# 每次重试之间隔着 PROBE_COOLDOWN（600s）：3 次≈20 分钟喊人，5 次≈40 分钟。
+# 而重试跑的是同一套动作（同一份包库、同一个 apk fix），第 4、5 次换不来新结果，
+# 只是再写两遍 flash。修不好的三种原因 —— 包里没有、基底坏了、运行侧写不进 ——
+# 一个都不会因为多试两次而改变。
+PROBE_FAIL_ALERT="${CS_PROBE_FAIL_ALERT:-3}"
 # 【v.108.25】全量体检间隔（按轮数）。bootstrap 的 --verify-only 会把 28 个节点
 # 从 img_migrate 到 capi_release 全验一遍、一个字节都不写。last_pull 只反映
 # 「bouncer 拉得到吗」，配置被改坏但还能拉的时候它照样是绿的 —— 所以每隔
@@ -71,7 +76,7 @@ PROBE_AUDIT_EVERY="${CS_PROBE_AUDIT_EVERY:-30}"
 #                  + _wait_capi_net 30s + 网桥重接 10×1s + DNS 30s
 #                  + enroll 两轮 15s ≈ 5~6 分钟                     → 900s
 # 取最坏路径的倍数而不是正常耗时：上限越短越容易误杀，而误杀要白等一轮冷却，
-# 连续 5 次才锁存 need-human —— 宁可在真卡住时多等几分钟，也不制造假失败。
+# 连续 3 次才锁存 need-human（见 PROBE_FAIL_ALERT）—— 宁可多等几分钟，也不制造假失败。
 PROBE_CHECK_MAX="${CS_PROBE_CHECK_MAX:-60}"
 PROBE_VERIFY_MAX="${CS_PROBE_VERIFY_MAX:-300}"
 PROBE_FIX_MAX="${CS_PROBE_FIX_MAX:-900}"
@@ -83,7 +88,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.189"
+SCRIPT_VER="2026-10-29.180.190"
 
 plog() { logger -t crowdsec-probe "$*"; }
 

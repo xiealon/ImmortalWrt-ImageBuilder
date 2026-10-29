@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.186"
+SCRIPT_VER="2026-10-29.180.187"
 # 【v.180.152】补进 v.180.146~151 新增的 6 个恢复脚本。
 # 【v.180.162】再加 pkg-restore-apps.sh（应用主程序恢复），共 7 个。
 # 增删恢复脚本时必须同步这张清单 —— 漏一个是「脚本自己也会被删掉」的静默失效：
@@ -115,9 +115,17 @@ SCRIPT_VER="2026-10-29.180.186"
 # 没有任何东西能把脚本本身补回来 —— 恰恰是这套保护最该覆盖的对象。
 # 它们是纯脚本（最大 6.3KB），六份加起来 ≈33KB，比容器 rootfs 里任何一个文件都小，
 # 每轮 cmp 的代价可以忽略；纳入之后探针 60 秒内自动复原，与 bootstrap 同一套机制。
-# 注意：lxc 的二进制（lxc-start 等，14MB 量级）**不**进这份清单 ——
-# 它们归 pkg_base 的包级恢复（_lxc_missing_deps 判在位 → 从 /rom 包库 opkg install），
-# 文件级逐字节比对 14MB 二进制只会把探针拖慢，且包级恢复本来就带记账，更干净。
+# 注意：lxc 的二进制**不**进这份清单，但**不是**因为没人保护它 ——
+# 它归 pkg_base 的包级恢复，两条判据并行，各防一种故障：
+#   · _lxc_missing_deps：5 个核心 applet（lxc-start/stop/ls/info/attach）可执行
+#     + lxc-start --version 冒烟（抓 liblxc 加载失败）→ 防「记账在、二进制被删」
+#   · _lxc_missing_pkgs：pkg-restore.sh --lxc-missing 判全家桶在不在册
+#     → 防「整包被删」（opkg remove --force-depends 的典型结果）
+# 为什么不逐字节 cmp：**不是因为它大**。2026-10-29 真机实测：20 个 applet 合计
+# 1.3MB、liblxc.so.1.8.0 936KB，全量 cmp 也就几毫秒 —— 先前这里写「14MB 量级」，
+# 是把量级估错了十倍，并因此给了一条不成立的理由。真正的原因是包级恢复自带
+# 记账与依赖树：逐字节盖回二进制会绕开包管理器，留下「文件是 guard 盖的、
+# 记账说没装」的状态，LuCI 与后续 apk/opkg 操作都会读错。
 GUARD_FILES="${CS_GUARD_FILES:-
 /usr/sbin/crowdsec-lxc-bootstrap.sh
 /usr/sbin/crowdsec-lxc-probe.sh

@@ -5,7 +5,7 @@
 #   ③ lxc 接口的 option device 必须指向 lxcbr0
 #   ④ ip link add 失败时不许写 interface（写个指向不存在设备的接口更糟）
 set -u
-REPO="C:/Users/Alon/Documents/JiuwenSwarm/2026-10-20/chat-1/work/REVIEW/verify"
+REPO=$(cd "$(dirname "$0")/.." && pwd)
 BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
 
 R=0
@@ -33,17 +33,17 @@ ck "R27.2 device 名字是 lxcbr0" \
 ck "R27.3 device 类型是 bridge" \
    "$(body build_bridge | grep -c "uci -q set network.lxcbr0.type='bridge'")" "1"
 ck "R27.4 verify 验段类型是 device" \
-   "$(body verify_bridge | grep -c '\[ "\$(uci -q get network.lxcbr0)" = "device" \]')" "1"
+   "$(body verify_bridge | grep -c '\[ "\$(run uci -q get network.lxcbr0)" = "device" \]')" "1"
 ck "R27.5 verify 验 name=lxcbr0" \
-   "$(body verify_bridge | grep -c 'network.lxcbr0.name 2>/dev/null)" = "lxcbr0"')" "1"
+   "$(body verify_bridge | grep -c 'run uci -q get network.lxcbr0.name 2>/dev/null)" = "lxcbr0"')" "1"
 ck "R27.6 verify 验 type=bridge" \
-   "$(body verify_bridge | grep -c 'network.lxcbr0.type 2>/dev/null)" = "bridge"')" "1"
+   "$(body verify_bridge | grep -c 'run uci -q get network.lxcbr0.type 2>/dev/null)" = "bridge"')" "1"
 ck "R27.6a build 写 bridge_empty=1（空网桥不设就不会被创建）" \
    "$(body build_bridge | grep -c "uci -q set network.lxcbr0.bridge_empty='1'")" "1"
 ck "R27.6b build 判据含 bridge_empty" \
    "$(body build_bridge | grep -c 'network.lxcbr0.bridge_empty 2>/dev/null)" != "1"')" "1"
 ck "R27.6c verify 验 bridge_empty=1" \
-   "$(body verify_bridge | grep -c 'network.lxcbr0.bridge_empty 2>/dev/null)" = "1"')" "1"
+   "$(body verify_bridge | grep -c 'run uci -q get network.lxcbr0.bridge_empty 2>/dev/null)" = "1"')" "1"
 
 echo "== ② 静态：lxc 接口必须引用这个 device =="
 ck "R27.7 build 写 network.lxc.device=lxcbr0" \
@@ -51,7 +51,7 @@ ck "R27.7 build 写 network.lxc.device=lxcbr0" \
 ck "R27.8 build 判据里含 device 校验（被改回别处会重写）" \
    "$(body build_bridge | grep -c 'network.lxc.device 2>/dev/null)" != "lxcbr0"')" "1"
 ck "R27.9 verify 验 interface.device=lxcbr0" \
-   "$(body verify_bridge | grep -c 'network.lxc.device 2>/dev/null)" = "lxcbr0"')" "1"
+   "$(body verify_bridge | grep -c 'run uci -q get network.lxc.device 2>/dev/null)" = "lxcbr0"')" "1"
 
 echo "== ③ 静态：顺序 device → 建 → interface =="
 _dn=$(body build_bridge | grep -n 'uci -q set network.lxcbr0=' | head -1 | cut -d: -f1)
@@ -86,6 +86,12 @@ OPS="$T/ops"; LOG="$T/log"; KV="$T/kv"
 
 log() { echo "$*" >> "$LOG"; }
 _net_write_guard() { :; }
+# 代码里的 uci / ip 调用全都包在 run 里（带 timeout）。不 mock 这一层，
+# run 会去找进程而看不到上面的 shell 函数，build_bridge 会一路失败。
+run() { "$@"; }
+run_svc() { "$@"; }
+RUN_TIMEOUT=60
+SVC_TIMEOUT=60
 BRIDGE_IP="10.1.0.1"
 
 uci() {

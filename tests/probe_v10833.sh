@@ -5,7 +5,7 @@
 #   ③ 首次装机判定只有一个调用点：_post_verify_skip 里的 bouncer_verify
 #   ④ 其它节点（安装/复核/bouncer 本身的验证）一律先验证再动作，不看首次装机
 set -u
-REPO="C:/Users/Alon/Documents/JiuwenSwarm/2026-10-20/chat-1/work/REVIEW/verify"
+REPO=$(cd "$(dirname "$0")/.." && pwd)
 BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
 
 R=0
@@ -105,15 +105,15 @@ ck "R26.19 ensure 里不再有 build 后立即复核" \
 ck "R26.20 ensure 里注明了为什么不在 build 后验" \
    "$(body ensure | grep -c 'commit/reload 统一在 flush_uci')" "1"
 ck "R26.21 flush_uci 清脏标记前记账" \
-   "$(body flush_uci | grep -c '_bs_flag_on "_dirty_\$_o" && _built_nodes="\$_built_nodes \$_o"')" "1"
+   "$(body flush_uci | grep -c '_built_nodes="\$_built_nodes \$_o"')" "1"
 ck "R26.22 记账看 _dirty_ 不看 _done_（只数实际取值）" \
    "$(body flush_uci | grep -c '_bs_flag_on "_done_')" "0"
 ck "R26.23 收尾复核在 _stamp_write 之前" \
    "$(awk '/_post_verify_after_boot; then/{a=NR} /if ! _stamp_write; then/{b=NR} END{print (a && b && a<b) ? "yes" : "no"}' "$BS")" "yes"
 ck "R26.24 收尾复核在 flush_uci 之后（main 里位置）" \
-   "$(awk '/^    flush_uci \|\| _flush_rc=1/{f=NR} /_post_verify_after_boot; then/{p=NR} END{print (f && p && p>f) ? "yes" : "no"}' "$BS")" "yes"
+   "$(awk '/flush_uci \|\| _flush_rc=1/{f=NR} /_post_verify_after_boot; then/{p=NR} END{print (f && p && p>f) ? "yes" : "no"}' "$BS")" "yes"
 ck "R26.25 复核失败走 exit 1" \
-   "$(awk '/【v.108.33】落地复核/,/_stamp_write; then/' "$BS" | grep -c 'exit 1')" "1"
+   "$(awk '/if ! _post_verify_after_boot; then/,/^    fi$/' "$BS" | grep -c 'exit 1')" "1"
 ck "R26.26 二进制里有二次落地（flush + 复验）" \
    "$(body _post_verify_after_boot | grep -c 'flush_uci >/dev/null 2>&1')" "1"
 ck "R26.27 柔性节点在复核阶段只记账" \

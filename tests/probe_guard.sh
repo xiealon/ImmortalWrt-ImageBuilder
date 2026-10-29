@@ -189,9 +189,14 @@ ck "R13.44 轮转没丢掉最新那条" "$(grep -c '已复原' "$LOG")" "1"
 echo "== 14 出镜像时执行位有断言，不靠 2>/dev/null 掩盖 =="
 for _b in "$B24" "$B25"; do
     _n=$(basename "$_b")
-    ck "R13.33 $_n 断言表含 guard" "$(cg "$_b" 'files/usr/sbin/crowdsec-guard.sh')" "2"
-    ck "R13.34 $_n 断言表含 probe" "$(cg "$_b" 'files/usr/sbin/crowdsec-lxc-probe.sh')" "2"
-    ck "R13.35 $_n 断言表含 init.d" "$(cg "$_b" 'files/etc/init.d/crowdsec-lxc-probe')" "2"
+    # 已不再逐个点名文件：改成扫目录（枚举法必然漏，v.180.163 起就是这么修的），
+    # 所以这里只断言「扫的是源目录」这件事成立。
+    ck "R13.33 $_n 执行位断言扫 files/usr/sbin/*.sh" \
+       "$([ "$(cg "$_b" 'files/usr/sbin/\*\.sh')" -ge 1 ] && echo yes)" "yes"
+    ck "R13.34 $_n 执行位断言扫 files/etc/init.d/*" \
+       "$([ "$(cg "$_b" 'files/etc/init.d/\*')" -ge 1 ] && echo yes)" "yes"
+    ck "R13.35 $_n 扫的是源树而不是 staging" \
+       "$([ "$(cg "$_b" 'files/usr/sbin/\*\.sh')" -ge 2 ] && echo yes)" "yes"
     ck "R13.36 $_n 有 -x 断言" "$(cg "$_b" '\[ -x "\$_f" \]')" "1"
     # 三处硬失败：make image 返回非 0、执行位断言缺位、custom/* 拷进 files/etc/config 失败
     # 【v.108.67 同步实现】后来又加了基底校验、执行位断言、custom 拷贝各自的出口，

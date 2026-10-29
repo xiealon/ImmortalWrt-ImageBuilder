@@ -53,7 +53,7 @@ mkdir -p "$T/emptydir"
 echo "EMPTYDIR=[$(_bs_content_fp "$T/emptydir" 2>/dev/null)]"
 echo "MISSING=[$(_bs_content_fp "$T/no-such-dir" 2>/dev/null)]"
 EOS
-F="$TMPD/f.sh" T="$TMPD/tree" dash "$TMPD/a.sh" > "$TMPD/out" 2>&1
+F="$TMPD/f.sh" T="$TMPD/tree" sh "$TMPD/a.sh" > "$TMPD/out" 2>&1
 g() { grep -m1 "^$1=" "$TMPD/out" | sed "s/^$1=//"; }
 _base=$(g BASE)
 ck "R9.1 同内容两次指纹相同" "$(g AGAIN)" "$_base"
@@ -102,7 +102,7 @@ echo "STAMP_TS=$_stamp_ts"
 echo "FILE_TS=$_file_ts"
 echo "FP1=$(_bs_content_fp "$T/p")"
 EOS
-F="$TMPD/f.sh" T="$TMPD/tree2" dash "$TMPD/b.sh" > "$TMPD/out2" 2>&1
+F="$TMPD/f.sh" T="$TMPD/tree2" sh "$TMPD/b.sh" > "$TMPD/out2" 2>&1
 # 关键断言：同样的内容，无论 mtime 怎么变，指纹都该等于「干净拷贝」的指纹
 mkdir -p "$TMPD/tree3/p"; printf 'p\n' > "$TMPD/tree3/p/x.yaml"
 _FP_clean=$( . "$TMPD/f.sh"; _bs_content_fp "$TMPD/tree3/p" )
@@ -184,7 +184,7 @@ printf 'installed\nver=v\nts=x\ncfg_fp=aaaa\nparsers_fp=bbbb\n' > "$STAMP_FILE"
 rm -rf "$R/etc"
 _stamp_cfg_changed; echo "GONE_RC=$?"
 EOS2
-F="$TMPD/f.sh" T="$TMPD/r10" dash "$TMPD/c.sh" > "$TMPD/out3" 2>&1
+F="$TMPD/f.sh" T="$TMPD/r10" sh "$TMPD/c.sh" > "$TMPD/out3" 2>&1
 h() { sed -n "s/^$1=//p" "$TMPD/out3"; }
 ck "R10.1 刚写好的 stamp 与现场一致（rc=0）" "$(h SAME_RC)" "0"
 ck "R10.2 stamp 里记了 cfg_fp 与 parsers_fp" \

@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.191"
+SCRIPT_VER="2026-10-29.180.192"
 # 【v.180.152】补进 v.180.146~151 新增的 6 个恢复脚本。
 # 【v.180.162】再加 pkg-restore-apps.sh（应用主程序恢复），共 7 个。
 # 增删恢复脚本时必须同步这张清单 —— 漏一个是「脚本自己也会被删掉」的静默失效：
@@ -637,11 +637,30 @@ _ct_gate && _CT_OK=1
 # 只比内容，**不比 mtime** —— 刷机后 /rom 与运行副本的时间戳必然不同，
 # 比时间会变成「每轮都判定不一致、每轮重写整目录」，正是 v.108.44 踩过的坑。
 # 文件名也进签名：少一个、多一个都算不一致。
+#
+# 【v.180.192】校验和工具从 cksum 换成 md5sum。原因：25.12 的 busybox 里
+# **没有 cksum 这个 applet**（真机实测 `cksum: applet not found`；
+# imm25.config 里 CONFIG_PACKAGE_coreutils-cksum 也是 not set）。
+# 于是 `cksum <"$f"` 在 25.12 上恒为空，签名只剩路径 —— 文件内容被改
+# 完全发现不了，只有增删文件才算「不一致」。注释写着「路径 + 校验和」，
+# 实际只做了路径，属于静默失效（v.180.120 起就一直在）。
+# md5sum 两版固件都带；万一某个固件连它也没有，退回字节数（比空好）。
 _dir_sig() {
     ( cd "$1" 2>/dev/null || exit 1
       find . -type f 2>/dev/null | sort | while read -r _ds_f; do
-          printf '%s %s\n' "$_ds_f" "$(cksum <"$_ds_f" 2>/dev/null)"
+          printf '%s %s\n' "$_ds_f" "$(_ds_sum "$_ds_f")"
       done ) 2>/dev/null
+}
+
+_ds_sum() {
+    _ds_p="$1"
+    _dsm=$(md5sum <"$_ds_p" 2>/dev/null)
+    # 不用 awk 取第一列：guard 里那条「计时不依赖 awk」的约定（busybox 不一定编了）
+    # 同样适用于这里，能少一个外部依赖就少一个。
+    set -- $_dsm
+    _dsm=${1:-}
+    [ -n "$_dsm" ] || _dsm="size$(wc -c <"$_ds_p" 2>/dev/null)"
+    printf '%s' "$_dsm"
 }
 
 # ---- 【v.180.128】本地包源守护：只清死源，不覆盖文件 ----

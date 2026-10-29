@@ -2,7 +2,7 @@
 # v.108.28 断言：/etc/config/lxc-auto 有自己的节点 —— 容器跑着的时候也验、也补
 # 背景：_ensure_lxc_auto 原来只在 build_ct_boot 里被调到，而 build_ct_boot 只在
 #       「容器没跑」时才执行。于是「容器跑着 + 配置空了」这种现场完全静默。
-REPO="${REPO:-C:/Users/Alon/Documents/JiuwenSwarm/2026-10-20/chat-1/work/REVIEW/verify}"
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
 G="$REPO/files/usr/sbin/crowdsec-guard.sh"
 R=0
@@ -11,10 +11,12 @@ ck() { if [ "$2" = "$3" ]; then echo "PASS: $1"; else echo "FAIL: $1 got=[$2] wa
 echo "== 22 v.108.28：lxc-auto 配置独立成节点 =="
 ck "R22.1 DAG 里有 lxc_auto 节点" \
    "$(sed -n '/^DAG_NODES=/p' "$BS" | grep -c ' lxc_auto ')" "1"
-ck "R22.2 PREP 组收它（开机前就要在位）" \
-   "$(sed -n '/^PREP_NODES=/p' "$BS" | grep -c ' lxc_auto ')" "1"
-ck "R22.3 分组登记为 PREP" \
-   "$(grep -c '^NODE_GROUP_lxc_auto=PREP$' "$BS")" "1"
+# 【v.108.47】起 lxc_auto 归 NETBASE（跟着 pkg_base 的 lxc 包走），不再走 PREP ——
+# 它只碰路由器侧 uci 与 rc 链路，开机前单独跑没有意义。
+ck "R22.2 分组登记为 NETBASE" \
+   "$(grep -c '^NODE_GROUP_lxc_auto=NETBASE$' "$BS")" "1"
+ck "R22.3 PREP 组不收它" \
+   "$(sed -n '/^PREP_NODES=/p' "$BS" | grep -c ' lxc_auto ')" "0"
 ck "R22.4 无依赖（只碰路由器侧 uci，不依赖 rootfs / 容器）" \
    "$(grep -c '^DEP_lxc_auto=\"\"$' "$BS")" "1"
 ck "R22.5 不在 SOFT_NODES（配置写不进去要大声失败）" \

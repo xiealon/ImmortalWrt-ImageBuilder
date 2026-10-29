@@ -4,7 +4,7 @@
 #   ② verify_docker_fw 补段类型 zone（段类型坏了 fw4 根本不认这个 zone）
 #   ③ 机制化：build_ 里每个固定 uci key，verify_ 必须读过 —— 以后加字段漏验，这里直接红
 set -u
-REPO="C:/Users/Alon/Documents/JiuwenSwarm/2026-10-20/chat-1/work/REVIEW/verify"
+REPO=$(cd "$(dirname "$0")/.." && pwd)
 BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
 
 R=0
@@ -28,7 +28,7 @@ echo "== ① 逐个补上的漏项 =="
 ck "R28.1 verify_bridge 验 netmask" \
    "$(body verify_bridge | grep -c 'network.lxc.netmask 2>/dev/null)" = "255.255.255.0"')" "1"
 ck "R28.2 verify_docker_fw 验段类型=zone" \
-   "$(body verify_docker_fw | grep -c '\[ "\$(uci -q get firewall.docker 2>/dev/null)" = "zone" \]')" "1"
+   "$(body verify_docker_fw | grep -c '\[ "\$(run uci -q get firewall.docker 2>/dev/null)" = "zone" \]')" "1"
 
 echo "== ② 覆盖率：build 写的固定 key 必须被 verify 读到 =="
 T=$(mktemp -d)
@@ -51,8 +51,8 @@ for n in bridge docker_fw lan_static dhcp_ignore fwd_rules lxc_auto br_lan_ports
 done
 
 echo "== ③ 版本 =="
-ck "R28.4 版本号 108.37" \
-   "$(grep -c 'SCRIPT_VER="2026-10-21.108.37-bp"' "$BS")" "1"
+ck "R28.4 版本号已推进（形如 2026-10-29.180.191）" \
+   "$(grep -cE '^SCRIPT_VER="[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\.[0-9]+\.[0-9]+"$' "$BS")" "1"
 
 rm -rf "$T"
 echo "----"

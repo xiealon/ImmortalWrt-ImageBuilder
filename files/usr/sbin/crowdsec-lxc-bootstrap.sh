@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-29.180.191"
+SCRIPT_VER="2026-10-29.180.192"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -4225,7 +4225,11 @@ _bs_content_fp() {
         cd "$_cf_dir" 2>/dev/null || exit 3
         _cf_list=$(find . -type f 2>/dev/null | sort | sed 's|^\./||')
         [ -n "$_cf_list" ] || exit 4
-        printf '%s\n' "$_cf_list" | while IFS= read -r _cf_f; do sha1sum "$_cf_f" 2>/dev/null; done | sha1sum 2>/dev/null | cut -c1-16
+        # 【v.180.192】sha1sum → sha256sum：25.12 的 busybox 只编了 md5sum 与
+        # sha256sum（真机 `busybox --list` 实测），没有 sha1sum，coreutils 那份
+        # 也是 not set。原来这里恒为空 → 指纹永远算不出来 → 「容器被动过」判不出来，
+        # 只剩时间戳那条路（正是本函数刻意要避开的）。
+        printf '%s\n' "$_cf_list" | while IFS= read -r _cf_f; do sha256sum "$_cf_f" 2>/dev/null; done | sha256sum 2>/dev/null | cut -c1-16
     ) || return 1
     [ -n "$_cf_out" ] || return 1
     printf '%s' "$_cf_out"

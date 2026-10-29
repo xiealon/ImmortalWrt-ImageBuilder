@@ -40,7 +40,7 @@ echo "===== R1. 进程内变量归零（真实子进程） ====="
 # 用真的 dash 子进程，确保 trap 与变量作用域都真实。
 run_case() {
     _case=$1
-    dash -c '
+    sh -c '
         BS="$1"; CASE="$2"
         . "$(dirname "$0")/funcs.sh" 2>/dev/null || true
     ' sh "$BS" "$_case" >/dev/null 2>&1
@@ -92,7 +92,7 @@ echo "AFTER:  $(_bs_flag_stats)"
 EOS
 : > "$LOG_OUT"
 _env="LOG_OUT=$LOG_OUT FUNCS=$FUNCS"
-env LOG_OUT="$LOG_OUT" FUNCS="$FUNCS" dash "$TMPD/t1.sh" > "$TMPD/t1.out" 2>&1
+env LOG_OUT="$LOG_OUT" FUNCS="$FUNCS" sh "$TMPD/t1.sh" > "$TMPD/t1.out" 2>&1
 _before=$(grep '^BEFORE:' "$TMPD/t1.out" | sed 's/BEFORE: *//')
 _after=$(grep '^AFTER:' "$TMPD/t1.out" | sed 's/AFTER: *//')
 # 从生产脚本里解析（本测试文件没 source 它，$DAG_NODES 在父 shell 是空的）
@@ -124,7 +124,7 @@ echo $! > "$TMPD/child"
 wait
 EOS
 : > "$LOG_OUT"
-env LOG_OUT="$LOG_OUT" FUNCS="$FUNCS" TMPD="$TMPD" dash "$TMPD/t2.sh" "$TMPD/ready" &
+env LOG_OUT="$LOG_OUT" FUNCS="$FUNCS" TMPD="$TMPD" sh "$TMPD/t2.sh" "$TMPD/ready" &
 _t2pid=$!
 # 等到 ready 文件出现（说明 trap 已装好、进入 wait）
 _i=0; while [ ! -f "$TMPD/ready" ] && [ "$_i" -lt 50 ]; do _i=$((_i+1)); sleep 0.1; done
@@ -154,7 +154,7 @@ _ipfwd_touched=0; _ipfwd_restore
 _ipfwd_touched=1; _bs_stamped=1; _ipfwd_restore
 EOS
 : > "$LOG_OUT"
-env LOG_OUT="$LOG_OUT" FUNCS="$FUNCS" dash "$TMPD/t3.sh" >/dev/null 2>&1
+env LOG_OUT="$LOG_OUT" FUNCS="$FUNCS" sh "$TMPD/t3.sh" >/dev/null 2>&1
 eq "R3.1 本轮改过且未成功 → 还原" "$(grep -c '^RESTORE-0$' "$LOG_OUT")" "1"
 eq "R3.2 本轮没改过 → 不动"        "$(grep -c '^SKIP-untouched$' "$LOG_OUT")" "1"
 eq "R3.3 引导成功 → 保留（不还原）" "$(grep -c '^KEEP-stamped$' "$LOG_OUT")" "1"
@@ -226,7 +226,7 @@ exit 0
 EOS
 : > "$LOG_OUT"
 env LOG_OUT="$LOG_OUT" FUNCS="$FUNCS" E2E="$E2E" \
-    CS_BOOTSTRAP_STATE="$E2E/state" dash "$TMPD/t5.sh" >/dev/null 2>&1
+    CS_BOOTSTRAP_STATE="$E2E/state" sh "$TMPD/t5.sh" >/dev/null 2>&1
 eq "R5.1 中途确实置了位" "$(grep 'MID:' "$LOG_OUT" | grep -c 'done=1 dirty=1 gset=3')" "1"
 eq "R5.2 正常 exit 0 后也归零" "$(grep -c '置位已全部归零.*done=0 dirty=0 gset=0 built=0' "$LOG_OUT")" "1"
 
@@ -240,7 +240,7 @@ _bs_st=0
 _bs_on_exit
 EOS
 : > "$LOG_OUT"
-env LOG_OUT="$LOG_OUT" FUNCS="$FUNCS" dash "$TMPD/t6.sh" >/dev/null 2>&1
+env LOG_OUT="$LOG_OUT" FUNCS="$FUNCS" sh "$TMPD/t6.sh" >/dev/null 2>&1
 eq "R6.1 全零退出时不打「快照/已归零」" "$(grep -c '\[恢复\]' "$LOG_OUT")" "0"
 # 反例：有置位时必须打
 cat > "$TMPD/t7.sh" <<'EOS'
@@ -252,7 +252,7 @@ _bs_st=0
 _bs_on_exit
 EOS
 : > "$LOG_OUT"
-env LOG_OUT="$LOG_OUT" FUNCS="$FUNCS" dash "$TMPD/t7.sh" >/dev/null 2>&1
+env LOG_OUT="$LOG_OUT" FUNCS="$FUNCS" sh "$TMPD/t7.sh" >/dev/null 2>&1
 eq "R6.2 有残留时必须打日志（快照/逐项/归零）" "$(grep -c '\[恢复\]' "$LOG_OUT")" "3"
 eq "R6.3 生产脚本里只有一处快照日志" \
    "$(awk '/^_bs_on_exit\(\)/,/^}/' "$BS" | grep -c '退出时置位快照')" "1"

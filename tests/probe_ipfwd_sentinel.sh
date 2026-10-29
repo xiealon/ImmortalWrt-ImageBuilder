@@ -67,7 +67,8 @@ _step D 1 1 1
 EOS
 
 : > "$LOG"
-dash "$TMPD/t8.sh" >"$TMPD/out" 2>"$TMPD/t8.err" || true
+# 设备上只有 /bin/sh（ash），没有独立 dash
+sh "$TMPD/t8.sh" >"$TMPD/out" 2>"$TMPD/t8.err" || true
 [ -s "$TMPD/t8.err" ] && { echo "--- stderr:"; cat "$TMPD/t8.err"; }
 
 seg() { awk -v n="$1" '$0=="--- "n {f=1; next} /^--- /{f=0} f' "$LOG"; }

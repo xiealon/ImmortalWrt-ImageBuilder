@@ -59,7 +59,8 @@ echo "CNT_D=$(_bs_flag_count D A Bn C D)"
 echo "CNT_B=$(_bs_flag_count B A Bn C D)"
 echo "EMPTY_ZERO=$(_bs_flag_on E && echo 1 || echo 0)"
 EOS
-F="$TMPD/f.sh" dash "$TMPD/t.sh" > "$TMPD/out" 2>&1
+# 设备上只有 /bin/sh（ash），没有独立的 dash —— 用 sh 才贴近真实运行环境。
+F="$TMPD/f.sh" sh "$TMPD/t.sh" > "$TMPD/out" 2>&1
 _g() { grep -m1 "^$1=" "$TMPD/out" | sed "s/^$1=//"; }
 ck "R8.10 V 写出的格式" "$(printf '%s' "$(_g A)" | grep -cE '^V:[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$')" "1"
 ck "R8.11 B 写出的格式" "$(printf '%s' "$(_g B)" | grep -cE '^B:[0-9]{4}')" "1"
@@ -81,7 +82,7 @@ X=1
 echo "ON=$(_bs_flag_on X && echo 1 || echo 0)"
 echo "TAG=[$(_bs_flag_tag X)]"
 EOS
-F="$TMPD/f.sh" dash "$TMPD/t2.sh" > "$TMPD/out2" 2>&1
+F="$TMPD/f.sh" sh "$TMPD/t2.sh" > "$TMPD/out2" 2>&1
 ck "R8.20 旧格式 1 仍判为已置位（兼容）" "$(grep -m1 '^ON=' "$TMPD/out2" | cut -d= -f2)" "1"
 ck "R8.21 但取不到合法分类（能据此发现残留旧格式）" "$(grep -m1 '^TAG=' "$TMPD/out2" | sed 's/^TAG=//')" "[1]"
 

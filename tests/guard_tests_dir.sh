@@ -30,7 +30,9 @@ ck() {
 echo "== 36.1 静态 =="
 ck "R36.1a 有 GUARD_DIRS 定义" "$(grep -c '^GUARD_DIRS="\${CS_GUARD_DIRS:-/usr/share/crowdsec-tests}"$' "$GD")" "1"
 ck "R36.1b 有 _dir_sig" "$(grep -c '^_dir_sig()' "$GD")" "1"
-ck "R36.1c 签名用 cksum 不用时间" "$(grep -c 'cksum <"\$_ds_f"' "$GD")" "1"
+ck "R36.1c 签名用 md5sum 不用时间" "$(grep -c 'md5sum <"\$_ds_p"' "$GD")" "1"
+ck "R36.1c2 不用 cksum（25.12 真机 busybox 里没有这个 applet）" \
+   "$(grep -v '^[[:space:]]*#' "$GD" | grep -c 'cksum <')" "0"
 ck "R36.1d 签名里没有 mtime/stat -c %Y" "$(grep -cE 'stat -c %Y|--mtime' "$GD")" "0"
 ck "R36.1e 目录循环遍历 GUARD_DIRS" "$(grep -c 'for _gd in \$GUARD_DIRS' "$GD")" "1"
 ck "R36.1f 只读基座没有该目录就跳过" "$(grep -c '\[ -d "\$ROM_DIR\$_gd" \] || continue' "$GD")" "1"
@@ -57,6 +59,12 @@ LIB="$TMPD/fn.sh"
 : > "$LIB"
 awk '
     /^_dir_sig\(\)/ { inside = 1 }
+    inside { print }
+    inside && /^}/ { exit }
+' "$GD" >> "$LIB"
+# v.180.192 起校验和抽成 _ds_sum（md5sum + 字节数兜底），一起抽出来
+awk '
+    /^_ds_sum\(\)/ { inside = 1 }
     inside { print }
     inside && /^}/ { exit }
 ' "$GD" >> "$LIB"

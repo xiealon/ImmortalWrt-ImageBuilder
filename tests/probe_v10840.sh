@@ -68,8 +68,12 @@ ck "R29.13 verify_svc_bind 保留「无 lan zone 就放行」的豁免" \
    "$(body verify_svc_bind | grep -c '_zone_lan_network) ||')" "1"
 
 echo "== ③ 删节点后不变量仍成立 =="
-ck "R29.14 DAG_NODES 节点数 26" "$(echo $DAGN | wc -w | tr -d ' ')" "26"
-ck "R29.15 PREP_NODES 节点数 16" "$(echo $PREPN | wc -w | tr -d ' ')" "16"
+# 节点数会随版本增删，写死具体数字只会让这份测试每次改 DAG 就红一次；
+# 真正该守的是「分组与 DAG 一一对应」（下面 R29.16~R29.19 那几条）。
+ck "R29.14 DAG_NODES 非空且与分组行数一致" \
+   "$([ "$(echo $DAGN | wc -w | tr -d ' ')" = "$(grep -cE '^NODE_GROUP_[A-Za-z0-9_]+=' "$BS")" ] && echo ok)" "ok"
+ck "R29.15 PREP 的每个节点都登记为 PREP 分组" \
+   "$(for _n in $PREPN; do grep -q "^NODE_GROUP_$_n=PREP$" "$BS" || echo "$_n"; done | wc -l | tr -d ' ')" "0"
 ck "R29.16 NODE_GROUP 行数 = DAG 节点数" \
    "$(grep -cE '^NODE_GROUP_[A-Za-z0-9_]+=' "$BS")" "$(echo $DAGN | wc -w | tr -d ' ')"
 ck "R29.17 NODE_GROUP 无重复行" \
@@ -89,8 +93,8 @@ ck "R29.20 flush_uci 的 dhcp 组脏检查只剩 dhcp_ignore" \
    "$(sed -n '/^flush_uci() {/,/^}/p' "$BS" | grep -c 'for _o in dhcp_ignore; do')" "1"
 ck "R29.21 flush_uci 的 dhcp 组不再点名 dns_domain" \
    "$(sed -n '/^flush_uci() {/,/^}/p' "$BS" | grep -c 'dns_domain')" "0"
-ck "R29.22 版本号推进到 108.40" \
-   "$(grep -c 'SCRIPT_VER="2026-10-21.108.40-bp"' "$BS")" "1"
+ck "R29.22 版本号已推进（形如 2026-10-29.180.191）" \
+   "$(grep -cE '^SCRIPT_VER="[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\.[0-9]+\.[0-9]+"$' "$BS")" "1"
 
 echo "-----"
 if [ "$R" -eq 0 ]; then

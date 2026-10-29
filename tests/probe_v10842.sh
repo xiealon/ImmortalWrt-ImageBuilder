@@ -38,8 +38,9 @@ ck() {
 echo "== 30a 包列表：不能再装 cgroupfs-mount =="
 ck "R30.1 custom-packages.sh 非注释行不含 cgroupfs-mount" \
    "$(grep -v '^[[:space:]]*#' "$PKGS" | grep -c 'cgroupfs-mount')" "0"
+# 保留即可，不限定出现次数：同一个包可能同时出现在多个架构/多段列表里。
 ck "R30.2 custom-packages.sh 仍保留 cgroup-tools" \
-   "$(grep -v '^[[:space:]]*#' "$PKGS" | grep -c 'cgroup-tools')" "1"
+   "$([ "$(grep -v '^[[:space:]]*#' "$PKGS" | grep -c 'cgroup-tools')" -ge 1 ] && echo yes)" "yes"
 ck "R30.3 apk-custom-packages.sh 也不含 cgroupfs-mount（两版一致）" \
    "$(grep -v '^[[:space:]]*#' "$APKS" | grep -c 'cgroupfs-mount')" "0"
 

@@ -7,7 +7,7 @@
 #   ⑤ uci-defaults：不再把容器名写死成 ubuntu
 #   ⑥ 死代码 step_C 已删
 set -u
-REPO="C:/Users/Alon/Documents/JiuwenSwarm/2026-10-20/chat-1/work/REVIEW/verify"
+REPO=$(cd "$(dirname "$0")/.." && pwd)
 BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
 PR="$REPO/files/usr/sbin/crowdsec-lxc-probe.sh"
 RC="$REPO/files/etc/rc.local"
@@ -45,8 +45,8 @@ ck "R24.6 补印失败计入 P_FAIL，达阈值转 need-human" \
    "$(body probe_tick "$PR" | grep -c '补印连续 \$P_FAIL 次仍失败')" "1"
 ck "R24.7 补印成功要求「退出 0 且印真的在了」" \
    "$(body probe_tick "$PR" | grep -c '\[ "\$_rs_rc" = 0 \] && \[ -s "\$STAMP_FILE" \]')" "1"
-ck "R24.8 补印持锁期间写 pid/ts（陈旧锁判定要靠它）" \
-   "$(body probe_tick "$PR" | grep -c 'echo "\$_rs_pid" > "\$LOCK/pid"')" "1"
+ck "R24.8 持锁期间写 pid/ts（陈旧锁判定要靠它）" \
+   "$(body _run_fix "$PR" | grep -c 'echo "\$_rf_pid" > "\$LOCK/pid"')$(body _run_fix "$PR" | grep -c 'date +%s > "\$LOCK/ts"')" "11"
 ck "R24.9 wait-install 仍然保留（真的没装时不该乱跑）" \
    "$(body probe_tick "$PR" | grep -c 'P_ACTION="wait-install"')" "1"
 

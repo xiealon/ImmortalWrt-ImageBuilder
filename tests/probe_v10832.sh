@@ -5,7 +5,7 @@
 #   ③ audit_wan_purged 从「只验网络段」扩到「段 / 引用 / 内核接口」三条
 #   ④ 全脚本没有创建 wan 段的路径（静态锁：谁写回来谁挂测试）
 set -u
-REPO="C:/Users/Alon/Documents/JiuwenSwarm/2026-10-20/chat-1/work/REVIEW/verify"
+REPO=$(cd "$(dirname "$0")/.." && pwd)
 BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
 
 R=0
@@ -35,6 +35,13 @@ LOG="$T/log"
 
 log() { echo "$*" >> "$LOG"; }
 _net_reload() { echo "RELOAD network" >> "$OPS"; }
+# bootstrap 里的外部调用统一包在 run / run_svc 里（带 timeout）。这两个包装函数
+# 必须一起 mock：不 mock 的话 run 会去执行真实的 uci（测试里的 uci 只是 shell 函数，
+# timeout 子进程看不到它）—— 轻则 RUN_TIMEOUT 为空报错、断言全红，重则真改设备配置。
+run() { "$@"; }
+run_svc() { "$@"; }
+RUN_TIMEOUT=60
+SVC_TIMEOUT=60
 
 # ---- uci mock：读两个文件，写操作记到 $OPS，delete/del_list 真的改文件 ----
 uci() {
@@ -161,8 +168,8 @@ ck "R25.28 DAG 里没有 wan 节点" \
    "$(grep -c '^DAG_NODES=".*wan' "$BS")" "0"
 ck "R25.29 PREP 里没有 wan 节点" \
    "$(grep -c '^PREP_NODES=".*wan' "$BS")" "0"
-ck "R25.30 版本号已到 108.32 之后" \
-   "$(grep -c '^SCRIPT_VER="2026-10-21.108.3[0-9]*-bp"$' "$BS")" "1"
+ck "R25.30 版本号已推进（形如 2026-10-29.180.191）" \
+   "$(grep -cE '^SCRIPT_VER="[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\.[0-9]+\.[0-9]+"$' "$BS")" "1"
 
 echo "== ⑥ 收口：一轮跑完再验一次，不合规就自己清 =="
 ck "R25.31 有收口复核（_wan_hard_ok）" \

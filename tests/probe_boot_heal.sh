@@ -49,8 +49,10 @@ ck "R35.1e 一致就提前返回（在位且一致 = 零写入）" \
    "$(body _ensure_boot "$PR" | grep -c '&& cmp -s "\$_eb_src" "\$BOOT"' )" "1"
 ck "R35.1f 不一致时 cp -f 覆盖并补执行位" \
    "$(body _ensure_boot "$PR" | grep -c 'cp -f "\$_eb_src" "\$BOOT"')" "1"
-ck "R35.1g 三条通道都认 78" \
-   "$(grep -c '= 78 \]' "$PR")" "3"
+# v.180.191 起 DNS 通道退出 bootstrap（只走 pkg-restore-smartdns.sh --repair），
+# 认 78 的只剩补印与停滞两条。
+ck "R35.1g 两条通道都认 78" \
+   "$(grep -c '= 78 \]' "$PR")" "2"
 ck "R35.1h BOOT 路径可被环境覆盖（夹具用）" \
    "$(grep -c 'BOOT="\${CS_PROBE_BOOT:-/usr/sbin/crowdsec-lxc-bootstrap.sh}"' "$PR")" "1"
 ck "R35.1i ROMDIR 可被环境覆盖" \
@@ -93,8 +95,10 @@ plog() { printf '%s\n' "$*" >> "$log_out"; }
 . "$LIB"
 
 # A 缺失 + /rom 有 -> 补回
+# 固件里这份是脚本，铺进固件时带执行位；_ensure_boot 也以 -x 作为「可用」判据，
+# 所以夹具必须按真实固件的权限造（644 会被正确地判成不可用）。
 printf '#!/bin/sh\necho rom-version\n' > "$ROM/usr/sbin/bootstrap.sh"
-chmod 644 "$ROM/usr/sbin/bootstrap.sh"
+chmod 755 "$ROM/usr/sbin/bootstrap.sh"
 rm -f "$BOOT"
 _ensure_boot
 ck "R35.2a 缺失时返回 0" "$?" "0"
@@ -106,11 +110,11 @@ ck "R35.2e 日志说明按固件版复原" \
 
 # B 已在位且与 /rom 一致 -> 零动作、零日志（刷机后的常态）
 : > "$log_out"
-_sum_before=$(cksum "$BOOT")
+_sum_before=$(md5sum "$BOOT")
 _mtime_before=$(date -r "$BOOT" +%s 2>/dev/null || echo 0)
 _ensure_boot
 ck "R35.2f 一致时返回 0" "$?" "0"
-ck "R35.2g 内容一个字节都没动" "$(cksum "$BOOT")" "$_sum_before"
+ck "R35.2g 内容一个字节都没动" "$(md5sum "$BOOT")" "$_sum_before"
 ck "R35.2h 一致时不写日志（不刷屏）" "$(wc -l < "$log_out")" "0"
 
 # C 在位但被改过 -> 按只读基座覆盖回来（v.180.119 的核心）
@@ -138,6 +142,7 @@ ck "R35.2q 日志点明请重刷固件" \
 
 # E /rom 有、运行副本没执行位 -> 视为不可用，覆盖一次
 printf '#!/bin/sh\necho rom-version\n' > "$ROM/usr/sbin/bootstrap.sh"
+chmod 755 "$ROM/usr/sbin/bootstrap.sh"
 printf 'not-exec\n' > "$BOOT"
 chmod 644 "$BOOT"
 : > "$log_out"

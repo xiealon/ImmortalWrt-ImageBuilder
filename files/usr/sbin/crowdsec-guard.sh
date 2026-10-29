@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.181"
+SCRIPT_VER="2026-10-29.180.183"
 # 【v.180.152】补进 v.180.146~151 新增的 6 个恢复脚本。
 # 【v.180.162】再加 pkg-restore-apps.sh（应用主程序恢复），共 7 个。
 # 增删恢复脚本时必须同步这张清单 —— 漏一个是「脚本自己也会被删掉」的静默失效：
@@ -674,6 +674,20 @@ _pkgcache_feed_audit() {
         _pfa_ov="${PKG_CACHE:-$ROOT/root/apk-cache}"
         _pfa_what="apk 源"
         _pfa_fmt='ndx file://%s/packages.adb\n'
+        # 【v.180.183】apk 侧改成「只删不写」（用户 2026-10-29 定）。
+        # 起因是真机实测：apk update 每次都打
+        #   WARNING: opening file:///rom/root/apk-cache/packages.adb: UNTRUSTED signature
+        # 根因是这份索引由 build25.sh 用 `apk mkpkg --allow-untrusted` 生成，
+        # 没有可信签名，apk-tools 3.x 直接把这个源整条跳过。实测 `apk policy daed`：
+        #   1.27.0-r1      → 官方源
+        #   2026.06.14-r7  → lib/apk/db/installed
+        # 没有任何一条来自 file:///rom/root/apk-cache —— 源挂着，但等于不存在。
+        # 也就是说这行配了也白配，唯一效果是每次 apk 操作刷一条警告，
+        # 还会让 `apk update` 的输出里混进「错误」字样，看着像失败。
+        # 恢复路径本来就不靠它：pkg-cache-restore.sh 装包一律
+        #   apk add --allow-untrusted --no-network --repository "file://$PKG_CACHE_ACT"
+        # 显式指定 + 显式放行，与这个全局源无关。所以这里改成只清理、不写入。
+        _pfa_write=0
     else
         _pfa_conf="$ROOT/etc/opkg/customfeeds.conf"
         _pfa_pat='^src/gz[[:space:]]*pkgcache[[:space:]]'
@@ -685,6 +699,12 @@ _pkgcache_feed_audit() {
         _pfa_ov="${PKG_CACHE:-$ROOT/root/pkg-cache}"
         _pfa_what="pkgcache 源"
         _pfa_fmt='src/gz pkgcache file://%s\n'
+        # opkg 侧保持原行为，不跟 apk 一起删。理由三条：
+        #   ① opkg 没有签名问题 —— 装包时用 --no-check-signature，本地源照常可用；
+        #   ② opkg 没有 apk 的 --repository 参数，源只能写在 conf 里，
+        #      删掉就等于断了「源装」这条路，连带依赖也解析不出来；
+        #   ③ 24.10 线没有真机可测，动它等于盲改。
+        _pfa_write=1
     fi
     [ -f "$_pfa_conf" ] || return 0
     # 【v.180.133】原来这里还有一句
@@ -710,7 +730,10 @@ _pkgcache_feed_audit() {
     else
         _pfa_need="src/gz pkgcache file://$_pfa_live"
     fi
-    if [ -n "$_pfa_live" ] && grep -qxF "$_pfa_need" "$_pfa_conf" 2>/dev/null; then
+    if [ "$_pfa_write" = "0" ]; then
+        # apk：这行本就不该在。已经干净就零动作（一分钟一轮，不写 flash）。
+        grep -qE "$_pfa_pat" "$_pfa_conf" 2>/dev/null || return 0
+    elif [ -n "$_pfa_live" ] && grep -qxF "$_pfa_need" "$_pfa_conf" 2>/dev/null; then
         return 0
     fi
     _pfa_tmp="$_pfa_conf.tmp.$$"
@@ -718,12 +741,14 @@ _pkgcache_feed_audit() {
     if [ ! -f "$_pfa_tmp" ]; then
         return 0
     fi
-    if [ -n "$_pfa_live" ]; then
+    if [ "$_pfa_write" = "1" ] && [ -n "$_pfa_live" ]; then
         # 格式跟着包管理器走：opkg 要带 "src/gz pkgcache" 前缀，apk 只要裸 URL
         printf "$_pfa_fmt" "$_pfa_live" >> "$_pfa_tmp" 2>/dev/null
     fi
     if cat "$_pfa_tmp" > "$_pfa_conf" 2>/dev/null; then
-        if [ -n "$_pfa_live" ]; then
+        if [ "$_pfa_write" = "0" ]; then
+            _glog "【包源】$(basename "$_pfa_conf") 已摘除本地包源（索引无签名，apk 会跳过它、只换来 UNTRUSTED 警告；恢复改用显式 --repository + --allow-untrusted）"
+        elif [ -n "$_pfa_live" ]; then
             _glog "【包源】$(basename "$_pfa_conf") 的 $_pfa_what 已校正为 $_pfa_live"
         else
             _glog "【包源】本地包库已不可用（$_pfa_ro 与 overlay 都没有 $_pfa_idx），已摘除死源 —— 被卸的包只能用 /rom 拷文件兜底"

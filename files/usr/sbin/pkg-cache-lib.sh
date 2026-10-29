@@ -148,9 +148,18 @@ pcl_feed_ok() {
     # 2026-10-29 在 25.12 真机实测过 ①：把源行改成注释后 pkg-cache-fix.sh
     # 明确输出「源已正确…跳过」，一个字节都没修。
     if [ "$PKG_MGR" = "apk" ]; then
-        # ndx 写法必须整行指向索引文件：只写目录时 apk 会去 <目录>/<arch>/Packages.adb
-        # 找索引（apk-repositories(5) 的 repository 类型规则），而我们的索引没有 arch 子目录。
-        grep -qxF "ndx file://$PKG_CACHE_ACT/packages.adb" "$PKG_CACHE_CONF" 2>/dev/null || return 1
+        # 【v.180.183】apk 侧判据反过来：源行**不该存在**（用户 2026-10-29 定）。
+        # 真机实测 apk update 每次都打
+        #   WARNING: opening file:///rom/root/apk-cache/packages.adb: UNTRUSTED signature
+        # 因为这份索引是 `apk mkndx --allow-untrusted` 生成的，没有可信签名，
+        # apk-tools 3.x 把整条源跳过。`apk policy daed` 实测：官方源一条、
+        # installed 一条，没有任何一条来自 file:///rom/root/apk-cache ——
+        # 源挂着但等于不存在，唯一效果是刷警告、让 update 输出里混进「错误」。
+        # 装包本来就不靠它：pkg-cache-restore.sh 一律
+        #   apk add --allow-untrusted --no-network --repository "file://$PKG_CACHE_ACT"
+        # 所以这里的「健康」= 配置里没有我们那一行；有就返回 1，交给 feed_ensure 清掉。
+        grep -qE "$PCR_PAT" "$PKG_CACHE_CONF" 2>/dev/null && return 1
+        return 0
     else
         grep -qxF "src/gz pkgcache file://$PKG_CACHE_ACT" "$PKG_CACHE_CONF" 2>/dev/null || return 1
     fi

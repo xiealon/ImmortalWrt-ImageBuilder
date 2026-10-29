@@ -71,10 +71,11 @@ _pcf_feed_ensure() {
         : > "$_pcf_tmp" || return 1
     fi
     if [ "$PKG_MGR" = "apk" ]; then
-        # 必须写成 ndx <索引文件>：只写目录的话 apk 会去 <目录>/<arch>/Packages.adb
-        # 找索引（apk-repositories(5) 的 repository 类型规则），而我们的索引
-        # 就在包目录里、没有 arch 子目录，结果就是「源挂着、索引读不到」。
-        printf 'ndx file://%s/packages.adb\n' "$PKG_CACHE_ACT" >> "$_pcf_tmp" || return 1
+        # 【v.180.183】apk 侧只删不写（用户 2026-10-29 定）。
+        # 索引无签名，apk-tools 3.x 会跳过整条源，只换来一条 UNTRUSTED 警告；
+        # 装包走 pkg-cache-restore.sh 里的显式 --repository + --allow-untrusted。
+        # 上面的 grep -vE 已经把旧行滤掉，这里什么都不加就是「清干净」。
+        :
     else
         printf 'src/gz pkgcache file://%s\n' "$PKG_CACHE_ACT" >> "$_pcf_tmp" || return 1
     fi
@@ -139,19 +140,22 @@ pcl_log_q "包库目录：$PKG_CACHE_ACT"
 
 # ② feed
 if pcl_feed_ok; then
-    # 【v.180.165】apk 的源行是 `ndx file://<目录>/packages.adb`，原先两条分支
-    # 共用一句「file://<目录>」，看日志会以为挂的是目录 —— 排障时误导。
+    # 【v.180.183】apk 侧的「健康」= 配置里没有本地源行（见 pkg-cache-lib.sh 说明）。
     if [ "$PKG_MGR" = "apk" ]; then
-        pcl_log_q "源已正确（ndx file://$PKG_CACHE_ACT/packages.adb），跳过"
+        pcl_log_q "源已清理（apk 侧不挂本地源），跳过"
     else
         pcl_log_q "源已正确（file://$PKG_CACHE_ACT），跳过"
     fi
 else
     _pcf_feed_ensure || {
-        pcl_log "挂源失败：$PKG_CACHE_CONF 不可写"
+        pcl_log "源配置整理失败：$PKG_CACHE_CONF 不可写"
         exit 1
     }
-    pcl_log "已挂载本地源：file://$PKG_CACHE_ACT"
+    if [ "$PKG_MGR" = "apk" ]; then
+        pcl_log "已摘除本地源（索引无签名，apk 会跳过它并刷 UNTRUSTED 警告）；装包走显式 --repository"
+    else
+        pcl_log "已挂载本地源：file://$PKG_CACHE_ACT"
+    fi
 fi
 
 # ③ index

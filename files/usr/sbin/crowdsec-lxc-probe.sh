@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.187"
+SCRIPT_VER="2026-10-29.180.189"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -264,6 +264,11 @@ _dns_ok() {
 #     判的是「主程序 + 依赖内核 + LuCI 界面」整组（v.180.164 扩范围），
 #     具体清单与「该不该有」的门槛都在 pkg-restore-apps.sh 里，探针不重复一份。
 #     缺了走 _apps_watch → pkg-restore-apps.sh 装回。
+#   · lxc 的二进制（v.180.189）判文件不判包：34 个包里 23 条关键路径逐条 [-e]。
+#     为什么不能只判包：删掉 /usr/bin/lxc-snapshot 时包还在册，--lxc-missing 输出空、
+#     静默放过 —— 而 bootstrap 的 _lxc_missing_deps 只钉死五个核心 applet。
+#     为什么不能只判进程：lxc 是工具集不是常驻服务，没有进程可判。
+#     恢复交 pkg-restore.sh --lxc（包级，走 apk fix，不做文件级覆盖）。
 #
 # 为什么不保留「补规则文件 + 重启」的快速通道：
 # 2026-10-28 那次事故的根因是 /etc/smartdns 下 5 个规则文件被遮掉，当时探针自己补文件、
@@ -533,6 +538,84 @@ _kmods_watch() {
     return 0
 }
 
+# ---- lxc 二进制的文件级通道（v.180.189）----
+# 补的是 _lxc_missing_deps 的盲区。那一条只钉死五个核心 applet
+# （lxc-start / lxc-stop / lxc-ls / lxc-info / lxc-attach），判的是「跑不跑得起来」，
+# 而且挂在 bootstrap 里 —— 其余 29 个 applet（snapshot / monitor / copy / top …）
+# 的二进制被删时，--lxc-missing 看不见（包还在册），也没人每分钟去看。
+# 这里改判文件：读 /rom/lib/apk/packages/lxc*.list 与 liblxc.list，
+# 挑 /usr/bin、/usr/sbin、/etc/init.d、*.so 逐条 [ -e ]，全程不调 apk。
+# 成本实测（192.168.1.201 / 25.12）：34 个包、23 条关键路径，一轮 **6.2 ms**；
+# 探针一轮原本约 107 ms，加完约 113 ms，占 60 秒周期的 0.19%。
+# 恢复仍走包级 --lxc：实测一轮 3.1 秒，主要耗在 34 次 apk info -e（单次约 77 ms）——
+# 所以只在连续 N 轮缺失 + 冷却闸门之后跑一次，绝不每分钟跑。
+_LXC_FILES="${CS_PROBE_LXC_FILES:-/usr/sbin/pkg-restore.sh}"
+_LXC_RESTORE="${CS_PROBE_LXC_RESTORE:-/usr/sbin/pkg-restore.sh}"
+
+_lxc_watch() {
+    [ -f "$_LXC_FILES" ] || return 0
+    _lw_out="$(sh "$_LXC_FILES" --lxc-files 2>&1)"
+    _lw_rc=$?
+    if [ "$_lw_rc" = "0" ]; then
+        if [ "${P_LXC_BAD:-0}" -gt 0 ]; then
+            plog "【lxc 文件】已全部在位（此前缺 $P_LXC_BAD 轮）"
+        fi
+        P_LXC_BAD=0
+        P_LXC_FIX=0
+        P_HUMAN_LXC=0
+        return 0
+    fi
+    # 2 = 只读基底里一张清单都没有，判不了（老固件 / 未刷机）。不计数、不动作。
+    if [ "$_lw_rc" = "2" ]; then
+        if [ "${P_LXC_NOSRC:-0}" != "1" ]; then
+            P_LXC_NOSRC=1
+            P_ACTION="lxc-nosrc"
+            plog "【lxc 文件】只读基底里没有 lxc 包清单，判不了（$_lw_out）"
+        fi
+        return 0
+    fi
+    P_LXC_BAD=$((${P_LXC_BAD:-0} + 1))
+    if [ "${P_HUMAN_LXC:-0}" = "1" ]; then
+        P_ACTION="lxc-need-human-hold"
+        return 0
+    fi
+    if [ "$P_LXC_BAD" -lt "$PROBE_STALL_ROUNDS" ]; then
+        P_ACTION="lxc-warn"
+        plog "【lxc 文件】二进制缺失：$_lw_out（第 $P_LXC_BAD/$PROBE_STALL_ROUNDS 轮）"
+        return 0
+    fi
+    _lw_now=$(date +%s)
+    if [ $((_lw_now - ${P_LXC_TRIG:-0})) -lt "$PROBE_COOLDOWN" ]; then
+        P_ACTION="lxc-cooldown"
+        plog "【lxc 文件】持续缺失：$_lw_out，冷却中（剩余 $((PROBE_COOLDOWN - (_lw_now - ${P_LXC_TRIG:-0})))s），暂不装回"
+        return 0
+    fi
+    P_LXC_TRIG="$_lw_now"
+    P_LXC_BAD=0
+    P_ACTION="lxc-repair"
+    plog "【lxc 文件】连续 $PROBE_STALL_ROUNDS 轮缺失（$_lw_out），交 pkg-restore.sh --lxc 包级装回"
+    sh "$_LXC_RESTORE" --lxc >>"$BOOT_LOG" 2>&1
+    # 复判不看 --lxc 的退出码：它逐包跑，任一包失败整体非 0，但缺的那个可能已经补回；
+    # 反过来也可能整体 0 而某个包被跳过。唯一可信的是再判一次文件。
+    if _lw_out2="$(sh "$_LXC_FILES" --lxc-files 2>&1)" && [ -z "$_lw_out2" ]; then
+        P_LXC_BAD=0
+        P_LXC_FIX=0
+        P_ACTION="lxc-fixed"
+        plog "【lxc 文件】已按包内清单补回（包管理器记账同步，未做文件级覆盖）"
+        return 0
+    fi
+    P_LXC_FIX=$((${P_LXC_FIX:-0} + 1))
+    if [ "$P_LXC_FIX" -ge "$PROBE_FAIL_ALERT" ]; then
+        P_ACTION="lxc-need-human"
+        P_HUMAN_LXC=1
+        plog "【lxc 文件】【需人工介入】连续 $P_LXC_FIX 次补不回（仍缺：$_lw_out2）。多为只读基底的包库里没有该包，或 apk fix 写不进运行侧。已停止自动装回"
+    else
+        P_ACTION="lxc-fix-fail"
+        plog "【lxc 文件】装回失败（仍缺：$_lw_out2，连续第 $P_LXC_FIX/${PROBE_FAIL_ALERT} 次，日志见 $BOOT_LOG）"
+    fi
+    return 0
+}
+
 # ---- 可测化的一轮处理：判定 + 动作 ----
 # 全局状态（测试可直接预设/断言）：
 #   P_STALL 连续停滞轮数 / P_LAST_TRIG 上次触发时刻 / P_FAIL 连续修复失败次数
@@ -648,6 +731,9 @@ probe_tick() {
     # 应用依赖的内核模块同理：/lib/modules 里的 .ko 被删不影响 last_pull，
     # 排在「链路正常就 return 0」后面等于永远不执行。
     _kmods_watch
+    # 【v.180.189】lxc 二进制的文件级判据，同样必须在此之前：
+    # 删掉 /usr/bin/lxc-snapshot 不影响 last_pull，排在后面等于永远不执行。
+    _lxc_watch
     if _boot --probe-check >/dev/null 2>&1; then
         if [ "${P_STALL:-0}" -gt 0 ]; then
             plog "【恢复】last_pull 已恢复（停滞 $P_STALL 轮后）"
@@ -850,12 +936,15 @@ _probe_save() {
     # 四个都不含旧键字面量（audit_bad= / dnstrig= / dnsfix= / dnshold=）。
     # 【v.180.181】依赖文件通道：kmodbad / kmodtrig / kmodfix / kmodhold。
     # 四组都避开了旧键字面量（human= / fail= / appbad= 等），不会互相取错。
-    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s human_pull=%s dnsbad=%s dnsfix=%s dnstrig=%s dnshold=%s appbad=%s apptrig=%s appfix=%s apphold=%s kmodbad=%s kmodtrig=%s kmodfix=%s kmodhold=%s\n' \
+    # 【v.180.189】lxc 文件通道：lxcbad / lxctrig / lxcfix / lxchold。
+    # 同样避开 —— lxcbad 不含 "appbad="，lxctrig 不含 "dnstrig="/"kmodtrig="。
+    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s human_pull=%s dnsbad=%s dnsfix=%s dnstrig=%s dnshold=%s appbad=%s apptrig=%s appfix=%s apphold=%s kmodbad=%s kmodtrig=%s kmodfix=%s kmodhold=%s lxcbad=%s lxctrig=%s lxcfix=%s lxchold=%s\n' \
         "${P_STALL:-0}" "${P_LAST_TRIG:-0}" "${P_FAIL:-0}" "${P_ACTION:-none}" "$(date +%s)" \
         "${P_ROUND:-0}" "${P_AUDIT_BAD:-0}" "${P_HUMAN:-0}" "${P_HUMAN_PULL:-0}" \
         "${P_DNS_BAD:-0}" "${P_DNS_FIX:-0}" "${P_DNS_TRIG:-0}" "${P_HUMAN_DNS:-0}" \
         "${P_APP_BAD:-0}" "${P_APP_TRIG:-0}" "${P_APP_FIX:-0}" "${P_HUMAN_APP:-0}" \
         "${P_KMOD_BAD:-0}" "${P_KMOD_TRIG:-0}" "${P_KMOD_FIX:-0}" "${P_HUMAN_KMOD:-0}" \
+        "${P_LXC_BAD:-0}" "${P_LXC_TRIG:-0}" "${P_LXC_FIX:-0}" "${P_HUMAN_LXC:-0}" \
         > "$STATE_FILE" 2>/dev/null
 }
 _probe_load() {
@@ -903,6 +992,15 @@ _probe_load() {
     [ -n "$_v" ] && P_KMOD_FIX="$_v"
     _v=$(printf '%s\n' "$_pl" | sed -n 's/.*kmodhold=\([0-9][0-9]*\).*/\1/p')
     [ -n "$_v" ] && P_HUMAN_KMOD="$_v"
+    # 【v.180.189】lxc 文件通道。旧状态文件没这几个键 → 保持 0（向后兼容）。
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*lxcbad=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_LXC_BAD="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*lxctrig=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_LXC_TRIG="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*lxcfix=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_LXC_FIX="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*lxchold=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_HUMAN_LXC="$_v"
     return 0
 }
 
@@ -924,11 +1022,16 @@ P_APP_BAD=0
 P_APP_TRIG=0
 P_APP_FIX=0
 P_HUMAN_APP=0
-# 【v.180.181】应用依赖的文件级通道（16 包 / 70 文件，不含 /etc/config）
+# 【v.180.181】应用依赖的文件级通道（18 包 / 72 文件，不含 /etc/config）
 P_KMOD_BAD=0
 P_KMOD_TRIG=0
 P_KMOD_FIX=0
 P_HUMAN_KMOD=0
+# 【v.180.189】lxc 二进制的文件级通道（34 包 / 23 条关键路径）
+P_LXC_BAD=0
+P_LXC_TRIG=0
+P_LXC_FIX=0
+P_HUMAN_LXC=0
 DNS_WHY=""
 _probe_load
 while true; do

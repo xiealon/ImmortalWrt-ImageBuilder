@@ -19,6 +19,8 @@
 #   pkg-restore.sh <包名>              装回（已装则跳过）
 #   pkg-restore.sh --tree <包名>       连同 Depends 递归（最多 3 层）
 #   pkg-restore.sh --lxc               lxc 全家桶（applet 是各自独立的包）
+#   pkg-restore.sh --lxc-missing       列出「不在册」的 lxc 包（判包）
+#   pkg-restore.sh --lxc-files         列出「在册但关键文件被删」的 lxc 包（判文件）
 #   pkg-restore.sh --host              宿主机侧全部：lxc 全家桶 + bouncer + nftables
 #   pkg-restore.sh --force <包名>      强制重装（记账说有、文件其实缺了）
 #   pkg-restore.sh --installed <包名>  只判记账，0=在册 1=不在册
@@ -28,6 +30,7 @@
 #   PKGROOT 写入根，默认空（= /）。夹具指向临时目录
 #
 # 退出码：0 成功 / 1 失败 / 2 用法错误
+# 例外：--lxc-files 走三态（0 齐全 / 1 有缺并列出包名 / 2 只读基底没有 lxc 清单）
 
 set -u
 ROMDIR="${ROMDIR:-/rom}"
@@ -251,6 +254,30 @@ _pr_lxc_missing() {
     printf '%s\n' "$_plm_m" | sed 's/^ *//'
 }
 
+# 输出「在册、但关键文件被删」的 lxc 包名（v.180.189）。
+# 与 _pr_lxc_missing 互补，各看不见一半：
+#   · _pr_lxc_missing 判「包在不在册」—— 包在册、二进制被删时它输出空；
+#   · 本函数判「文件在不在位」—— 拎出来的是「记账说有、文件没有」的那些。
+# 2026-10-29 真机实测（25.12）：rm /usr/bin/lxc-info 之后
+#   --lxc-missing → 输出空、rc=0（看不见）
+#   本函数        → lxc-info（看得见）
+# 恢复仍走包级 --lxc（apk fix 按包内清单覆盖），不做文件级 cp ——
+# 包级带记账与依赖树，逐字节盖回会留下「文件是盖的、记账说没装」的分裂状态。
+# 成本：34 个包 / 23 条关键路径 ≈ 6.2 ms（只读清单 + [ -e ]，全程不调 apk）。
+_pr_lxc_files() {
+    _plf_m=""
+    for _plf_f in "$ROMDIR"/lib/apk/packages/lxc*.list \
+                  "$ROMDIR"/lib/apk/packages/liblxc.list \
+                  "$ROMDIR"/usr/lib/opkg/info/lxc-*.list \
+                  "$ROMDIR"/usr/lib/opkg/info/liblxc.list; do
+        [ -f "$_plf_f" ] || continue
+        _plf_p="${_plf_f##*/}"
+        _plf_p="${_plf_p%.list}"
+        _pr_files_ok "$_plf_p" || _plf_m="$_plf_m $_plf_p"
+    done
+    printf '%s\n' "$_plf_m" | sed 's/^ *//'
+}
+
 # 宿主机侧全家桶（v.180.150）：lxc + crowdsec 的 nftables 守门人。
 # bouncer 和 lxc 一样是「宿主机该有的包」，一起走本地包安装，不再单独拷文件。
 # 它的配置不在这里管 —— 出厂版本身是坏的（enabled=0 / api_url 指向 localhost），
@@ -401,7 +428,7 @@ _deps_list() {
 
 case "${1:-}" in
 "")
-    echo "用法：$0 <包名> | --tree <包名> | --lxc | --lxc-missing | --host | --force <包名> | --installed <包名> | --deps --check|--repair|--list" >&2
+    echo "用法：$0 <包名> | --tree <包名> | --lxc | --lxc-missing | --lxc-files | --host | --force <包名> | --installed <包名> | --deps --check|--repair|--list" >&2
     exit 2
     ;;
 --deps)
@@ -432,6 +459,27 @@ case "${1:-}" in
     ;;
 --lxc-missing)
     _pr_lxc_missing
+    exit 0
+    ;;
+--lxc-files)
+    # 三态，与 --deps --check 同一约定：
+    #   0 = 文件齐全   1 = 有缺（输出缺文件包名）   2 = 判不了（一张清单都没有）
+    _plf_n=0
+    for _plf_x in "$ROMDIR"/lib/apk/packages/lxc*.list \
+                  "$ROMDIR"/lib/apk/packages/liblxc.list \
+                  "$ROMDIR"/usr/lib/opkg/info/lxc-*.list \
+                  "$ROMDIR"/usr/lib/opkg/info/liblxc.list; do
+        [ -f "$_plf_x" ] && _plf_n=$((_plf_n + 1))
+    done
+    if [ "$_plf_n" = "0" ]; then
+        echo "只读基底里没有 lxc 包清单（$ROMDIR）" >&2
+        exit 2
+    fi
+    _plf_out="$(_pr_lxc_files)"
+    if [ -n "$_plf_out" ]; then
+        printf '%s\n' "$_plf_out"
+        exit 1
+    fi
     exit 0
     ;;
 --force)

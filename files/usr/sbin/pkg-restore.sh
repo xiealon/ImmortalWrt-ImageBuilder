@@ -332,7 +332,15 @@ _pr_host() {
 #   ③ 这个文件本来就有专人管：bootstrap 的 _fw_*_ok 判据 + build 补齐每轮 ensure，
 #      比「拷个出厂版本」强得多。
 # 归纳成一条规则：/etc/config/ 下的一切归 bootstrap，文件级保护只管程序文件。
+# 【v.180.193】双路径：25.12 是 apk（/rom/lib/apk/packages/<包>.list），
+# 24.10 是 opkg（/rom/usr/lib/opkg/info/<包>.list）。两边清单格式一致
+# （一行一个绝对路径），只是目录不同，所以只换目录、不换逻辑。
+# 原来只认 apk 目录：24.10 上 --deps --check 恒返回 2（判不了），
+# 探针每分钟打一行「只读基底里没有包文件清单」—— 这条通道在 24.10 上是空的。
+# 实测（24.10.6 / r33869）：/rom/lib/apk/packages 不存在，
+# /rom/usr/lib/opkg/info 有 692 份 .list，18 个保护包一份都不少。
 _DEPS_ROM_LIST="$ROMDIR/lib/apk/packages"
+[ -d "$_DEPS_ROM_LIST" ] || _DEPS_ROM_LIST="$ROMDIR/usr/lib/opkg/info"
 
 # 【v.180.182】补 v2ray-geoip / v2ray-geosite（用户 2026-10-29 定）。
 # 这两个是 daed 的规则来源：daed 不直接读它们，读的是两条软链接

@@ -236,7 +236,9 @@ sed -n '/^CT_TIMEOUT="${CT_TIMEOUT:-10}"/,/^}/p' "$BS_C" > "$TMPD/ctdef.sh"
 cat > "$TMPD/ctrun.sh" <<'EOS'
 . "$TMPD/ctdef.sh"
 timeout() { printf 'TO=%s\n' "$1"; }
-lxc-attach() { :; }
+# 这里**不** stub lxc-attach：busybox 1.36（24.10.6）的 ash 不接受带连字符的函数名，
+# `lxc-attach() { :; }` 会报 "bad function name"，整个驱动脚本一行都跑不了。
+# 也确实不需要 —— timeout 已经是上面那个只打印的桩，它后面的参数不会被当作命令执行。
 _CT_BOOT_UNTIL=0
 ct a
 _CT_BOOT_UNTIL=$(( $(date +%s) + 60 ))

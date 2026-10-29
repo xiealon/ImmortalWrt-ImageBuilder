@@ -332,7 +332,15 @@ mkdir -p "$_AK_DIR"
 #   crowdsec                        → 本体跑在 LXC 容器里（由 crowdsec-lxc tarball 提供，
 #                                     宿主机不需要），宿主机只装防火墙 bouncer，所以不收主包
 # 修正后 51 条，实测在 25.12.2 官方 index.json 里 51/51 全部命中；
-# xray-core 走 run 包（26.6.22，比官方 26.3.27 新，按 run 包优先原则不下官方版）。
+# 【v.180.167】删掉 xray-core / xray-plugin 后为 49 条。
+#
+# 【v.180.167】xray-core / xray-plugin 不再收（ssrp 专属，用户 2026-10-29 定不用 ssrp）。
+# 收进包库的直接后果：25.12 真机探针按旧判据把这两个装了上去（624 vs 出厂 622）。
+# v2ray-geoip / v2ray-geosite 保留：通用 geo 数据，仍然装进固件，只是不纳入探针保护
+# （理由见 pkg-restore-apps.sh 的 _PA_MOSDNS 说明）。
+#
+# 注意：下面是**双引号字符串**，注释只能写在起始引号之前。写在里面的 `#`
+# 不是注释，会被当成包名的一部分（v.180.167 踩过这个坑）。
 _AK_WANT="lxc lxc-attach lxc-auto lxc-autostart lxc-cgroup lxc-checkconfig lxc-common
 lxc-config lxc-configs lxc-console lxc-copy lxc-create lxc-destroy lxc-device
 lxc-execute lxc-freeze lxc-hooks lxc-info lxc-init lxc-ls lxc-monitor
@@ -344,7 +352,7 @@ mosdns
 daed daed-geoip daed-geosite luci-app-daed luci-i18n-daed-zh-cn
 crowdsec-firewall-bouncer luci-app-crowdsec-firewall-bouncer
 luci-i18n-crowdsec-firewall-bouncer-zh-cn nftables-json
-v2ray-geoip v2ray-geosite xray-core xray-plugin sing-box"
+v2ray-geoip v2ray-geosite sing-box"
 
 # 来源 A：packages/ 里 run 包解出的 apk（第三方包，官方源没有）
 #

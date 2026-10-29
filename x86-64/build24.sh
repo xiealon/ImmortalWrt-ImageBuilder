@@ -329,10 +329,32 @@ mkdir -p "$_PC_DIR"
 #                             luci-i18n-daed-zh-cn / v2ray-geo* / vmlinux-btf
 # 官方 feed 另有 smartdns / smartdns-ui / lxc 全套 / dae / crowdsec-bouncer。
 #
+# 【v.180.167】补 5 个通用件进包库：microsocks / dns2socks / ipt2socks /
+# chinadns-ng / tcping。它们在 shell/custom-packages.sh 里被刻意留下（用户定：
+# 通用件必须保留），但包库原来没收 —— 结果是「探针判得出缺失、却没东西可装回」。
+# 补进包库**不改任何判据**：探针判的是「包在不在册」，从不比较版本，所以用户
+# apk upgrade 这些包（包括 sing-box）不会被拽回旧版；pkg-restore.sh 的 _pr_pkg
+# 对已装的包直接跳过，连重装都不会发生。包库里的版本只在「包整个被删」时
+# 才用得上 —— 那种情况下装回旧版也比彻底没有强。
+#
 # 刻意不收录的：
-#   libopenssl3   ssrp run 里带了这个，但它是系统核心库 —— 拿它 --force-reinstall
-#                 会把 opkg/wget 依赖的 openssl 换掉，风险远大于收益。真缺了应该重刷固件。
-#   ssr-plus      裸名，不存在。实际包名是 luci-app-ssr-plus。
+#   libopenssl3   系统核心库 —— 拿它 --force-reinstall 会把 opkg/wget 依赖的
+#                 openssl 换掉，风险远大于收益。真缺了应该重刷固件。
+#                 它仍留在 pkg-restore-apps.sh 的 _PA_COMMON 里受保护：判得出
+#                 缺失、但装不回来，这是有意的 —— 宁可报人工，也不动系统库。
+#   ssr-plus      裸名，不存在。实际包名是 luci-app-ssr-plus（v.180.167 起整组不再安装）。
+#
+# 【v.180.167】ssrp 专属包不再收进包库（用户 2026-10-29 定：daed + clashoo 够用）。
+# 原来这里收了 9 个：luci-app-ssr-plus / luci-i18n-ssr-plus-zh-cn /
+# shadowsocksr-libev-ssr-local / -redir / -server / trojan-plus /
+# xray-core / xray-plugin。
+# 留在包库里的后果不只是「多占空间」：_pa_should 的旧判据正是拿包库当
+# 「固件该有」的证据，于是 25.12 真机上探针把 xray-core / xray-plugin 装了上去
+# （运行时 624 vs 出厂 622）。判据已在 v.180.165 改掉，包库也一并清干净。
+# sing-box 保留：它是通用代理内核，与 ssrp 无关，构建清单里本来也在。
+#
+# 注意：下面是**双引号字符串**，注释只能写在起始引号之前。写在里面的 `#`
+# 不是注释，会被当成包名的一部分（v.180.167 踩过这个坑）。
 _PC_WANT="lxc lxc-attach lxc-auto lxc-autostart lxc-cgroup lxc-checkconfig lxc-common
 lxc-config lxc-configs lxc-console lxc-copy lxc-create lxc-destroy lxc-device
 lxc-execute lxc-freeze lxc-hooks lxc-info lxc-init lxc-ls lxc-monitor lxc-monitord
@@ -345,9 +367,7 @@ daed daed-geoip daed-geosite luci-app-daed luci-i18n-daed-zh-cn vmlinux-btf
 dae dae-geoip dae-geosite luci-app-dae luci-i18n-dae-zh-cn
 crowdsec crowdsec-firewall-bouncer luci-app-crowdsec-firewall-bouncer
 luci-i18n-crowdsec-firewall-bouncer-zh-cn nftables-json
-luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn
-shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir shadowsocksr-libev-ssr-server
-trojan-plus xray-core xray-plugin sing-box
+sing-box microsocks dns2socks ipt2socks chinadns-ng tcping
 clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn"
 
 # --- 来源 A：容器里已经存在的 ipk ---

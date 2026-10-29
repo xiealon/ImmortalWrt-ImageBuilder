@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.166"
+SCRIPT_VER="2026-10-29.180.181"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -433,6 +433,78 @@ _apps_watch() {
     return 0
 }
 
+# ---- 应用依赖的文件级通道（v.180.181）----
+# 盯 16 个包、70 个文件：9 个 kmod 的 26 个 .ko 与 9 个 modules.d 配置，
+# 加 ca-bundle / libcap / yq / ip-full / firewall4 / coreutils-nohup / libopenssl3。
+# **不含内核本体**（/boot/vmlinuz 与其余模块都不管，内核坏了重刷固件）。
+# **不含 /etc/config/**（UCI 配置归 bootstrap 管，恢复出厂基底反而会拆掉 lxc zone）。
+# 为什么必须走文件级：kmod-* 在固件出厂库里有、包库里没有 apk，apk add 无处可装；
+# 而「包在册、文件被 whiteout」这种形态 apk info -e 完全看不见。
+# 详见 pkg-restore.sh 里 --deps 那段的说明。
+_KMODS_RESTORE="${CS_PROBE_KMODS_RESTORE:-/usr/sbin/pkg-restore.sh}"
+
+_kmods_watch() {
+    [ -f "$_KMODS_RESTORE" ] || return 0
+    _kd_out="$(sh "$_KMODS_RESTORE" --deps --check 2>&1)"
+    _kd_rc=$?
+    if [ "$_kd_rc" = 0 ]; then
+        if [ "${P_KMOD_BAD:-0}" -gt 0 ]; then
+            plog "【依赖文件】已齐全（此前缺 $P_KMOD_BAD 轮）"
+        fi
+        P_KMOD_BAD=0
+        P_KMOD_FIX=0
+        P_HUMAN_KMOD=0
+        return 0
+    fi
+    if [ "$_kd_rc" = 2 ]; then
+        if [ "${P_KMOD_NOSRC:-0}" != "1" ]; then
+            P_KMOD_NOSRC=1
+            P_ACTION="kmods-nosrc"
+            plog "【依赖文件】只读基底里没有包文件清单（/rom/lib/apk/packages），判不了（$_kd_out）"
+        fi
+        return 0
+    fi
+    P_KMOD_BAD=$((${P_KMOD_BAD:-0} + 1))
+    if [ "${P_HUMAN_KMOD:-0}" = "1" ]; then
+        P_ACTION="kmods-need-human-hold"
+        return 0
+    fi
+    if [ "$P_KMOD_BAD" -lt "$PROBE_STALL_ROUNDS" ]; then
+        P_ACTION="kmods-warn"
+        plog "【依赖文件】缺失：$_kd_out（第 $P_KMOD_BAD/$PROBE_STALL_ROUNDS 轮）"
+        return 0
+    fi
+    _kd_now=$(date +%s)
+    if [ $((_kd_now - ${P_KMOD_TRIG:-0})) -lt "$PROBE_COOLDOWN" ]; then
+        P_ACTION="kmods-cooldown"
+        plog "【依赖文件】持续缺失，冷却中（剩余 $((PROBE_COOLDOWN - (_kd_now - ${P_KMOD_TRIG:-0})))s），暂不补回"
+        return 0
+    fi
+    P_KMOD_TRIG="$_kd_now"
+    P_KMOD_BAD=0
+    P_ACTION="kmods-repair"
+    plog "【依赖文件】连续 $PROBE_STALL_ROUNDS 轮缺失，开始补回：$_kd_out"
+    sh "$_KMODS_RESTORE" --deps --repair >>"$BOOT_LOG" 2>&1
+    # 修完必须再问一次 --check，不能凭 --repair 的返回值下结论。
+    if _kd_out2="$(sh "$_KMODS_RESTORE" --deps --check 2>&1)"; then
+        P_KMOD_BAD=0
+        P_KMOD_FIX=0
+        P_ACTION="kmods-fixed"
+        plog "【依赖文件】已从只读基底补回（/etc/config 不在保护范围，用户配置未动）"
+        return 0
+    fi
+    P_KMOD_FIX=$((${P_KMOD_FIX:-0} + 1))
+    if [ "$P_KMOD_FIX" -ge "$PROBE_FAIL_ALERT" ]; then
+        P_ACTION="kmods-need-human"
+        P_HUMAN_KMOD=1
+        plog "【依赖文件】【需人工介入】连续 $P_KMOD_FIX 次补不回（仍缺：$_kd_out2）。多为只读基底不可读或运行侧不可写 —— 只能重刷固件。已停止自动补回"
+    else
+        P_ACTION="kmods-fix-fail"
+        plog "【依赖文件】补回失败（仍缺：$_kd_out2，连续第 $P_KMOD_FIX/${PROBE_FAIL_ALERT} 次，日志见 $BOOT_LOG）"
+    fi
+    return 0
+}
+
 # ---- 可测化的一轮处理：判定 + 动作 ----
 # 全局状态（测试可直接预设/断言）：
 #   P_STALL 连续停滞轮数 / P_LAST_TRIG 上次触发时刻 / P_FAIL 连续修复失败次数
@@ -545,6 +617,9 @@ probe_tick() {
     # 应用主程序通道同样必须排在 last_pull 判定之前：应用被删不影响 last_pull，
     # 放在「链路正常就 return 0」后面等于永远不执行 —— v.180.117 在 DNS 上踩过这一脚。
     _apps_watch
+    # 应用依赖的内核模块同理：/lib/modules 里的 .ko 被删不影响 last_pull，
+    # 排在「链路正常就 return 0」后面等于永远不执行。
+    _kmods_watch
     if _boot --probe-check >/dev/null 2>&1; then
         if [ "${P_STALL:-0}" -gt 0 ]; then
             plog "【恢复】last_pull 已恢复（停滞 $P_STALL 轮后）"
@@ -745,11 +820,14 @@ _probe_save() {
     # 所以叫 dnsfix / dnshold，不叫 dns_fail / dns_human。
     # 【v.180.162】应用通道同理：appbad / apptrig / appfix / apphold，
     # 四个都不含旧键字面量（audit_bad= / dnstrig= / dnsfix= / dnshold=）。
-    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s human_pull=%s dnsbad=%s dnsfix=%s dnstrig=%s dnshold=%s appbad=%s apptrig=%s appfix=%s apphold=%s\n' \
+    # 【v.180.181】依赖文件通道：kmodbad / kmodtrig / kmodfix / kmodhold。
+    # 四组都避开了旧键字面量（human= / fail= / appbad= 等），不会互相取错。
+    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s human_pull=%s dnsbad=%s dnsfix=%s dnstrig=%s dnshold=%s appbad=%s apptrig=%s appfix=%s apphold=%s kmodbad=%s kmodtrig=%s kmodfix=%s kmodhold=%s\n' \
         "${P_STALL:-0}" "${P_LAST_TRIG:-0}" "${P_FAIL:-0}" "${P_ACTION:-none}" "$(date +%s)" \
         "${P_ROUND:-0}" "${P_AUDIT_BAD:-0}" "${P_HUMAN:-0}" "${P_HUMAN_PULL:-0}" \
         "${P_DNS_BAD:-0}" "${P_DNS_FIX:-0}" "${P_DNS_TRIG:-0}" "${P_HUMAN_DNS:-0}" \
         "${P_APP_BAD:-0}" "${P_APP_TRIG:-0}" "${P_APP_FIX:-0}" "${P_HUMAN_APP:-0}" \
+        "${P_KMOD_BAD:-0}" "${P_KMOD_TRIG:-0}" "${P_KMOD_FIX:-0}" "${P_HUMAN_KMOD:-0}" \
         > "$STATE_FILE" 2>/dev/null
 }
 _probe_load() {
@@ -788,6 +866,15 @@ _probe_load() {
     [ -n "$_v" ] && P_APP_FIX="$_v"
     _v=$(printf '%s\n' "$_pl" | sed -n 's/.*apphold=\([0-9][0-9]*\).*/\1/p')
     [ -n "$_v" ] && P_HUMAN_APP="$_v"
+    # 【v.180.181】依赖文件通道。旧状态文件没这几个键 → 保持 0（向后兼容）。
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*kmodbad=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_KMOD_BAD="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*kmodtrig=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_KMOD_TRIG="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*kmodfix=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_KMOD_FIX="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*kmodhold=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_HUMAN_KMOD="$_v"
     return 0
 }
 
@@ -809,6 +896,11 @@ P_APP_BAD=0
 P_APP_TRIG=0
 P_APP_FIX=0
 P_HUMAN_APP=0
+# 【v.180.181】应用依赖的文件级通道（16 包 / 70 文件，不含 /etc/config）
+P_KMOD_BAD=0
+P_KMOD_TRIG=0
+P_KMOD_FIX=0
+P_HUMAN_KMOD=0
 DNS_WHY=""
 _probe_load
 while true; do

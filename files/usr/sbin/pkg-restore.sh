@@ -244,10 +244,154 @@ _pr_host() {
     return 0
 }
 
+# ---- 应用依赖的文件级恢复（v.180.181：排除 /etc/config，见下）----
+# 保护「应用跑起来必需、但包管理器修不回来」的那些文件。两类对象：
+#   ① 9 个 kmod 包 —— 固件出厂的已安装库里有（P:kmod-tun 命中），但
+#      /rom/root/apk-cache 里 116 个 apk 一个 kmod 都没有，apk add 无处可装；
+#      而且「包在册、文件被 whiteout」这种形态 apk info -e 照样返回成功。
+#   ② 7 个基础件 —— ca-bundle / libcap / yq / ip-full / firewall4 /
+#      coreutils-nohup / libopenssl3，同样固件自带、包库无 apk。
+#      clashoo 要 ca-bundle + yq + coreutils-nohup + firewall4 + ip-full，
+#      lxc 要 libcap，全在这七个里。
+#
+# 文件清单**不写死**，直接读只读基底里的 /rom/lib/apk/packages/<包>.list
+# （实测 764 份，每个包都有一份，绝对路径一行一个）。包升级换了文件名也不用改
+# 脚本，跟着基底走。也不用像上一版那样手写 26 个 .ko 与 9 个 modules.d 名字。
+#
+# 为什么这样能修（2026-10-29 真机实测）：
+#   /rom 是 squashfs ro，文件实体删不掉。rm 只是在 /overlay/upper 写一个
+#   c--------- 的 whiteout 把下层遮住，所以从 /rom 拷回即可复活：
+#     rm -f /usr/bin/yq           → 上层出现 whiteout
+#     /rom/usr/bin/yq             13,797,752 字节原样还在
+#     cp /rom/usr/bin/yq /usr/bin/yq  → md5 与基底完全一致
+#   同理 netlink_diag.ko 删掉后 --check 报缺、--repair 补回、md5 一致（实测过）。
+#
+# 判据只判「在不在且非空」：
+#   不比内容、不比 md5 —— 包升级本来就会换文件，按内容判会把人拽回旧版；
+#   用 -s 而不是 -f —— 被截断成 0 字节也算缺失。
+#
+# 范围刻意不含内核本体（/boot/vmlinuz 与其余 275 个模块）：内核坏了重刷固件。
+#
+# 【v.180.181】/etc/config/ 整目录排除（用户 2026-10-29 定）。
+# 例：firewall4.list 的第一行就是 /etc/config/firewall —— 那是 UCI 配置，
+# 不是程序文件，而且正是 bootstrap 的工作对象（uci set/commit + firewall
+# reload，往里加 lxc zone / docker zone / SNAT / 三条 forwarding，删 wan 段）。
+# 运行侧实测 2774 字节，基底 /rom 侧 2283 字节，差的全是 bootstrap 加的。
+# 所以这里绝不能碰它，理由三条：
+#   ① 判据是「存在且非空」，正常情况永远不触发，也永远补不了 bootstrap 写的东西；
+#   ② 真触发（文件被删/被清空）时拷回来的是**出厂基底**，lxc zone 不在里面 ——
+#      而 cp 完不跑 firewall reload，磁盘与运行中的 nft 表就此不一致，
+#      下一次 reload 会让容器网段整个掉出去，bouncer 拉不到 LAPI（10.1.0.10:8080），
+#      last_pull 停滞，探针还得靠重跑 bootstrap 才修得回来 ——
+#      保护动作本身制造了它要防的故障；
+#   ③ 这个文件本来就有专人管：bootstrap 的 _fw_*_ok 判据 + build 补齐每轮 ensure，
+#      比「拷个出厂版本」强得多。
+# 归纳成一条规则：/etc/config/ 下的一切归 bootstrap，文件级保护只管程序文件。
+_DEPS_ROM_LIST="$ROMDIR/lib/apk/packages"
+
+_DEPS_PKGS="kmod-dummy kmod-nft-socket kmod-nft-tproxy kmod-sched-bpf
+kmod-sched-core kmod-veth kmod-inet-diag kmod-tun kmod-netlink-diag
+ca-bundle libcap yq ip-full firewall4 coreutils-nohup libopenssl3"
+
+# 输出「基底有、运行侧缺或为空」的绝对路径。返回 2 = 基底里一份清单都没有。
+# 用 while read 而不是 for 展开：清单里可能出现带空格的路径。
+_deps_missing() {
+    _dp_found=0
+    for _dp_p in $_DEPS_PKGS; do
+        _dp_l="$_DEPS_ROM_LIST/$_dp_p.list"
+        [ -f "$_dp_l" ] || continue
+        _dp_found=1
+        while IFS= read -r _dp_f; do
+            [ -n "$_dp_f" ] || continue
+            # /etc/config/ 归 bootstrap 管（见上方 v.180.181），不在这里判也不在这里补
+            case "$_dp_f" in /etc/config/*) continue ;; esac
+            [ -f "$ROMDIR$_dp_f" ] || continue
+            [ -s "$_dp_f" ] || printf '%s\n' "$_dp_f"
+        done < "$_dp_l"
+    done
+    [ "$_dp_found" = 1 ] || return 2
+    return 0
+}
+
+_deps_repair() {
+    _dp_tmp="${TMPDIR:-/tmp}/.pkg-restore-deps.$$"
+    _deps_missing > "$_dp_tmp" 2>/dev/null
+    _dp_rc=$?
+    if [ "$_dp_rc" = 2 ]; then
+        rm -f "$_dp_tmp"
+        log "基底里找不到包文件清单（$_DEPS_ROM_LIST），判不了"
+        return 1
+    fi
+    _dp_n=0
+    while IFS= read -r _dp_f; do
+        [ -n "$_dp_f" ] || continue
+        _dp_n=$((_dp_n + 1))
+        _dp_d="${_dp_f%/*}"
+        [ -d "$_dp_d" ] || mkdir -p "$_dp_d" 2>/dev/null
+        if cp -f "$ROMDIR$_dp_f" "$_dp_f" 2>/dev/null; then
+            log "补回 $_dp_f"
+        else
+            log "补回失败 $_dp_f（基底不可读或目标不可写）"
+        fi
+    done < "$_dp_tmp"
+    rm -f "$_dp_tmp"
+    [ "$_dp_n" -gt 0 ] || log "无需补回（清单内文件齐全）"
+    [ -z "$(_deps_missing)" ]
+}
+
+_deps_list() {
+    printf '基底清单   %s\n' "$_DEPS_ROM_LIST"
+    printf '保护包数   %s\n' "$(printf '%s\n' $_DEPS_PKGS | wc -l)"
+    _dp_nt=0
+    _dp_nm=0
+    for _dp_p in $_DEPS_PKGS; do
+        _dp_l="$_DEPS_ROM_LIST/$_dp_p.list"
+        [ -f "$_dp_l" ] || continue
+        while IFS= read -r _dp_f; do
+            [ -n "$_dp_f" ] || continue
+            case "$_dp_f" in /etc/config/*) continue ;; esac
+            [ -f "$ROMDIR$_dp_f" ] || continue
+            _dp_nt=$((_dp_nt + 1))
+            [ -s "$_dp_f" ] || _dp_nm=$((_dp_nm + 1))
+        done < "$_dp_l"
+    done
+    printf '文件总数   %s（缺失 %s）\n' "$_dp_nt" "$_dp_nm"
+    _dp_out="$(_deps_missing)"
+    if [ -n "$_dp_out" ]; then
+        printf '缺失清单   %s\n' "$(printf '%s' "$_dp_out" | tr '\n' ' ')"
+    else
+        printf '缺失清单   无\n'
+    fi
+    return 0
+}
+
 case "${1:-}" in
 "")
-    echo "用法：$0 <包名> | --tree <包名> | --lxc | --lxc-missing | --host | --force <包名> | --installed <包名>" >&2
+    echo "用法：$0 <包名> | --tree <包名> | --lxc | --lxc-missing | --host | --force <包名> | --installed <包名> | --deps --check|--repair|--list" >&2
     exit 2
+    ;;
+--deps)
+    case "${2:-}" in
+    --check)
+        _dp_out="$(_deps_missing)"
+        _dp_rc=$?
+        [ "$_dp_rc" = 2 ] && exit 2
+        [ -n "$_dp_out" ] || exit 0
+        printf '%s\n' "$_dp_out"
+        exit 1
+        ;;
+    --repair)
+        _deps_repair && exit 0 || exit 1
+        ;;
+    --list)
+        _deps_list
+        exit 0
+        ;;
+    *)
+        echo "--deps 需要 --check | --repair | --list" >&2
+        exit 2
+        ;;
+    esac
     ;;
 --installed)
     _pr_installed "${2:-}" && exit 0 || exit 1

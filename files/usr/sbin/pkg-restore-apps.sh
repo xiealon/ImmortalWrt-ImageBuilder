@@ -19,7 +19,9 @@
 #   pkg-restore-apps.sh [--repair]  装回缺的那些，再复判一次
 #                                   0 = 全部在位；1 = 仍有缺（或装不上）
 #
-# 判据只有一条：包管理器认不认（opkg list-installed / apk info -e）。
+# 判据主体是包管理器认不认（opkg list-installed / apk info -e）。
+# 【v.180.167】唯一例外：daed-geoip / daed-geosite 的运行数据是软链接，包在册
+# 但链接断了同样算「缺失」—— 详见 _pa_data_ok 上方的说明。
 #   不看文件清单 —— 理由同 pkg-restore.sh 开头那三条：清单随版本漂、
 #   文件缺失 ≠ 功能缺失、两个判据混用会死循环。
 #
@@ -72,28 +74,67 @@ _RESTORE="${RESTORE_BIN:-/usr/sbin/pkg-restore.sh}"
 # 门槛仍在 _pa_should：只有 /rom 侧留了痕迹（info/<包>.list 或包库里那份 ipk）
 # 才判「该有」。所以这张表可以照全量写，固件没带的包会显示「固件未带」而不是
 # 每轮触发一次装包 —— 不会把没选的应用强加给别的机器。
+# 【v.180.171】清单按「真的装得回来」重划（用户 2026-10-29 定：
+# 把需要保护的依赖查清楚，然后保护起来）。
+# 2026-10-29 真机逐包实测了两件事：固件出厂的已安装库里有没有它
+# （grep -qxF P:<包> /rom/lib/apk/db/installed），包库 /rom/root/apk-cache
+# 里有没有对应的 apk。两个都 yes 才留在这张表里 —— 只有前者没有后者的包，
+# 判出缺失也装不回来，每轮只是白报一次警。
+#
+# 留下的 12 个包全部 firmware=yes + pkg=yes：
+#   clashoo / luci-app-clashoo / luci-i18n-clashoo-zh-cn
+#   daed / daed-geoip / daed-geosite / luci-app-daed / luci-i18n-daed-zh-cn
+#   mosdns / luci-app-mosdns / luci-i18n-mosdns-zh-cn
+#   sing-box
+#
+# 内核模块全部移出本表，改由 pkg-restore.sh --deps 做文件级恢复。
+# 原因是决定性的（2026-10-29 实测）：kmod-* 在固件出厂库里（P:kmod-tun 命中），
+# 但包库 116 个 apk 里**一个 kmod 都没有**，apk add kmod-tun 无处可装 ——
+# 留在这里只能报「缺」不能修。更要紧的是「包在册、模块文件被 whiteout」这种
+# 形态，apk info -e 照样返回成功，包级判据根本看不见。
+# 所以交给 --deps：清单不写死，直接读 /rom/lib/apk/packages/<包>.list，
+# 从 /rom 逐文件拷回。9 个 kmod 包的 26 个 .ko 与 9 个 modules.d 配置都在里面。
+# 范围只有应用要用的这些：不含内核本体（坏了重刷固件），也不含 /etc/config/
+# （UCI 配置归 bootstrap 管，见 pkg-restore.sh v.180.181 说明）。
+#
+# 移出清单的无效条目及原因：
+#   vmlinux-btf        固件出厂库无此包（25.12 内核自带 /sys/kernel/btf/vmlinux）
+#   kmod-dummy / kmod-nft-socket / kmod-nft-tproxy / kmod-sched-bpf /
+#   kmod-sched-core / kmod-veth / kmod-inet-diag / kmod-tun / kmod-netlink-diag
+#                      固件库有、包库无 → 装不回，见上，改走 --deps
+#   microsocks         固件库无、包库也无（ssrp 时代遗留，从未装过）
+#   dns2socks / ipt2socks / chinadns-ng / tcping
+#                      固件库无、包库有 → _pa_should 判「固件未带」，永远跳过
+#   libopenssl3        固件库有、包库无 → 装不回；且它是全系统的 TLS 底座，
+#                      不属于某一个应用的依赖
 _PA_CLASHOO="clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn"
-# vmlinux-btf 只在 24.10 存在裸名包。25.12 线的 BTF 由内核自带
-# （/sys/kernel/btf/vmlinux），run 包里那份叫 vmlinux-btf-6.12.79 且被
-# build25.sh 刻意排除（与内核版本强绑定，装错 daed 的 eBPF 校验过不去）。
-# 裸名在 25.12 固件里查不到 info/<包>.list，_pa_should 判「固件未带」自动跳过，
-# 所以这行在两条线上都安全，不需要构建期分流。
-_PA_DAED="daed daed-geoip daed-geosite vmlinux-btf luci-app-daed luci-i18n-daed-zh-cn"
-# 【v.180.166】mosdns 组不再包含 v2ray-geoip / v2ray-geosite。
-# 用户 2026-10-29 定：这两个是通用的 geo 数据包，上游一直在更新，不该被
-# 「缺了就按本地包库装回旧版」的判据锁死 —— 那样用户换了新版反而会被探针
-# 拽回去。它们仍然由构建装进固件（shell/custom-packages.sh），只是不再纳入
-# 探针的保护范围：被卸掉时不补、不报缺失。
+_PA_DAED="daed daed-geoip daed-geosite luci-app-daed luci-i18n-daed-zh-cn"
+# mosdns 组仍不含 v2ray-geoip / v2ray-geosite（v.180.166 用户定）：
+# 通用 geo 数据包上游一直在更新，按本地包库装回旧版会把人的新版本拽回老版本。
 _PA_MOSDNS="mosdns luci-app-mosdns luci-i18n-mosdns-zh-cn"
-# 通用件组（v.180.166）：不属于哪一个应用，但被多处依赖，缺了会安静地坏。
-# ssrp 移除时这些包在构建清单里被刻意留下（shell/custom-packages.sh 有说明），
-# 留下来就必须一起保护 —— 只留不护，被删掉时探针不会去装回来。
-# sing-box 原先挂在 ssrp 组里，但它本身是通用代理内核，与 ssrp 无关。
-# geo 数据（v2ray-geoip / v2ray-geosite）整体不进保护清单：它们是通用数据包，
-# 上游一直在更新，「缺了就按本地包库装回旧版」的判据会把人拽回老版本。
-# daed-geoip / daed-geosite 不在此列 —— 它们是 daed 自身的运行依赖，
-# 跟着 daed 一起判。
-_PA_COMMON="sing-box microsocks dns2socks ipt2socks chinadns-ng tcping libopenssl3"
+# sing-box 是通用代理内核，原挂在 ssrp 组里，现在单独一组。
+# 它的 kmod 依赖（inet-diag / netlink-diag / tun）同样归 --deps 管。
+_PA_COMMON="sing-box"
+
+# 【v.180.167】daed 的 geo 数据是软链接，真实文件由 v2ray-geoip / v2ray-geosite 提供：
+#   /usr/share/daed/geoip.dat    -> ../v2ray/geoip.dat
+#   /usr/share/daed/geosite.dat  -> ../v2ray/geosite.dat
+# 用户 2026-10-29 实测确认后定：apk del --force-depends v2ray-geoip 会让这两个链接
+# 断掉，而 daed-geoip 包本身仍在册 —— 只判包名完全看不到这种「包在、数据没了」的
+# 形态，daed 会在启动时静默失去规则集。所以对这两个包再加一条「链接可读」判据。
+#
+# 为什么升级 v2ray-geoip 不会误判（用户最关心的那点）：
+#   · 软链接指向的是**路径**而不是 inode；apk 升级是原地替换
+#     /usr/share/v2ray/geoip.dat，该路径全程存在 → 判据恒真，不会因为换了新版
+#     就判成断链。
+#   · 即使某一瞬文件正在被替换，探针这边也要连续 3 轮（60s × 3 = 180s）才动作，
+#     毫秒级的窗口凑不满 3 轮，不会触发装回。
+#   · 万一真的断链触发装回，装的是 daed-geoip（已在册 → 装包是空操作），不会把
+#     用户刚升级的 v2ray-geoip 拽回旧版；而真被人 force-remove 掉的那种情况，
+#     装回旧版也比彻底没有规则集强。
+_PA_LINK_DAED_GEOIP=/usr/share/daed/geoip.dat
+_PA_LINK_DAED_GEOSITE=/usr/share/daed/geosite.dat
+
 _PA_LIST="${CS_PROBE_APPS:-$_PA_CLASHOO $_PA_DAED $_PA_MOSDNS $_PA_COMMON}"
 
 log() { printf '[APP] %s\n' "$*"; }
@@ -144,12 +185,24 @@ _pa_should() {
     return 1
 }
 
+# 已装包的「运行数据还在吗」补充判据（v.180.167）。
+# 只对 daed 的两个 geo 包生效：它们的运行数据是软链接，包在册不等于数据在。
+# 其余包没有这种「包在、数据另存」的结构，直接算好。
+_pa_data_ok() {
+    case "$1" in
+    daed-geoip)   [ -r "$_PA_LINK_DAED_GEOIP" ] ;;
+    daed-geosite) [ -r "$_PA_LINK_DAED_GEOSITE" ] ;;
+    *)            return 0 ;;
+    esac
+}
+
 # 输出「该有却没有」的包名（一行，空格分隔）。没有则输出空行。
+# 「没有」含两种形态：包不在册；或者包在册但运行数据断了（见 _pa_data_ok）。
 _pa_missing() {
     _pa_m=""
     for _pa_p in $_PA_LIST; do
         _pa_should "$_pa_p" || continue
-        _pa_installed "$_pa_p" && continue
+        if _pa_installed "$_pa_p" && _pa_data_ok "$_pa_p"; then continue; fi
         _pa_m="$_pa_m $_pa_p"
     done
     printf '%s\n' "$_pa_m" | sed 's/^ *//'
@@ -165,7 +218,13 @@ _pa_list() {
     for _pa_p in $_PA_LIST; do
         _pa_s="固件未带"
         if _pa_should "$_pa_p"; then
-            if _pa_installed "$_pa_p"; then _pa_s="在位"; else _pa_s="缺失"; fi
+            if ! _pa_installed "$_pa_p"; then
+                _pa_s="缺失"
+            elif _pa_data_ok "$_pa_p"; then
+                _pa_s="在位"
+            else
+                _pa_s="数据断链"   # 包在册但软链接目标读不到（v.180.167）
+            fi
         fi
         printf '%-34s %s\n' "$_pa_p" "$_pa_s"
     done

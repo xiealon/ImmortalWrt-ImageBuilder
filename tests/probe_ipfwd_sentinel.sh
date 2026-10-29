@@ -8,7 +8,8 @@
 #   一行逻辑都没抄——生产代码改坏了，这里立刻红。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 # 只含活代码的副本：整行注释（行首可有空白 + #）不算命中。
 # 注释里提到某关键字（例如记录「曾经 disable lxc-auto」）不该被断言当成
 # 「代码里在做这件事」，否则断言会假红或假绿。断言一律 grep 这份副本。

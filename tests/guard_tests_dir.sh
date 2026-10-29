@@ -15,7 +15,8 @@
 # 那正是 v.108.44 踩过的坑（每分钟 6 个文件全重写）。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-GD="$REPO/files/usr/sbin/crowdsec-guard.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+GD="$REPO/$FILES_DIR/usr/sbin/crowdsec-guard.sh"
 
 R=0
 ck() {

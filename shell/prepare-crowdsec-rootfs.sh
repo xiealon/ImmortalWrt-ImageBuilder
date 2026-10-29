@@ -4,7 +4,7 @@ set -euo pipefail
 UBUNTU_BASE_URL="${UBUNTU_BASE_URL:-https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-amd64.tar.gz}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${OUT_DIR:-$REPO_ROOT/files/etc/crowdsec}"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/files-24/etc/crowdsec}"
 WORK="${WORK:-/tmp/lxc-ubuntu-build}"
 R="$WORK/rootfs"
 

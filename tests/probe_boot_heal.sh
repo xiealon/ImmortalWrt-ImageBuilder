@@ -17,7 +17,8 @@
 #   4. 每轮都要检查，不是等触发修复才查（tick 遇 lock-busy 会提前返回）。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-PR="$REPO/files/usr/sbin/crowdsec-lxc-probe.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+PR="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh"
 
 R=0
 ck() {
@@ -65,9 +66,9 @@ ck "R35.1k _guard_run 里先修 bootstrap 再跑 guard" \
 _v() { sed -n 's/^SCRIPT_VER="\(.*\)"$/\1/p' "$1" | head -n1; }
 ck "R35.1l 探针版本号与 bootstrap 一致（同批构建同版本）" \
    "$(_v "$PR")" \
-   "$(_v "$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh")"
+   "$(_v "$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh")"
 ck "R35.1n rc.local 与 init.d 也是同一个号（五文件口径）" \
-   "$(_v "$REPO/files/etc/rc.local")|$(_v "$REPO/files/etc/init.d/crowdsec-lxc-probe")" \
+   "$(_v "$REPO/$FILES_DIR/etc/rc.local")|$(_v "$REPO/$FILES_DIR/etc/init.d/crowdsec-lxc-probe")" \
    "$(_v "$PR")|$(_v "$PR")"
 ck "R35.1m 探针版本号格式合法" \
    "$(sed -n 's/^SCRIPT_VER="\([0-9][0-9.-]*\)"$/ok/p' "$PR")" "ok"

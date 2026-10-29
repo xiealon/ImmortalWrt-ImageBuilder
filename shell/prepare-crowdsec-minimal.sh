@@ -46,7 +46,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 为什么不能两处各写一遍：改了一处忘了另一处，guard 就会每分钟把旧版盖回去
 # （和 v.108.44 那个 stat 事故同一形态：不是功能坏了，是判据永远对不上）。
 SKEL="${SKEL:-$REPO_ROOT/rootfs-skel}"
-OUT_DIR="${OUT_DIR:-$REPO_ROOT/files/etc/crowdsec}"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/files-24/etc/crowdsec}"
 OUT_NAME="${OUT_NAME:-lxc-crowdsec.tar.gz}"
 WORK="${WORK:-/tmp/lxc-crowdsec-minimal}"
 R="$WORK/rootfs"

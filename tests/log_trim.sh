@@ -6,9 +6,10 @@
 # 这里验两件事：静态（阈值/路径/调用点只有真引导一处）+ 动态（真截一次、真不截一次）。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 # v.108.70：probe 的 BOOT_LOG 也要与上面同源，R32.1e 用它
-PR="$REPO/files/usr/sbin/crowdsec-lxc-probe.sh"
+PR="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh"
 
 R=0
 ck() {

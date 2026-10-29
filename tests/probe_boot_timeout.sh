@@ -13,9 +13,10 @@
 # guard 自己的两处 attach（v.108.66）与 /health 的 wget（v.108.67）在 R13 里钉。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-PR="$REPO/files/usr/sbin/crowdsec-lxc-probe.sh"
-RC="$REPO/files/etc/rc.local"
-IN="$REPO/files/etc/init.d/crowdsec-lxc-probe"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+PR="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh"
+RC="$REPO/$FILES_DIR/etc/rc.local"
+IN="$REPO/$FILES_DIR/etc/init.d/crowdsec-lxc-probe"
 TMPD="$REPO/tests/.r35.$$"
 rm -rf "$TMPD"; mkdir -p "$TMPD" || { echo "FATAL: 无法创建 $TMPD"; exit 2; }
 trap 'rm -rf "$TMPD"' EXIT INT TERM

@@ -21,9 +21,10 @@
 #   LXC 容器 ubuntu 仍 RUNNING、IP 10.1.0.10（LXC 6.0.5 原生支持 v2）
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+FILES_DIR="${CS_FILES_DIR:-files-24}"
 PKGS="$REPO/shell/custom-packages.sh"
 APKS="$REPO/shell/apk-custom-packages.sh"
-GUARD="$REPO/files/etc/init.d/cgroup2-guard"
+GUARD="$REPO/$FILES_DIR/etc/init.d/cgroup2-guard"
 
 R=0
 ck() {

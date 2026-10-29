@@ -1,0 +1,98 @@
+#!/bin/sh
+# 【v.180.78】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# rc.local：开机引导入口（只做前置检查 + 持锁，不含任何修复/安装逻辑）
+LOG=/root/crowdsec-lxc-bootstrap.log
+BOOT=/usr/sbin/crowdsec-lxc-bootstrap.sh
+LOCK=/tmp/.crowdsec-lxc-bootstrap.lock
+# 【v.180.78】固件版本号。五个脚本统一用 SCRIPT_VER 一个名字，
+# 一条命令就能全查出来：
+#   grep -H -m1 '^SCRIPT_VER=' /usr/sbin/crowdsec-*.sh /etc/rc.local \
+#        /etc/init.d/crowdsec-lxc-probe
+# 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
+# 这里这份纯标记，改它不会触发任何重写。
+SCRIPT_VER="2026-10-29.180.192"
+
+# ---- 阶段【完整性】：以只读分区为基准复原核心脚本，必须排在任何前置检查之前 ----
+# 顺序是硬要求：bootstrap 被删时下面的存在性检查会直接 exit 0，那样就再没有
+# 机会把它恢复回来。放在前面，前置检查看到的永远是复原后的现场。
+# guard 不负责它自己（被改成 exit 0 就什么都不会复原），所以调用前先自举。
+GUARD=/usr/sbin/crowdsec-guard.sh
+if [ -f "/rom$GUARD" ] && ! cmp -s "/rom$GUARD" "$GUARD" 2>/dev/null; then
+    rm -f "$GUARD"
+    cp -f "/rom$GUARD" "$GUARD" 2>/dev/null
+    chmod 755 "$GUARD" 2>/dev/null
+fi
+[ -x "$GUARD" ] && "$GUARD" quiet
+
+# ---- 阶段【前置检查】：不通过则本轮直接跳过，不动锁、不引导 ----
+# ---- 小步骤 检查引导脚本在位 ----
+[ -f "$BOOT" ] || { echo "[$(date '+%F %T')] 【前置检查】未找到 $BOOT，跳过引导" >>"$LOG"; exit 0; }
+# ---- 小步骤 检查镜像或 rootfs 至少有一份 ----
+# 三样都没有 = 镜像没进固件（生成失败 / 被删 / 刷的是老固件）。
+# v.107.7 起容器恒内置、没有 Include Crowdsec 开关，所以这属于异常，
+# 但不能因此连网络一起放弃：Router IP / 掩码 / 网关 / DNS 已经躺在
+# /etc/config/custom_router_*.txt 里，消费者是 bootstrap 的 PREP 组，与容器无关。
+# 改走 --net-only，只把路由器网络校准好，容器一步不碰 ——
+# 网络是唯一远程入口，保住它才谈得上进后台处理镜像问题。
+if [ -f /etc/crowdsec/lxc-crowdsec.tar.gz ] || [ -f /etc/crowdsec/lxc-ubuntu.tar.gz ] \
+   || [ -f /opt/lxc-ubuntu.tar.gz ] \
+   || [ -d /srv/lxc/ubuntu/rootfs ] \
+   || [ -d /rom/srv/lxc/ubuntu/base ]; then
+    BOOT_MODE=""
+else
+    BOOT_MODE="--net-only"
+    echo "[$(date '+%F %T')] 【前置检查】无镜像且无 rootfs（异常：容器应恒内置），改走网络基线模式（--net-only）" >>"$LOG"
+fi
+
+chmod +x "$BOOT" 2>/dev/null
+
+echo "[$(date '+%F %T')] 【前置检查】准备引导 CrowdSec 容器" >>"$LOG"
+
+# ---- 阶段【引导锁】：保证同一时刻只有一个 bootstrap 在跑 ----
+# ---- 小步骤 锁残留自愈（v.80）----
+# 注意：存在性检查与锁获取必须分开——若用「! mkdir」探测存在性，无锁时探测本身
+# 会把锁建成，导致紧随的获取点必失败、引导永远走跳过分支。
+if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -mmin +30 2>/dev/null | head -n1)" ]; then
+    # 【v.108.30】锁里现在会写持有者 pid 与落锁时间（探针 _lock_stale 读的就是这两个），
+    # 回收时把现场打进日志 —— 否则「谁卡了三十分钟」永远查不出来。
+    # 用 rm -rf 而不是 rmdir：锁目录里已经有 pid/ts 两个文件，rmdir 会失败，
+    # 失败就等于永不回收。
+    echo "[$(date '+%F %T')] 【引导锁】锁残留超 30 分钟（pid=$(cat "$LOCK/pid" 2>/dev/null)，落锁于 $(cat "$LOCK/ts" 2>/dev/null)），强夺后继续" >>"$LOG"
+    rm -rf "$LOCK" 2>/dev/null
+fi
+# ---- 小步骤 抢占引导锁 ----
+if ! mkdir "$LOCK" 2>/dev/null; then
+    echo "[$(date '+%F %T')] 【引导锁】上一次引导仍在执行（pid=$(cat "$LOCK/pid" 2>/dev/null)），本次跳过" >>"$LOG"
+    exit 0
+fi
+echo "$$" > "$LOCK/pid" 2>/dev/null
+date +%s > "$LOCK/ts" 2>/dev/null
+
+# ---- 阶段【执行引导】：bootstrap 自身按 8 个组链式验证并置位 ----
+# ---- 小步骤 持锁运行 bootstrap ----
+# $BOOT_MODE 故意不加引号：普通模式要展开成零个参数，加了引号会传进一个空串。
+# 【v.108.67】同步等待加了硬顶。rc.local 由 rcS 收尾阶段执行，这一句卡住会把
+# 开机收尾一起拖住；而 bootstrap 的「节点数 × 10s」本身没有上界。
+# 124 = 撞上限被终止，锁在下一句照常释放（rm -rf），不会留下永久的陈旧锁。
+timeout "${CS_RC_BOOT_MAX:-1800}" /bin/sh "$BOOT" $BOOT_MODE >>"$LOG" 2>&1
+_rc=$?
+[ "$_rc" = 124 ] && echo "[$(date '+%F %T')] 【超时】bootstrap 超过 ${CS_RC_BOOT_MAX:-1800}s 未返回，已终止（容器或网络卡住）" >>"$LOG"
+# ---- 小步骤 释放引导锁 ----
+# 同上：锁里有 pid/ts，rmdir 删不掉非空目录，必须 rm -rf。
+rm -rf "$LOCK" 2>/dev/null
+
+# ---- 阶段【DNS】：smartdns 配置（v.180.157 从 bootstrap 移出，归它自己的脚本）----
+# 为什么排在 bootstrap 之后：配置要读 network.lan.ipaddr —— init 的 set_main_dns
+# 靠它决定要不要让 dnsmasq 退 53，而 LAN 静态地址由 bootstrap 的 NETBASE.lan_static 落地。
+# 为什么放在锁外：它不碰容器、不碰锁内资源，只写 uci + 重启 smartdns；
+# 硬顶 60s（脚本内部重启后要等约 15s），超时只记日志 —— DNS 配不上不该把开机收尾拖住。
+# 失败不判死：探针每轮体检 53，连续不可用且冷却闸门通过时会自己再调 --repair。
+SD_RESTORE=/usr/sbin/pkg-restore-smartdns.sh
+if [ -x "$SD_RESTORE" ]; then
+    timeout 60 /bin/sh "$SD_RESTORE" --config >>"$LOG" 2>&1
+    [ "$?" = 0 ] || echo "[$(date '+%F %T')] 【DNS】smartdns 配置未完成（详见上方日志，探针会继续兜底）" >>"$LOG"
+else
+    echo "[$(date '+%F %T')] 【DNS】未找到 $SD_RESTORE，跳过 smartdns 配置" >>"$LOG"
+fi
+
+exit 0

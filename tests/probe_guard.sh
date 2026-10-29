@@ -10,10 +10,11 @@
 # 三个调用点的相对顺序（guard 必须排在前置检查和 probe_tick 之前）。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-G="$REPO/files/usr/sbin/crowdsec-guard.sh"
-RC="$REPO/files/etc/rc.local"
-PR="$REPO/files/usr/sbin/crowdsec-lxc-probe.sh"
-IN="$REPO/files/etc/init.d/crowdsec-lxc-probe"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+G="$REPO/$FILES_DIR/usr/sbin/crowdsec-guard.sh"
+RC="$REPO/$FILES_DIR/etc/rc.local"
+PR="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh"
+IN="$REPO/$FILES_DIR/etc/init.d/crowdsec-lxc-probe"
 B24="$REPO/x86-64/build24.sh"
 B25="$REPO/x86-64/build25.sh"
 # 本机 busybox-w32 下 $TMPDIR 为空时 mktemp 的模板会解析成空串，TMPD 变成空，

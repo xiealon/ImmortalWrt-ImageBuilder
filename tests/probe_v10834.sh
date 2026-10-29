@@ -6,7 +6,8 @@
 #   ④ ip link add 失败时不许写 interface（写个指向不存在设备的接口更糟）
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 
 R=0
 ck() {

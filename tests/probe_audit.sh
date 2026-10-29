@@ -9,8 +9,9 @@
 # 但规则可能已经不生效。所以再加一层 sha：和上次写的那份逐字节比。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
-PR="$REPO/files/usr/sbin/crowdsec-lxc-probe.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
+PR="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh"
 BS_C="$REPO/tests/.r19.body.$$"
 grep -v '^[[:space:]]*#' "$BS" > "$BS_C" || { echo "FATAL: 无法生成活代码副本"; exit 2; }
 PR_C="$REPO/tests/.r19.probe.$$"

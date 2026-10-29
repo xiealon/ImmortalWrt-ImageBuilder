@@ -12,8 +12,9 @@
 #      sysupgrade 保留」这种最典型的失效它永远通过 → 永远不重签 → 干等 60 秒软失败。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
-PR="$REPO/files/usr/sbin/crowdsec-lxc-probe.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
+PR="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh"
 R=0
 ck() { if [ "$2" = "$3" ]; then echo "PASS: $1"; else echo "FAIL: $1 got=[$2] want=[$3]"; R=$((R+1)); fi; }
 body() {

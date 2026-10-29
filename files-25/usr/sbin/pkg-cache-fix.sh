@@ -1,0 +1,188 @@
+#!/bin/sh
+# pkg-cache-fix.sh — 本地包库修复：挂源 + 铺索引
+#
+# 【顺序写死，不能颠倒】
+#   ① resolve  找到真正可用的包库目录（/rom 优先）
+#   ② feed     在源配置里写一条指向它的 file:// 行（且只留一条）
+#   ③ index    把索引铺到 opkg 的 lists 目录
+#   ④ 复检     三步都过了才返回 0
+#
+# 为什么是这个顺序：
+#   · 没有①，②不知道该指向哪（会把源写成 /rom 一个不存在的路径，opkg update 全线失败）；
+#   · 没有②，③铺好的索引没有任何源会去读（opkg 只加载配置里声明过的源）；
+#   · 没有③，②挂上去也是个空源 —— 按包名装必然
+#     "not available from any configured src"。
+#
+# 幂等：重复跑不会产生第二条源行、不会重复堆索引。探针冷却后可能反复调。
+#
+# 退出码：0 成功 / 1 失败
+
+set -u
+
+_pcf_lib=/usr/sbin/pkg-cache-lib.sh
+[ -f "$_pcf_lib" ] || _pcf_lib="$(dirname "$0")/pkg-cache-lib.sh"
+if [ ! -f "$_pcf_lib" ]; then
+    echo "找不到 pkg-cache-lib.sh" >&2
+    exit 1
+fi
+. "$_pcf_lib"
+
+# 【v.180.164】正常轮次的心跳节流。背景见 pkg-cache-lib.sh 的 pcl_log_q 注释：
+# guard 每 60 秒调一次本脚本，若全程写 syslog 就是每分钟 4 条、一天 5760 条。
+# 改法：零信息量的「跳过了」走 pcl_log_q（只 stdout），syslog 只留
+# 一条每 _PCF_BEAT 秒的心跳 —— 没有心跳就完全看不出这条链路还在工作。
+# 真动作（挂源 / 铺索引 / 重建依赖表 / 任何失败）不受节流，立即写。
+_PCF_HB="${PKG_CACHE_HB:-/tmp/.pkgcache-fix.hb}"
+_PCF_BEAT="${PKG_CACHE_BEAT:-1800}"
+# 非数字会让下面的算术展开直接报错（set -u 配 dash/ash 无兜底），回落默认值。
+case "$_PCF_BEAT" in '' | *[!0-9]*) _PCF_BEAT=1800 ;; esac
+
+# 距上次心跳够久就记一笔并返回 0（该写 syslog）；否则返回 1（只走 stdout）。
+_pcf_beat() {
+    _pcf_now=$(date +%s 2>/dev/null)
+    case "$_pcf_now" in '' | *[!0-9]*) _pcf_now=0 ;; esac
+    [ "$_pcf_now" -gt 0 ] || return 1
+    _pcf_last=$(cat "$_PCF_HB" 2>/dev/null)
+    case "$_pcf_last" in '' | *[!0-9]*) _pcf_last=0 ;; esac
+    if [ $((_pcf_now - _pcf_last)) -ge "$_PCF_BEAT" ]; then
+        printf '%s\n' "$_pcf_now" > "$_PCF_HB" 2>/dev/null
+        return 0
+    fi
+    return 1
+}
+
+if [ -z "$PKG_MGR" ]; then
+    pcl_log "既没有 apk 也没有 opkg，无法修复"
+    exit 1
+fi
+
+# ② 挂源：按前缀删掉旧行再追加，其余源一个字不碰
+_pcf_feed_ensure() {
+    _pcf_dir=$(dirname "$PKG_CACHE_CONF")
+    mkdir -p "$_pcf_dir" 2>/dev/null
+    _pcf_tmp="$PKG_CACHE_CONF.tmp.$$"
+    if [ -f "$PKG_CACHE_CONF" ]; then
+        # 不能用 `grep ... || return 1`：conf 里只有我们那一行时，过滤后无输出，
+        # grep 退出码就是 1，于是「挂源失败」—— 而这恰恰是最该成功的场景。
+        # 判据只看临时文件有没有产出，不看 grep 有没有匹配。
+        grep -vE "$PCR_PAT" "$PKG_CACHE_CONF" > "$_pcf_tmp" 2>/dev/null
+        [ -f "$_pcf_tmp" ] || return 1
+    else
+        : > "$_pcf_tmp" || return 1
+    fi
+    if [ "$PKG_MGR" = "apk" ]; then
+        # 【v.180.183】apk 侧只删不写（用户 2026-10-29 定）。
+        # 索引无签名，apk-tools 3.x 会跳过整条源，只换来一条 UNTRUSTED 警告；
+        # 装包走 pkg-cache-restore.sh 里的显式 --repository + --allow-untrusted。
+        # 上面的 grep -vE 已经把旧行滤掉，这里什么都不加就是「清干净」。
+        :
+    else
+        printf 'src/gz pkgcache file://%s\n' "$PKG_CACHE_ACT" >> "$_pcf_tmp" || return 1
+    fi
+    # 不能用 mv 覆盖：conf 若是单文件 bind mount 会报 Device or resource busy
+    if ! cat "$_pcf_tmp" > "$PKG_CACHE_CONF" 2>/dev/null; then
+        rm -f "$_pcf_tmp"
+        return 1
+    fi
+    rm -f "$_pcf_tmp"
+    return 0
+}
+
+# ③ 铺索引：绕过 opkg update（它会连所有远程源，离线时白等几十秒）
+_pcf_lists_ensure() {
+    if [ "$PKG_MGR" = "apk" ]; then
+        _pcf_adb="$PKG_CACHE_ACT/packages.adb"
+        [ -s "$_pcf_adb" ] && return 0
+        # apk 的索引没有 lists 中转层，只能原地重建 —— 源目录必须可写。
+        # 重建用的是包库自己那堆 apk，不联网、不依赖任何远程源。
+        if [ ! -w "$PKG_CACHE_ACT" ]; then
+            pcl_log "依赖查询表缺失，且源目录只读（$PKG_CACHE_ACT），只能刷带索引的固件"
+            return 1
+        fi
+        _pcf_n=$(ls "$PKG_CACHE_ACT"/*.apk 2>/dev/null | wc -l)
+        [ "$_pcf_n" -gt 0 ] || return 1
+        # 【v.180.141】必须用 mkndx，不能用 index。
+        # apk 有两个建索引的 applet，作用完全不同（apk-mkndx(8) / apk-index(8)）：
+        #   index -> v2 的 APKINDEX.tar.gz，只吃 tar.gz 包
+        #   mkndx -> apkv3 的 packages.adb，25.12 要的就是这个
+        # 用 index 读 ADB 包，每个包都会报 "file format not supported
+        # (in this applet)" —— 构建脚本栽在这上面，删过 114 个包。
+        # 仍然两个都试：万一某个版本的 apk 只有 index，也别直接放弃。
+        # --allow-untrusted 是全局选项，必须放在 applet 前面。
+        for _pcf_ap in mkndx index; do
+            if ( cd "$PKG_CACHE_ACT" && "$APK_BIN" --allow-untrusted "$_pcf_ap" -o packages.adb ./*.apk ) \
+                    >/dev/null 2>&1 && [ -s "$_pcf_adb" ]; then
+                pcl_log "已重建依赖查询表：$_pcf_adb（$_pcf_n 个包，apk $_pcf_ap）"
+                return 0
+            fi
+        done
+        pcl_log "依赖查询表重建失败（apk index 退出非 0）"
+        return 1
+    fi
+    _pcf_lists=$(pcl_lists_dir)
+    mkdir -p "$_pcf_lists" 2>/dev/null || return 1
+    # 落盘名必须是源名本身（pkgcache），不是 pkgcache_Packages ——
+    # opkg 按 `src/gz <名字>` 的名字去 lists_dir 找文件。
+    cp -f "$PKG_CACHE_ACT/Packages" "$_pcf_lists/pkgcache" 2>/dev/null || return 1
+    # 验签开着时 opkg 按 <名字>.sig 找签名，找不到会丢弃整份索引
+    if [ -f "$PKG_CACHE_ACT/Packages.sig" ]; then
+        cp -f "$PKG_CACHE_ACT/Packages.sig" "$_pcf_lists/pkgcache.sig" 2>/dev/null
+    fi
+    return 0
+}
+
+# ① resolve
+if ! pcl_resolve; then
+    pcl_log "包库目录不可用：$PKG_CACHE_RO 与 $PKG_CACHE 都没有 $PKG_IDX"
+    exit 1
+fi
+pcl_log_q "包库目录：$PKG_CACHE_ACT"
+
+# ② feed
+if pcl_feed_ok; then
+    # 【v.180.183】apk 侧的「健康」= 配置里没有本地源行（见 pkg-cache-lib.sh 说明）。
+    if [ "$PKG_MGR" = "apk" ]; then
+        pcl_log_q "源已清理（apk 侧不挂本地源），跳过"
+    else
+        pcl_log_q "源已正确（file://$PKG_CACHE_ACT），跳过"
+    fi
+else
+    _pcf_feed_ensure || {
+        pcl_log "源配置整理失败：$PKG_CACHE_CONF 不可写"
+        exit 1
+    }
+    if [ "$PKG_MGR" = "apk" ]; then
+        pcl_log "已摘除本地源（索引无签名，apk 会跳过它并刷 UNTRUSTED 警告）；装包走显式 --repository"
+    else
+        pcl_log "已挂载本地源：file://$PKG_CACHE_ACT"
+    fi
+fi
+
+# ③ index
+if pcl_lists_ok; then
+    # 【v.180.165】apk 没有 lists 中转层，索引就是源目录里的 packages.adb；
+    # 原先一律打印 /var/opkg-lists/pkgcache，25.12 上那条路径根本不存在。
+    if [ "$PKG_MGR" = "apk" ]; then
+        pcl_log_q "索引已在位（$PKG_CACHE_ACT/packages.adb），跳过"
+    else
+        pcl_log_q "索引已在位（$(pcl_lists_dir)/pkgcache），跳过"
+    fi
+else
+    if _pcf_lists_ensure; then
+        pcl_log "索引已铺设：$(pcl_lists_dir)/pkgcache"
+    else
+        pcl_log "索引铺设失败（源仍可用，可改走 opkg update 补救）"
+    fi
+fi
+
+# ④ 复检
+if pcl_feed_ok && pcl_lists_ok; then
+    if _pcf_beat; then
+        pcl_log "修复完成"
+    else
+        pcl_log_q "修复完成"
+    fi
+    exit 0
+fi
+pcl_log "修复后复检未通过"
+exit 1

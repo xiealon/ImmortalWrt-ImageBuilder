@@ -5,7 +5,8 @@
 #   ③ 机制化：build_ 里每个固定 uci key，verify_ 必须读过 —— 以后加字段漏验，这里直接红
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 
 R=0
 ck() {

@@ -3,8 +3,9 @@
 # 背景：_ensure_lxc_auto 原来只在 build_ct_boot 里被调到，而 build_ct_boot 只在
 #       「容器没跑」时才执行。于是「容器跑着 + 配置空了」这种现场完全静默。
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
-BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
-G="$REPO/files/usr/sbin/crowdsec-guard.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
+G="$REPO/$FILES_DIR/usr/sbin/crowdsec-guard.sh"
 R=0
 ck() { if [ "$2" = "$3" ]; then echo "PASS: $1"; else echo "FAIL: $1 got=[$2] want=[$3]"; R=$((R+1)); fi; }
 
@@ -54,7 +55,7 @@ ck "R22.18 开机步仍兜一层（lxc_auto 节点被跳过也能开机）" \
 ck "R22.19 /etc/config/lxc-auto 仍不进 GUARD_FILES（/rom 是注释模板）" \
    "$(sed -n '/^GUARD_FILES=/,/^}\"/p' "$G" | grep -c '^/etc/config/lxc-auto$')" "0"
 ck "R22.20 首启 uci-defaults 仍然写这一段" \
-   "$(grep -c 'lxc-auto.@container\[-1\].name=$_LXC_NAME' "$REPO/files/etc/uci-defaults/98-lxc-auto.sh")" "1"
+   "$(grep -c 'lxc-auto.@container\[-1\].name=$_LXC_NAME' "$REPO/$FILES_DIR/etc/uci-defaults/98-lxc-auto.sh")" "1"
 ck "R22.21 服务脚本路径默认仍是 /etc/init.d/lxc-auto" \
    "$(grep -c '^LXC_AUTO_INIT="\${CS_LXC_AUTO_INIT:-/etc/init.d/lxc-auto}"$' "$BS")" "1"
 ck "R22.22 配置文件路径默认仍是 /etc/config/lxc-auto" \

@@ -9,7 +9,8 @@
 # 不是它的任何一个选项值。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 # 只含活代码的副本：整行注释（行首可有空白 + #）不算命中。
 # 注释里提到某关键字（例如记录「曾经 disable lxc-auto」）不该被断言当成
 # 「代码里在做这件事」，否则断言会假红或假绿。断言一律 grep 这份副本。
@@ -114,7 +115,7 @@ echo "== 10 网络基线模式：不装 Crowdsec 也要配好网络 =="
 # 网关 / DNS 已经写进 /etc/config/custom_router_*.txt，消费者是 bootstrap 的 PREP 组。
 # 老逻辑两道门都把它挡死：rc.local 的「无镜像且无 rootfs → exit 0」，以及 bootstrap
 # 自己的同款判定。结果是用户填的地址永不生效，固件停在默认 192.168.1.1。
-RC="$REPO/files/etc/rc.local"
+RC="$REPO/$FILES_DIR/etc/rc.local"
 ck "R15.1 rc.local 无镜像时不再直接 exit" \
    "$(grep -c '无镜像且无 rootfs，跳过引导' "$RC")" "0"
 ck "R15.2 rc.local 无镜像时切 --net-only" \
@@ -170,11 +171,11 @@ ck "R15.6m ct_boot 的 return 1 恰好 4 处（启动链缺失×2 / cgroup 不�
 # 同一判断不能有两套标准：bootstrap 升级成按列比之后，init.d/lxc-auto 的 boot()
 # 若还留着裸路径 grep，等于开一条后门 —— 那条只看「路径上有东西」。
 ck "R15.6n init.d/lxc-auto 的 cgroup 判据按列比（判断+回读=2）" \
-   "$(grep -cF '$2=="/sys/fs/cgroup/systemd" && $3=="cgroup"' "$REPO/files/etc/init.d/lxc-auto")" "2"
+   "$(grep -cF '$2=="/sys/fs/cgroup/systemd" && $3=="cgroup"' "$REPO/$FILES_DIR/etc/init.d/lxc-auto")" "2"
 ck "R15.6o init.d/lxc-auto 不再用裸路径 grep" \
-   "$(grep -c 'grep -qE' "$REPO/files/etc/init.d/lxc-auto")" "0"
+   "$(grep -c 'grep -qE' "$REPO/$FILES_DIR/etc/init.d/lxc-auto")" "0"
 ck "R15.6p init.d/lxc-auto 挂载后回读失败要留痕" \
-   "$(grep -c 'cgroup systemd 层级挂载后回读失败' "$REPO/files/etc/init.d/lxc-auto")" "1"
+   "$(grep -c 'cgroup systemd 层级挂载后回读失败' "$REPO/$FILES_DIR/etc/init.d/lxc-auto")" "1"
 # 缺文件判过：原来 `-f service || continue` 让「容器里没有 crowdsec」也算自启就绪。
 ck "R15.6t 缺 crowdsec.service 判不符（不再 continue）" \
    "$(sed -n '/^verify_sub_ct_bootlink() {/,/^}/p' "$BS_C" | grep -c '容器内缺 crowdsec.service')" "1"
@@ -255,9 +256,9 @@ ck "R15.15b 能补写 /etc/config/lxc-auto" \
 # v.108.9 起配置重新固化进镜像：workflow 不再把 custom/ 盖在 files/etc/config 上
 # （Docker bind mount 会整体遮蔽该目录），改成挂到 immortalwrt/custom 再由构建脚本拷入。
 ck "R15.15c 固化的 files/etc/config/lxc-auto 存在" \
-   "$([ -f "$REPO/files/etc/config/lxc-auto" ] && echo yes || echo no)" "yes"
+   "$([ -f "$REPO/$FILES_DIR/etc/config/lxc-auto" ] && echo yes || echo no)" "yes"
 ck "R15.15d 固化配置里容器名是 ubuntu" \
-   "$(grep -c "^	option name 'ubuntu'$" "$REPO/files/etc/config/lxc-auto")" "1"
+   "$(grep -c "^	option name 'ubuntu'$" "$REPO/$FILES_DIR/etc/config/lxc-auto")" "1"
 # 挂载点必须避开 files/etc/config，否则上面那份文件照样进不了镜像
 ck "R15.15e workflow 不把 custom 挂到 files/etc/config" \
    "$(grep -c 'custom:/home/build/immortalwrt/files/etc/config' "$REPO/.github/workflows/build-x86-64-24.10.x.yml" "$REPO/.github/workflows/build-x86-64-25.12.x.yml" | awk -F: '{s+=$2} END{print s+0}')" "0"
@@ -267,7 +268,7 @@ ck "R15.15g build25.sh 把 custom/* 拷进 files/etc/config" \
    "$(grep -c 'cp -f "$_cf" /home/build/immortalwrt/files/etc/config/' "$REPO/x86-64/build25.sh")" "1"
 # uci-defaults 保留为兜底（幂等：名字已对就 exit 0，不动固化好的配置）
 ck "R15.15h uci-defaults 兜底脚本仍在" \
-   "$(grep -c 'lxc-auto.@container\[-1\].name=$_LXC_NAME' "$REPO/files/etc/uci-defaults/98-lxc-auto.sh")" "1"
+   "$(grep -c 'lxc-auto.@container\[-1\].name=$_LXC_NAME' "$REPO/$FILES_DIR/etc/uci-defaults/98-lxc-auto.sh")" "1"
 ck "R15.15i build24.sh 给 uci-defaults 下脚本补执行位" \
    "$(grep -c 'files/etc/uci-defaults/\*\.sh' "$REPO/x86-64/build24.sh")" "1"
 ck "R15.15j build25.sh 给 uci-defaults 下脚本补执行位" \
@@ -276,8 +277,8 @@ ck "R15.15j build25.sh 给 uci-defaults 下脚本补执行位" \
 # 改名时漏一处就是「服务拉错容器」或「两票互相覆盖」，三个名字必须收敛成一个。
 ck "R15.15k 三处容器名一致" \
    "$({ grep -o 'LXC_NAME:-[A-Za-z0-9_-]*' "$BS_C" | sed 's/.*:-//'
-        sed -n "s/.*name=\([a-zA-Z0-9_-]*\)\"$/\\1/p" "$REPO/files/etc/uci-defaults/98-lxc-auto.sh"
-        sed -n "s/^[[:space:]]*option name '\(.*\)'$/\\1/p" "$REPO/files/etc/config/lxc-auto"
+        sed -n "s/.*name=\([a-zA-Z0-9_-]*\)\"$/\\1/p" "$REPO/$FILES_DIR/etc/uci-defaults/98-lxc-auto.sh"
+        sed -n "s/^[[:space:]]*option name '\(.*\)'$/\\1/p" "$REPO/$FILES_DIR/etc/config/lxc-auto"
       } | sort -u | wc -l | tr -d ' ')" "1"
 # custom/ 的拷贝排在 make image 之前，谁拷谁赢：注入的 lxc-auto 能覆盖固化配置，
 # 把容器名改掉且现场毫无报错。两个构建脚本都必须显式跳过它。
@@ -290,7 +291,7 @@ ck "R15.15m build25.sh 跳过 custom/lxc-auto" \
 ck "R15.15n _ensure_lxc_auto 清除注入的 command" \
    "$(sed -n '/^_ensure_lxc_auto() {/,/^}/p' "$BS_C" | grep -c 'delete lxc-auto.@container\[0\].command')" "1"
 ck "R15.15o 服务端确实会执行 command（清理的理由）" \
-   "$(grep -c 'config_list_foreach "$cfg" command run_command' "$REPO/files/etc/init.d/lxc-auto")" "1"
+   "$(grep -c 'config_list_foreach "$cfg" command run_command' "$REPO/$FILES_DIR/etc/init.d/lxc-auto")" "1"
 ck "R15.15p _ensure_lxc_auto 校正 timeout" \
    "$(sed -n '/^_ensure_lxc_auto() {/,/^}/p' "$BS_C" | grep -c 'timeout 已校正为 300')" "1"
 ck "R15.15q 多余段只告警不删" \
@@ -344,7 +345,7 @@ ck "R15.23 _mount_systemd_cgroup 回读 /proc/mounts" \
 ck "R15.24 build_cgroup_mount 不吞返回值" \
    "$(sed -n '/^build_cgroup_mount() {/,/^}/p' "$BS_C" | grep -c 'return \$?')" "1"
 ck "R15.25 lxc-auto boot 判到选项层（name=systemd）" \
-   "$(grep -cF 'name=systemd(,|$)' "$REPO/files/etc/init.d/lxc-auto" | awk '{print ($1>=1)?"1":"0"}')" "1"
+   "$(grep -cF 'name=systemd(,|$)' "$REPO/$FILES_DIR/etc/init.d/lxc-auto" | awk '{print ($1>=1)?"1":"0"}')" "1"
 # hybrid 宿主（cgroup v1 + v2 都在）曾被「只要 cgroup2 存在就判通过」放行，
 # systemd 子树永远不挂，容器内 systemd 起不来。只有纯 unified 才允许跳过。
 # 判据落到 fstype 列（$3）：v2 在且 v1 不在才算纯 v2。旧写法 grep 'type cgroup'
@@ -352,15 +353,15 @@ ck "R15.25 lxc-auto boot 判到选项层（name=systemd）" \
 ck "R15.26 verify_cgroup_mount 按 fstype 判纯 cgroup2，不单凭 cgroup2 存在放行" \
    "$(sed -n '/^verify_cgroup_mount() {/,/^}/p' "$BS_C" | grep -cF '$3=="cgroup"{v1=1}')" "1"
 ck "R15.27 lxc-auto start 失败留痕" \
-   "$(grep -c 'lxc-auto: 容器' "$REPO/files/etc/init.d/lxc-auto")" "1"
+   "$(grep -c 'lxc-auto: 容器' "$REPO/$FILES_DIR/etc/init.d/lxc-auto")" "1"
 # lxc-start 不带 -P 时按 /etc/lxc/lxc.conf 的 lxc.lxcpath 找容器；镜像里那份配置
 # 若没写 /srv/lxc，就会去 /var/lib/lxc 找不到、静默失败。脚本自己探一下更稳。
 ck "R15.28 lxc-auto 探测 lxcpath" \
-   "$(grep -c '\-P /srv/lxc' "$REPO/files/etc/init.d/lxc-auto" | awk '{print ($1>=1)?"1":"0"}')" "1"
+   "$(grep -c '\-P /srv/lxc' "$REPO/$FILES_DIR/etc/init.d/lxc-auto" | awk '{print ($1>=1)?"1":"0"}')" "1"
 # 其他容器（用户自己建的）只会写 lxc.start.auto=1，config_foreach 看不到，
 # 认这个标记的是 lxc-autostart。start() 末尾必须带上它，否则别人的容器永远不自启。
 ck "R15.29 lxc-auto 兼容 lxc.start.auto" \
-   "$(grep -c 'lxc-autostart -a' "$REPO/files/etc/init.d/lxc-auto")" "1"
+   "$(grep -c 'lxc-autostart -a' "$REPO/$FILES_DIR/etc/init.d/lxc-auto")" "1"
 
 echo "== 11 编译期锁死：容器恒内置，没有开关可关 =="
 # 只要「能选择不内置」这个口子还在，就会有人选它，然后得到一个「填了 Router IP

@@ -14,7 +14,8 @@
 #   E. 状态键不被 _probe_load 的贪婪 sed 串改。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-PR="$REPO/files/usr/sbin/crowdsec-lxc-probe.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+PR="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh"
 
 R=0
 ck() {

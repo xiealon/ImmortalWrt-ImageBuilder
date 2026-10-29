@@ -16,7 +16,8 @@
 # 就会变成「坏→丢层→好→再坏→再丢」的周期性抹盘。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-BS="$REPO/files/usr/sbin/crowdsec-lxc-bootstrap.sh"
+FILES_DIR="${CS_FILES_DIR:-files-24}"
+BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 # 只含活代码的副本：整行注释不算命中（同 probe_last_pull_semantics 的 cg 口径）
 BS_C="$REPO/tests/.r34.body.$$"
 grep -v '^[[:space:]]*#' "$BS" > "$BS_C"
@@ -262,10 +263,10 @@ _v() { sed -n 's/^SCRIPT_VER="\(.*\)"$/\1/p' "$1" | head -n1; }
 #   grep -H -m1 '^SCRIPT_VER=' /usr/sbin/crowdsec-*.sh /etc/rc.local \
 #        /etc/init.d/crowdsec-lxc-probe
 _VER_BP=$(_v "$BS")
-_VER_PR=$(_v "$REPO/files/usr/sbin/crowdsec-lxc-probe.sh")
-_VER_GD=$(_v "$REPO/files/usr/sbin/crowdsec-guard.sh")
-_VER_RC=$(_v "$REPO/files/etc/rc.local")
-_VER_IN=$(_v "$REPO/files/etc/init.d/crowdsec-lxc-probe")
+_VER_PR=$(_v "$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh")
+_VER_GD=$(_v "$REPO/$FILES_DIR/usr/sbin/crowdsec-guard.sh")
+_VER_RC=$(_v "$REPO/$FILES_DIR/etc/rc.local")
+_VER_IN=$(_v "$REPO/$FILES_DIR/etc/init.d/crowdsec-lxc-probe")
 ck "R34.51 五个文件版本号一致（bootstrap/probe/guard/rc.local/init.d）" \
    "$_VER_BP|$_VER_PR|$_VER_GD|$_VER_RC|$_VER_IN" \
    "$_VER_BP|$_VER_BP|$_VER_BP|$_VER_BP|$_VER_BP"

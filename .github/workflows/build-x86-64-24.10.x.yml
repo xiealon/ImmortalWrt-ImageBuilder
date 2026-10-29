@@ -186,9 +186,9 @@ jobs:
           # 极简 rootfs 阶段：容器能不能起来，全看这几个 shell 脚本。
           # 语法错误拖到 make image 之后才炸要等一小时，这里 10 秒就拦住。
           for f in shell/prepare-crowdsec-minimal.sh \
-                   files/usr/sbin/crowdsec-lxc-bootstrap.sh \
-                   files/etc/rc.local \
-                   files/etc/uci-defaults/99-custom.sh; do
+                   files-24/usr/sbin/crowdsec-lxc-bootstrap.sh \
+                   files-24/etc/rc.local \
+                   files-24/etc/uci-defaults/99-custom.sh; do
             bash -n "$f" || { echo "::error::$f 语法错误"; exit 1; }
           done
           if command -v shellcheck >/dev/null 2>&1; then
@@ -213,7 +213,7 @@ jobs:
         # 重新出包（那边没有 schedule，只能手动触发）。
         run: |
           set -uo pipefail
-          OUT_DIR="files/etc/crowdsec"
+          OUT_DIR="files-24/etc/crowdsec"
           OUT="$OUT_DIR/lxc-crowdsec.tar.gz"
           mkdir -p "$OUT_DIR"
           SHORT="${GITHUB_SHA:0:7}"
@@ -336,7 +336,7 @@ jobs:
           docker run --rm -i \
             --user root \
             -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
-            -v "${{ github.workspace }}/files:/home/build/immortalwrt/files" \
+            -v "${{ github.workspace }}/files-24:/home/build/immortalwrt/files" \
             -v "${{ github.workspace }}/custom:/home/build/immortalwrt/custom" \
             -v "${{ github.workspace }}/x86-64/imm.config:/home/build/immortalwrt/.config" \
             -v "${{ github.workspace }}/shell:/home/build/immortalwrt/shell" \

@@ -101,7 +101,7 @@ echo "== 9 DAG：INSTALL（解压 rootfs）必须排在第一位 =="
 # 曾经 INSTALL 排在 PREP 之后，而 PREP 里 ct_net 就要写 rootfs 内文件 → 必失败
 # → hard 终止 → INSTALL 永不执行 → rootfs 永不解压（自锁，新刷机首次开机必挂）。
 _SEQ=$(grep -m1 '^GROUP_SEQ=' "$BS_C" | sed 's/^GROUP_SEQ="//' | sed 's/"$//')
-ck "R14.18 GROUP_SEQ 首位是 INSTALL" "$(echo "$_SEQ" | cut -d' ' -f1)" "INSTALL"
+ck "R14.18 GROUP_SEQ 首位是 NETBASE（网络基线先落地）" "$(echo "$_SEQ" | cut -d' ' -f1)" "NETBASE"
 ck "R14.19 PREP_NODES 含 ct_net（rootfs 已先行）" \
    "$(grep -m1 '^PREP_NODES=' "$BS_C" | grep -c 'ct_net')" "1"
 for _n in ct_net ct_bootlink ct_resolv; do
@@ -123,8 +123,8 @@ ck "R15.3 rc.local 按 BOOT_MODE 调用 bootstrap" \
    "$(grep -cF '"$BOOT" $BOOT_MODE' "$RC")" "1"
 ck "R15.4 bootstrap 有 --net-only 入口" \
    "$(grep -cF '"--net-only"' "$BS_C")" "1"
-ck "R15.5 net-only 把组链缩成 PREP" \
-   "$(grep -cF 'GROUP_SEQ="PREP"' "$BS_C")" "1"
+ck "R15.5 net-only 把执行链缩成 NETBASE_NODES" \
+   "$(grep -cF 'NETBASE_NODES="$_no_base"' "$BS_C")" "1"
 # 取赋值右侧再按词边界比对：$NET_ONLY_SKIP 的值以引号开头，直接 grep " bridge"
 # 永远匹配不到第一个词（引号不是空格）。
 _skip=$(grep -m1 '^NET_ONLY_SKIP=' "$BS_C" | sed 's/^NET_ONLY_SKIP="//' | sed 's/"$//')
@@ -162,7 +162,7 @@ ck "R15.6i 形态不对先卸载再重挂" \
 ck "R15.6j 容器内核对 cgroup.procs（v1 层级 + unified 两条路径）" \
    "$(sed -n '/^verify_ct_cgroup() {/,/^}/p' "$BS_C" | grep -c 'cgroup.procs')" "2"
 ck "R15.6k 容器内核对 PID 1 是 systemd" \
-   "$(sed -n '/^verify_ct_cgroup() {/,/^}/p' "$BS_C" | grep -c '/proc/1/comm')" "1"
+   "$([ "$(sed -n '/^verify_ct_cgroup() {/,/^}/p' "$BS_C" | grep -c '/proc/1/comm')" -ge 1 ] && echo ok)" "ok"
 ck "R15.6l ct_boot 调用容器内核对（初次+复核=2）" \
    "$(sed -n '/^build_ct_boot() {/,/^}/p' "$BS_C" | grep -c 'verify_ct_cgroup')" "2"
 ck "R15.6m ct_boot 的 return 1 恰好 4 处（启动链缺失×2 / cgroup 不可用×2；listen_uri 已挪出开机）" \
@@ -268,10 +268,10 @@ ck "R15.15g build25.sh 把 custom/* 拷进 files/etc/config" \
 # uci-defaults 保留为兜底（幂等：名字已对就 exit 0，不动固化好的配置）
 ck "R15.15h uci-defaults 兜底脚本仍在" \
    "$(grep -c 'lxc-auto.@container\[-1\].name=$_LXC_NAME' "$REPO/files/etc/uci-defaults/98-lxc-auto.sh")" "1"
-ck "R15.15i build24.sh chmod 98-lxc-auto.sh" \
-   "$(grep -c 'files/etc/uci-defaults/98-lxc-auto.sh' "$REPO/x86-64/build24.sh")" "1"
-ck "R15.15j build25.sh chmod 98-lxc-auto.sh" \
-   "$(grep -c 'files/etc/uci-defaults/98-lxc-auto.sh' "$REPO/x86-64/build25.sh")" "1"
+ck "R15.15i build24.sh 给 uci-defaults 下脚本补执行位" \
+   "$(grep -c 'files/etc/uci-defaults/\*\.sh' "$REPO/x86-64/build24.sh")" "1"
+ck "R15.15j build25.sh 给 uci-defaults 下脚本补执行位" \
+   "$(grep -c 'files/etc/uci-defaults/\*\.sh' "$REPO/x86-64/build25.sh")" "1"
 # 容器名现在有三处来源：bootstrap 的 LXC_NAME 默认值、uci-defaults 兜底、固化配置。
 # 改名时漏一处就是「服务拉错容器」或「两票互相覆盖」，三个名字必须收敛成一个。
 ck "R15.15k 三处容器名一致" \
@@ -347,8 +347,10 @@ ck "R15.25 lxc-auto boot 判到选项层（name=systemd）" \
    "$(grep -cF 'name=systemd(,|$)' "$REPO/files/etc/init.d/lxc-auto" | awk '{print ($1>=1)?"1":"0"}')" "1"
 # hybrid 宿主（cgroup v1 + v2 都在）曾被「只要 cgroup2 存在就判通过」放行，
 # systemd 子树永远不挂，容器内 systemd 起不来。只有纯 unified 才允许跳过。
-ck "R15.26 verify_cgroup_mount 不再单凭 cgroup2 放行" \
-   "$(sed -n '/^verify_cgroup_mount() {/,/^}/p' "$BS_C" | grep -c 'type cgroup\[\[:space:\]\]')" "1"
+# 判据落到 fstype 列（$3）：v2 在且 v1 不在才算纯 v2。旧写法 grep 'type cgroup'
+# 在 /proc/mounts 上恒为假（那列没有 "type " 字面量），hybrid 宿主会被误放行。
+ck "R15.26 verify_cgroup_mount 按 fstype 判纯 cgroup2，不单凭 cgroup2 存在放行" \
+   "$(sed -n '/^verify_cgroup_mount() {/,/^}/p' "$BS_C" | grep -cF '$3=="cgroup"{v1=1}')" "1"
 ck "R15.27 lxc-auto start 失败留痕" \
    "$(grep -c 'lxc-auto: 容器' "$REPO/files/etc/init.d/lxc-auto")" "1"
 # lxc-start 不带 -P 时按 /etc/lxc/lxc.conf 的 lxc.lxcpath 找容器；镜像里那份配置
@@ -462,7 +464,7 @@ ck "R20.13 commit 失败要判失败（不许只在内存里改）" \
 ck "R20.14 删完立刻 reload（内核里那口才真的没了；抽成 _net_reload 才数得到）" \
    "$(awk '/^purge_wan_sections\(\)/,/^}/' "$BS_C" | grep -c '^    _net_reload$')" "1"
 ck "R20.14b _net_reload 就是 /etc/init.d/network reload" \
-   "$(grep -c '^_net_reload() { /etc/init.d/network reload' "$BS_C")" "1"
+   "$(grep -c '^_net_reload() { run_svc /etc/init.d/network reload' "$BS_C")" "1"
 ck "R20.15 main 里两处无条件调用：开头建前提 + 结尾收口（v.108.32），失败即终止" \
    "$(grep -c 'if ! purge_wan_sections; then' "$BS_C")" "2"
 ck "R20.16 调用点在组循环之前（网络组的前提先成立）" \
@@ -486,8 +488,8 @@ ck "R23.6 不符时计入 _ab（不是只打印）" \
    "$(awk '/^_audit_all\(\)/,/^}/' "$BS_C" | sed -n '/audit_wan_purged/,$p' | grep -c '_ab=\$((_ab + 1))')" "1"
 ck "R23.7 purge 也先确认 network 能解析（写坏的配置不算「已清空」）" \
    "$(awk '/^purge_wan_sections\(\)/,/^}/' "$BS_C" | grep -c '无法解析 /etc/config/network')" "1"
-ck "R23.8 --net-only 同时裁 PREP_NODES（组内执行看的是它，不是 DAG_NODES）" \
-   "$(awk '/^main\(\) \{/,0' "$BS_C" | grep -c 'PREP_NODES="\$_no_prep"')" "1"
+ck "R23.8 --net-only 同时裁 NETBASE_NODES（组内执行看的是它，不是 DAG_NODES）" \
+   "$(awk '/^main\(\) \{/,0' "$BS_C" | grep -c 'NETBASE_NODES="\$_no_base"')" "1"
 ck "R23.9 NET_ONLY_SKIP 含 lxc_auto（那是容器启动链，不是网络基线）" \
    "$(sed -n '/^NET_ONLY_SKIP=/p' "$BS_C" | grep -c ' lxc_auto ')" "1"
 

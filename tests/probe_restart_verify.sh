@@ -268,6 +268,8 @@ ck "R11.29 宿主外部命令无遗漏（uci/lxc/ip/mount/tar/wget/pgrep 全已�
    "$(awk '
 /^[[:space:]]*#/ { next }
 { line=$0; gsub(/"[^"]*"/,"",line) }
+# for _lx_c in lxc-start lxc-stop ... —— 列举命令名不是调用，别算漏包
+line ~ /^[[:space:]]*for [^;]* in / { next }
 line ~ /run |run_svc |run_tar |timeout |command -v/ { next }
 line ~ /(^|[^[:alnum:]_])(umount|mount|wget|pgrep) / { c++; next }
 line ~ /(^|[^[:alnum:]_])uci (-q )?(show|get|set|commit|del|delete|add)/ { c++; next }

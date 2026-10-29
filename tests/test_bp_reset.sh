@@ -49,30 +49,27 @@ run_case() {
 # 造一个只含我们需要的函数定义的临时文件
 TMPD=$(mktemp -d "${TMPDIR:-/tmp}/reset.XXXXXX")
 FUNCS="$TMPD/funcs.sh"
-python3 - "$BS" > "$FUNCS" <<'PY'
-import sys, re
-src = open(sys.argv[1]).read().splitlines()
-want = {'_bs_clear_flags','_bs_flag_stats','_ipfwd_snapshot','_ipfwd_restore',
-        '_pending_report','_bs_on_exit','_bs_on_signal','_fail_count_inc',
-        '_bs_flag_set','_bs_flag_clear','_bs_flag_on','_bs_flag_tag',
-        '_bs_flag_count','_bs_flag_dump'}
-out=[]; i=0
-while i < len(src):
-    m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{', src[i])
-    if m and m.group(1) in want:
-        depth=0; j=i; buf=[]
-        while j < len(src):
-            buf.append(src[j]); depth += src[j].count('{') - src[j].count('}')
-            if depth <= 0: break
-            j += 1
-        out.append('\n'.join(buf)); i = j+1
-    else:
-        i += 1
-for l in src:
-    if re.match(r'^(DAG_NODES|GROUP_SEQ|STATE_DIR|REINSTALL_PENDING_FILE|REINSTALL_FAIL_FILE|_FLAG_TS_FMT)=', l):
-        out.append(l)
-print('\n\n'.join(out))
-PY
+# 设备上没有 python3（ImmortalWrt 默认不带），改用 awk 抽函数定义。
+# 抽法：函数行起，按花括号深度配对，深度回到 0 即结束；顺带把几个顶层变量带出来。
+awk '
+BEGIN {
+    split("_bs_clear_flags _bs_flag_stats _ipfwd_snapshot _ipfwd_restore _pending_report _bs_on_exit _bs_on_signal _fail_count_inc _bs_flag_set _bs_flag_clear _bs_flag_on _bs_flag_tag _bs_flag_count _bs_flag_dump", a, " ")
+    for (i in a) want[a[i]] = 1
+}
+/^(DAG_NODES|GROUP_SEQ|STATE_DIR|REINSTALL_PENDING_FILE|REINSTALL_FAIL_FILE|_FLAG_TS_FMT)=/ { print; next }
+/^[A-Za-z_][A-Za-z0-9_]*\(\)[[:space:]]*\{/ {
+    fn = $0
+    sub(/\(\).*/, "", fn)
+    if (fn in want) { inside = 1; depth = 0 } else { inside = 0 }
+}
+inside {
+    print
+    depth += gsub(/\{/, "{")
+    depth -= gsub(/\}/, "}")
+    if (depth <= 0) inside = 0
+}
+' "$BS" > "$FUNCS"
+[ -s "$FUNCS" ] || { echo "FATAL: 抽不到函数定义"; exit 1; }
 
 LOG_OUT="$TMPD/log"
 cat > "$TMPD/t1.sh" <<'EOS'
@@ -102,8 +99,8 @@ eq "R1.1 置位前的快照正确" "$_before" "done=$Nd dirty=$Nd gset=$Ng built
 eq "R1.2 退出后全部归零"   "$_after"  "done=0 dirty=0 gset=0 built=0"
 # 三行：置位快照 / 逐项明细 / 已归零。v.99 多了「逐项」那一行（不然只知道个数、不知道是谁）
 eq "R1.3 日志记了三次（快照/逐项/归零）" "$(grep -c '\[恢复\]' "$LOG_OUT")" "3"
-eq "R1.4 逐项明细列出了所有已置位（29 done + 29 dirty + 8 gset）" \
-   "$(grep '\[恢复\] 逐项：' "$LOG_OUT" | grep -o '[A-Za-z_]*=[VBR]:' | wc -l | tr -d ' ')" "66"
+eq "R1.4 逐项明细列出了所有已置位（done + dirty + gset 全部）" \
+   "$(grep '\[恢复\] 逐项：' "$LOG_OUT" | grep -o '[A-Za-z_]*=[VBR]:' | wc -l | tr -d ' ')" "$((Nd * 2 + Ng))"
 eq "R1.5 逐项明细带分类前缀 V" \
    "$(grep -c 'GSET_PREP=V:' "$LOG_OUT")" "1"
 

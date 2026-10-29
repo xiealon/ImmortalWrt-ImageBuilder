@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-29.180.163"
+SCRIPT_VER="2026-10-29.180.164"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -1116,13 +1116,33 @@ _lxc_missing_deps() {
     [ -z "$_LXC_MISSING" ]
 }
 
+# 全量记账判据（v.180.164，C 方案）：/rom 里带过的 lxc 全家桶是否全在册。
+# 与 _lxc_missing_deps 并行，两条都要满足，各防一种故障：
+#   · _lxc_missing_deps  判「能不能跑」——五个核心 applet 在 + liblxc 能加载。
+#                        防「记账在、二进制被删」；但它看不见 snapshot / monitor /
+#                        usernsexec 这类非核心 applet（缺了照样能起容器）。
+#   · _lxc_missing_pkgs  判「在不在册」——含元包 lxc、liblxc、全部 applet。
+#                        防「整包被删」，这是 opkg remove --force-depends 的典型结果。
+# 枚举与判已装都委托 pkg-restore.sh --lxc-missing：那条与 --lxc 的恢复清单
+# 共用同一份枚举（_pr_lxc_names），不在这里再写一遍通配 —— 两处实现迟早漂移，
+# 加包时漏一处就是「判得出、装不回」。
+# 没有这个接口时保守放过（老固件退回 v.180.163 行为，不因缺接口而硬失败）。
+_lxc_missing_pkgs() {
+    [ -x /usr/sbin/pkg-restore.sh ] || return 0
+    _LXC_MISSING_PKGS=$(/usr/sbin/pkg-restore.sh --lxc-missing 2>/dev/null)
+    [ -z "$_LXC_MISSING_PKGS" ]
+}
+
 # 必备组件总闸门（v.180.102，v.180.157 收窄为只管 lxc）：lxc 五件套齐全返回 0，
 # 否则返回 1，缺失清单留在 _PKG_MISSING。只读不写，verify / build 共用。
 # 【v.180.157】smartdns 已整套移出 bootstrap（归 pkg-restore-smartdns.sh + 探针），
 # 本闸门恢复成「只守 lxc」—— 它的全部意义就是保证 pkg_base 之后容器起得来。
+# 【v.180.164】从「只判命令可用」扩成两条并行：见 _lxc_missing_deps 与 _lxc_missing_pkgs。
 _pkg_missing_all() {
     _PKG_MISSING=""
+    _LXC_MISSING_PKGS=""
     _lxc_missing_deps || _PKG_MISSING="$_LXC_MISSING"
+    _lxc_missing_pkgs || _PKG_MISSING="$_PKG_MISSING $_LXC_MISSING_PKGS"
     [ -z "$_PKG_MISSING" ]
 }
 
@@ -1495,8 +1515,10 @@ build_pkg_base() {
         return 0
     fi
     log "[PKG] 必备组件缺失：$_PKG_MISSING —— 先试只读基座 $ROMDIR"
-    # lxc：applet 是各自独立的包，必须扫 lxc-*.list 全量恢复，再补 liblxc 依赖树
-    if ! _lxc_missing_deps; then
+    # lxc：applet 是各自独立的包，必须扫 lxc-*.list 全量恢复，再补 liblxc 依赖树。
+    # 【v.180.164】全量记账缺（_LXC_MISSING_PKGS 非空）也走这条链：
+    #   _pr_lxc 对已装包逐个 _pr_pkg 跳过，幂等，不会因为多跑一次而重装东西。
+    if ! _lxc_missing_deps || [ -n "$_LXC_MISSING_PKGS" ]; then
         _rom_restore_lxc \
             || log "[PKG] 只读基座里没有 lxc 的安装清单（$ROMDIR/usr/lib/opkg/info/lxc-*.list）"
     fi

@@ -4,7 +4,10 @@
 # 为什么有这支脚本（用户 2026-10-29 定，判据取向见 crowdsec-lxc-probe.sh L219-231）：
 #   探针只做两件事 —— 探测 + 拉脚本，自己不动手装包。
 #   daed / ssrp / mosdns / clashoo 这四个应用不像 smartdns 那样接管 53，
-#   所以不判进程、不判端口，只判主程序包在不在册；缺了由本脚本装回。
+#   所以不判进程、不判端口，只判包在不在册；缺了由本脚本装回。
+#   【v.180.164】判定粒度从「主程序一个包」扩到「主程序 + 依赖内核 + LuCI 界面」：
+#   实测 opkg remove --force-depends clashoo 能一次删掉 44MB 内核而壳与 i18n 不动，
+#   结果是库在、界面在、功能全死。只盯主程序包名覆盖不到这种半损坏态。
 #   装包动作只写在这一处，探针里不出现任何 opkg/apk 调用 —— 两处实现迟早漂移。
 #
 # 用法：
@@ -39,15 +42,39 @@ set -u
 ROMDIR="${ROMDIR:-/rom}"
 _RESTORE="${RESTORE_BIN:-/usr/sbin/pkg-restore.sh}"
 
-# 应用清单。写固件里真实的包名，不是对外叫法：
-#   daed     → daed             eBPF 代理，主程序就是它自己
-#   ssrp     → luci-app-ssr-plus  26.x 的 ssr-plus 是 LuCI 应用，内核
-#                                 （xray-core / mihomo / sing-box）由它 Depends 拉。
-#                                 主程序被删时 Depends 里的内核多半还在，所以只判
-#                                 应用包能覆盖「界面没了/规则不生效」这个用户能感知的故障。
-#   mosdns   → mosdns
-#   clashoo  → clashoo          自带 mihomo 内核
-_PA_LIST="${CS_PROBE_APPS:-daed luci-app-ssr-plus mosdns clashoo}"
+# 应用清单。写固件里真实的包名，不是对外叫法。
+#
+# 【v.180.164】用户 2026-10-29 定：不只保护主程序，依赖内核和 LuCI 界面一起保护。
+# 起因是实测 opkg remove --force-depends clashoo 一次就把 44MB 的 mihomo 内核删干净，
+# 而 luci 壳与 i18n 完好 —— 库存在、界面在、功能全死，这种形态只看主程序包名不够。
+# 分组维护，每组三块：
+#   ① 主程序（内核跑在这个包里，或它本身就是服务）
+#   ② 依赖（内核 / geo 数据 / eBPF 运行时）—— 少一个都是「装了但起不来」
+#   ③ LuCI 界面（luci-app-* / luci-i18n-*）—— 少了用户看不见入口，等同于坏了
+#
+#   clashoo 组：内核就在主包里（control: Provides: mihomo, clash-meta，Installed-Size 46.5MB）
+#   daed 组：  eBPF 程序，vmlinux-btf 是运行时前提，缺了 daed 直接起不来
+#   mosdns 组：geo 数据包是规则来源，缺了 mosdns 空转
+#   ssrp 组：  26.x 的 ssr-plus 是 LuCI 应用，内核（xray-core / sing-box / 各类插件）
+#              由它 Depends 拉 —— 界面在、内核没了，这是最容易发生的半损坏态
+#
+# 门槛仍在 _pa_should：只有 /rom 侧留了痕迹（info/<包>.list 或包库里那份 ipk）
+# 才判「该有」。所以这张表可以照全量写，固件没带的包会显示「固件未带」而不是
+# 每轮触发一次装包 —— 不会把没选的应用强加给别的机器。
+_PA_CLASHOO="clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn"
+# vmlinux-btf 只在 24.10 存在裸名包。25.12 线的 BTF 由内核自带
+# （/sys/kernel/btf/vmlinux），run 包里那份叫 vmlinux-btf-6.12.79 且被
+# build25.sh 刻意排除（与内核版本强绑定，装错 daed 的 eBPF 校验过不去）。
+# 裸名在 25.12 固件里查不到 info/<包>.list，_pa_should 判「固件未带」自动跳过，
+# 所以这行在两条线上都安全，不需要构建期分流。
+_PA_DAED="daed daed-geoip daed-geosite vmlinux-btf luci-app-daed luci-i18n-daed-zh-cn"
+_PA_MOSDNS="mosdns v2ray-geoip v2ray-geosite luci-app-mosdns luci-i18n-mosdns-zh-cn"
+# ssrp 组在 25.12 线整个不装（apk-custom-packages.sh 里没有 luci-app-ssr-plus，
+# 也没有 trojan-plus / shadowsocksr-libev-*），整组会被判「固件未带」跳过。
+_PA_SSRP="luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn xray-core xray-plugin sing-box
+trojan-plus shadowsocksr-libev-ssr-redir shadowsocksr-libev-ssr-local
+shadowsocksr-libev-ssr-server"
+_PA_LIST="${CS_PROBE_APPS:-$_PA_CLASHOO $_PA_DAED $_PA_MOSDNS $_PA_SSRP}"
 
 log() { printf '[APP] %s\n' "$*"; }
 
@@ -104,7 +131,7 @@ _pa_list() {
         if _pa_should "$_pa_p"; then
             if _pa_installed "$_pa_p"; then _pa_s="在位"; else _pa_s="缺失"; fi
         fi
-        printf '%-22s %s\n' "$_pa_p" "$_pa_s"
+        printf '%-34s %s\n' "$_pa_p" "$_pa_s"
     done
     return 0
 }

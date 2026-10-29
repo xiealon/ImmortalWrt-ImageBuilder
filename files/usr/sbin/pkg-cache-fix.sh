@@ -27,6 +27,30 @@ if [ ! -f "$_pcf_lib" ]; then
 fi
 . "$_pcf_lib"
 
+# 【v.180.164】正常轮次的心跳节流。背景见 pkg-cache-lib.sh 的 pcl_log_q 注释：
+# guard 每 60 秒调一次本脚本，若全程写 syslog 就是每分钟 4 条、一天 5760 条。
+# 改法：零信息量的「跳过了」走 pcl_log_q（只 stdout），syslog 只留
+# 一条每 _PCF_BEAT 秒的心跳 —— 没有心跳就完全看不出这条链路还在工作。
+# 真动作（挂源 / 铺索引 / 重建依赖表 / 任何失败）不受节流，立即写。
+_PCF_HB="${PKG_CACHE_HB:-/tmp/.pkgcache-fix.hb}"
+_PCF_BEAT="${PKG_CACHE_BEAT:-1800}"
+# 非数字会让下面的算术展开直接报错（set -u 配 dash/ash 无兜底），回落默认值。
+case "$_PCF_BEAT" in '' | *[!0-9]*) _PCF_BEAT=1800 ;; esac
+
+# 距上次心跳够久就记一笔并返回 0（该写 syslog）；否则返回 1（只走 stdout）。
+_pcf_beat() {
+    _pcf_now=$(date +%s 2>/dev/null)
+    case "$_pcf_now" in '' | *[!0-9]*) _pcf_now=0 ;; esac
+    [ "$_pcf_now" -gt 0 ] || return 1
+    _pcf_last=$(cat "$_PCF_HB" 2>/dev/null)
+    case "$_pcf_last" in '' | *[!0-9]*) _pcf_last=0 ;; esac
+    if [ $((_pcf_now - _pcf_last)) -ge "$_PCF_BEAT" ]; then
+        printf '%s\n' "$_pcf_now" > "$_PCF_HB" 2>/dev/null
+        return 0
+    fi
+    return 1
+}
+
 if [ -z "$PKG_MGR" ]; then
     pcl_log "既没有 apk 也没有 opkg，无法修复"
     exit 1
@@ -111,11 +135,11 @@ if ! pcl_resolve; then
     pcl_log "包库目录不可用：$PKG_CACHE_RO 与 $PKG_CACHE 都没有 $PKG_IDX"
     exit 1
 fi
-pcl_log "包库目录：$PKG_CACHE_ACT"
+pcl_log_q "包库目录：$PKG_CACHE_ACT"
 
 # ② feed
 if pcl_feed_ok; then
-    pcl_log "源已正确（file://$PKG_CACHE_ACT），跳过"
+    pcl_log_q "源已正确（file://$PKG_CACHE_ACT），跳过"
 else
     _pcf_feed_ensure || {
         pcl_log "挂源失败：$PKG_CACHE_CONF 不可写"
@@ -126,7 +150,7 @@ fi
 
 # ③ index
 if pcl_lists_ok; then
-    pcl_log "索引已在位（$(pcl_lists_dir)/pkgcache），跳过"
+    pcl_log_q "索引已在位（$(pcl_lists_dir)/pkgcache），跳过"
 else
     if _pcf_lists_ensure; then
         pcl_log "索引已铺设：$(pcl_lists_dir)/pkgcache"
@@ -137,7 +161,11 @@ fi
 
 # ④ 复检
 if pcl_feed_ok && pcl_lists_ok; then
-    pcl_log "修复完成"
+    if _pcf_beat; then
+        pcl_log "修复完成"
+    else
+        pcl_log_q "修复完成"
+    fi
     exit 0
 fi
 pcl_log "修复后复检未通过"

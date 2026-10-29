@@ -163,7 +163,13 @@ _pr_tree() {
 # 取向和上面一致：包里真有才输出。更老的固件没有这三个包时不会硬装，
 # 也不会因为它们缺席而把整条 lxc 恢复判成失败。
 _pr_lxc_extra() {
-    for _lx_n in rpcd-mod-lxc luci-app-lxc luci-i18n-lxc-zh-cn; do
+    # 【v.180.164】lxc 元包也点名，两条线对称：
+    #   · apk 通路能剥出它（lxc-6.0.5-r1.apk -> lxc），opkg 通路剥不出
+    #     （lxc-*.list 通配要求连字符，而主包清单是 lxc.list）；
+    #   · 它是零文件元包（opkg files lxc 输出为空、lxc.list 0 字节），
+    #     装回来只补 opkg world 一条记账，不动任何文件。删掉的后果不是功能坏了，
+    #     而是 LuCI 软件包页面显示「未安装」、依赖 lxc 的包重装时撞 broken dependency。
+    for _lx_n in lxc rpcd-mod-lxc luci-app-lxc luci-i18n-lxc-zh-cn; do
         if [ -f "$ROMDIR/usr/lib/opkg/info/$_lx_n.list" ]; then
             printf '%s\n' "$_lx_n"
             continue
@@ -206,6 +212,27 @@ _pr_lxc() {
     return 0
 }
 
+# 输出「/rom 里带过、但当前不在册」的 lxc 全家桶包名（空格分隔，无前导空格）。
+# 【v.180.164】给 bootstrap 的 pkg_base 当第二判据用，C 方案：
+#   · bootstrap 的 _lxc_missing_deps 只查五个核心 applet（能不能跑）——
+#     防「记账在、二进制被删」；五个都在就放过，看不见 snapshot/monitor 之类。
+#   · 本条查全体在不在册（含元包 lxc、liblxc、全部 applet）—— 防「整包被删」。
+# 两条并行，任一不过都要走恢复。
+# 枚举刻意复用 _pr_lxc_names：与 --lxc 的恢复清单是同一份，
+# 在这里再写一遍通配的话，加包时漏一处就会出现「判得出、装不回」。
+_pr_lxc_missing() {
+    _plm_m=""
+    # liblxc 单独补一条，和 _pr_lxc() 末尾的 _pr_tree liblxc 对齐 ——
+    # 恢复侧保它、判定侧也必须判它，否则「liblxc 被删」永远发现不了。
+    # 原因同元包 lxc：opkg 通路的 lxc-*.list 通配要求连字符，匹配不到 liblxc.list；
+    # apk 通路已被 _pr_lxc_names 里的 liblxc*.apk 覆盖。sort -u 去重，两边都安全。
+    for _plm_p in $( { _pr_lxc_names; printf '%s\n' liblxc; } | sort -u ); do
+        [ -n "$_plm_p" ] || continue
+        _pr_installed "$_plm_p" || _plm_m="$_plm_m $_plm_p"
+    done
+    printf '%s\n' "$_plm_m" | sed 's/^ *//'
+}
+
 # 宿主机侧全家桶（v.180.150）：lxc + crowdsec 的 nftables 守门人。
 # bouncer 和 lxc 一样是「宿主机该有的包」，一起走本地包安装，不再单独拷文件。
 # 它的配置不在这里管 —— 出厂版本身是坏的（enabled=0 / api_url 指向 localhost），
@@ -219,11 +246,15 @@ _pr_host() {
 
 case "${1:-}" in
 "")
-    echo "用法：$0 <包名> | --tree <包名> | --lxc | --host | --force <包名> | --installed <包名>" >&2
+    echo "用法：$0 <包名> | --tree <包名> | --lxc | --lxc-missing | --host | --force <包名> | --installed <包名>" >&2
     exit 2
     ;;
 --installed)
     _pr_installed "${2:-}" && exit 0 || exit 1
+    ;;
+--lxc-missing)
+    _pr_lxc_missing
+    exit 0
     ;;
 --force)
     _pr_pkg "${2:-}" 1 && exit 0 || exit 1

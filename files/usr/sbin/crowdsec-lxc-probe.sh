@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.163"
+SCRIPT_VER="2026-10-29.180.164"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -232,8 +232,10 @@ _dns_ok() {
 #     （lxc、bouncer、容器 正好是 bootstrap 六件事里的三件）。
 #   · smartdns 进程在不在（pidof）
 #   · 53/UDP 有没有人在听（netstat -lnu）
-#   · 其余应用（daed / ssrp / mosdns / clashoo）只判主程序包有没有装，
+#   · 其余应用（daed / ssrp / mosdns / clashoo）只判包在不在册，
 #     不搞进程/端口 —— 它们不像 smartdns 那样接管 53，端口多维度没有意义。
+#     判的是「主程序 + 依赖内核 + LuCI 界面」整组（v.180.164 扩范围），
+#     具体清单与「该不该有」的门槛都在 pkg-restore-apps.sh 里，探针不重复一份。
 #     缺了走 _apps_watch → pkg-restore-apps.sh 装回。
 #
 # 为什么不保留「补规则文件 + 重启」的快速通道：
@@ -359,10 +361,13 @@ _dns_watch() {
     return 0
 }
 
-# ---- 应用主程序通道（v.180.162）----
+# ---- 应用主程序通道（v.180.162，v.180.164 扩到依赖与界面）----
 # 用户 2026-10-29 定：daed / ssrp / mosdns / clashoo 不像 smartdns 那样接管 53，
-# 不搞进程/端口那一套，只判主程序包有没有装；缺了交 pkg-restore-apps.sh 装回。
-# 判据与「该不该有」的门槛全在脚本里（只恢复固件本来就带的那个应用），
+# 不搞进程/端口那一套，只判包在不在册；缺了交 pkg-restore-apps.sh 装回。
+# v.180.164 起「包」不再等于主程序一个：内核依赖（xray-core / sing-box /
+# vmlinux-btf / geo 数据）和 LuCI 壳一并纳入 —— 实测 force-depends 删 clashoo
+# 会一次带走 44MB 内核而壳与 i18n 不动，只看主程序名覆盖不到这种半损坏态。
+# 判据与「该不该有」的门槛全在脚本里（只恢复固件本来就带的那些包），
 # 探针这边只做三件事：拉脚本问一次 → 连续 N 轮缺才动作 → 装完再问一次。
 # 修法只留一处，与 smartdns 那条通道同一个取向（v.180.158）。
 _APPS_RESTORE="${CS_PROBE_APPS_RESTORE:-/usr/sbin/pkg-restore-apps.sh}"

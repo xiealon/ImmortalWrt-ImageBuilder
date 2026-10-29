@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.164"
+SCRIPT_VER="2026-10-29.180.165"
 # 【v.180.152】补进 v.180.146~151 新增的 6 个恢复脚本。
 # 【v.180.162】再加 pkg-restore-apps.sh（应用主程序恢复），共 7 个。
 # 增删恢复脚本时必须同步这张清单 —— 漏一个是「脚本自己也会被删掉」的静默失效：
@@ -127,7 +127,6 @@ GUARD_FILES="${CS_GUARD_FILES:-
 /usr/sbin/pkg-restore-apps.sh
 /usr/sbin/pkg-cache-lib.sh
 /usr/sbin/pkg-cache-fix.sh
-/usr/sbin/pkg-cache-check.sh
 /usr/sbin/pkg-cache-restore.sh
 /etc/rc.local
 /etc/init.d/crowdsec-lxc-probe
@@ -703,9 +702,15 @@ _pkgcache_feed_audit() {
     # 可用目录在、且已经挂着它：零动作（刷机后的常态，一分钟一轮也不写 flash）
     # apk 侧必须看到 <目录>/packages.adb：只写目录的旧行在真机上读不到索引，
     # 但字面上包含 "file://<目录>"，不收紧就会被当成「已挂好」而永不纠正。
-    _pfa_need="file://$_pfa_live"
-    [ "$_pfa_idx" = "packages.adb" ] && _pfa_need="file://$_pfa_live/packages.adb"
-    if [ -n "$_pfa_live" ] && grep -qF "$_pfa_need" "$_pfa_conf" 2>/dev/null; then
+    # 【v.180.165】整行匹配，_pfa_need 现在是完整源行而不是地址片段。
+    # 用子串时，被注释掉的 `# ndx file://...` 照样命中，guard 会认为「已挂好」
+    # 而不再校正。整行匹配才能把「被注释 / 源名被改 / 行尾被追加」都判成需修。
+    if [ "$_pfa_idx" = "packages.adb" ]; then
+        _pfa_need="ndx file://$_pfa_live/packages.adb"
+    else
+        _pfa_need="src/gz pkgcache file://$_pfa_live"
+    fi
+    if [ -n "$_pfa_live" ] && grep -qxF "$_pfa_need" "$_pfa_conf" 2>/dev/null; then
         return 0
     fi
     _pfa_tmp="$_pfa_conf.tmp.$$"

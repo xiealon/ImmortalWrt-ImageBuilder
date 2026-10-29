@@ -220,6 +220,9 @@ echo "==> 容器内受保护文件已进固件（16 个，/rom 只读基准）"
 #   -ash: /usr/sbin/pkg-cache-check.sh: Permission denied   (rc=126)
 # 而 bootstrap 里调 /usr/sbin/pkg-cache-restore.sh 的地方同样失效 —— 包级自愈一直是废的，
 # 只是没在真机上跑过所以没暴露。枚举法必然还会漏，改成扫 files/usr/sbin/*.sh。
+# 【v.180.165】pkg-cache-check.sh 已删除（源检查内联在探针 _pkgcache_probe 里，
+# 那份脚本从上线起没被调用过）。上面这段保留作历史 —— 它解释的是「为什么扫目录
+# 而不是逐个枚举」，与具体某个文件在不在无关。
 # 【v.180.163】init.d 也改成扫目录：cgroup2-guard 没有 .sh 后缀，
 # 「files/usr/sbin/*.sh」和「逐个点名的 init.d 两项」两条通道都漏了它 ——
 # 它靠 git mode 恰好是 755 才没出事，一旦哪次提交丢了执行位，docker 会在

@@ -139,7 +139,13 @@ pcl_log_q "包库目录：$PKG_CACHE_ACT"
 
 # ② feed
 if pcl_feed_ok; then
-    pcl_log_q "源已正确（file://$PKG_CACHE_ACT），跳过"
+    # 【v.180.165】apk 的源行是 `ndx file://<目录>/packages.adb`，原先两条分支
+    # 共用一句「file://<目录>」，看日志会以为挂的是目录 —— 排障时误导。
+    if [ "$PKG_MGR" = "apk" ]; then
+        pcl_log_q "源已正确（ndx file://$PKG_CACHE_ACT/packages.adb），跳过"
+    else
+        pcl_log_q "源已正确（file://$PKG_CACHE_ACT），跳过"
+    fi
 else
     _pcf_feed_ensure || {
         pcl_log "挂源失败：$PKG_CACHE_CONF 不可写"
@@ -150,7 +156,13 @@ fi
 
 # ③ index
 if pcl_lists_ok; then
-    pcl_log_q "索引已在位（$(pcl_lists_dir)/pkgcache），跳过"
+    # 【v.180.165】apk 没有 lists 中转层，索引就是源目录里的 packages.adb；
+    # 原先一律打印 /var/opkg-lists/pkgcache，25.12 上那条路径根本不存在。
+    if [ "$PKG_MGR" = "apk" ]; then
+        pcl_log_q "索引已在位（$PKG_CACHE_ACT/packages.adb），跳过"
+    else
+        pcl_log_q "索引已在位（$(pcl_lists_dir)/pkgcache），跳过"
+    fi
 else
     if _pcf_lists_ensure; then
         pcl_log "索引已铺设：$(pcl_lists_dir)/pkgcache"

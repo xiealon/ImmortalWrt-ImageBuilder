@@ -83,7 +83,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.164"
+SCRIPT_VER="2026-10-29.180.165"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -658,10 +658,14 @@ else
     PKG_CF="${CS_PROBE_PKG_CONF:-/etc/opkg/customfeeds.conf}"
 fi
 PKG_STATE="${CS_PROBE_PKG_STATE:-/tmp/crowdsec-probe.pkgcache}"
-# 【v.180.133】包库逻辑已拆成独立脚本：check 只判断（只读）、fix 按
-# resolve→挂源→铺索引 的顺序修。探针只负责「发现坏就叫一次修」。
-# 脚本不存在时退化为旧行为（只报告不修），老固件不会因此报错。
-PKG_CHECK_BIN="${CS_PROBE_PKG_CHECK:-/usr/sbin/pkg-cache-check.sh}"
+# 【v.180.133】包库修复拆成独立脚本：fix 按 resolve→挂源→铺索引 的顺序修，
+# 探针只负责「发现坏就叫一次修」。脚本不存在时退化为旧行为（只报告不修）。
+# 【v.180.165】判定不外包了：原 PKG_CHECK_BIN 指向 pkg-cache-check.sh，但探针从
+# v.180.133 起就把判定写在下面的 _pkgcache_probe 里 —— 那份 check 脚本看不见
+# 「死源」和「0 个包」这两种坏法，于是内联重写了一份，旧脚本没删。结果是：
+# 文件从上线起没被任何代码调用过，却被 guard 逐字节保护、被构建补执行位，
+# 而且它与内联版判据还不一样（各有一项对方没有的检查）。
+# 已随本版删除该脚本，判定只留 _pkgcache_probe 一处，不再有两份判据各改一边。
 PKG_FIX_BIN="${CS_PROBE_PKG_FIX:-/usr/sbin/pkg-cache-fix.sh}"
 
 _pkgcache_probe() {
@@ -689,6 +693,15 @@ _pkgcache_probe() {
                 *file://*)
                     _pk_t=${_pk_l##*file://}
                     _pk_t=${_pk_t%%[!0-9A-Za-z/._:-]*}
+                    # 【v.180.165】apk 的 ndx 写法指向的是索引**文件**，不是目录：
+                    #   ndx file:///rom/root/apk-cache/packages.adb
+                    # 直接拿整段做 [ -d ] 必然失败。而 fix 那边的判据是 pcl_feed_ok
+                    # （只看源行对不对），当场返回 0 —— 于是 25.12 上每秒一轮的
+                    # 「存在死源 → 修复完成」成了每分钟的固定节目，纯噪音。
+                    # 末段正好是索引文件名时，退到上一级目录再判。
+                    case "$_pk_t" in
+                    */"$PKG_IDX") _pk_t=${_pk_t%/"$PKG_IDX"} ;;
+                    esac
                     if [ -n "$_pk_t" ] && [ ! -d "$_pk_t" ]; then
                         _pk_msg="$(basename "$PKG_CF") 存在死源 file://$_pk_t（目录不存在），包管理器取索引会报错"
                         break

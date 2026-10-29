@@ -70,7 +70,9 @@ _PA_CLASHOO="clashoo luci-app-clashoo luci-i18n-clashoo-zh-cn"
 _PA_DAED="daed daed-geoip daed-geosite vmlinux-btf luci-app-daed luci-i18n-daed-zh-cn"
 _PA_MOSDNS="mosdns v2ray-geoip v2ray-geosite luci-app-mosdns luci-i18n-mosdns-zh-cn"
 # ssrp 组在 25.12 线整个不装（apk-custom-packages.sh 里没有 luci-app-ssr-plus，
-# 也没有 trojan-plus / shadowsocksr-libev-*），整组会被判「固件未带」跳过。
+# 也没有 trojan-plus / shadowsocksr-libev-*）。但注意：这些包的 apk 确实躺在
+# /rom/root/apk-cache 里（build25.sh 把它们收进包库当兜底），所以「包库里有」
+# 绝不能当作「固件该有」—— 那会把整组判成缺失并强行装上，详见 _pa_should。
 _PA_SSRP="luci-app-ssr-plus luci-i18n-ssr-plus-zh-cn xray-core xray-plugin sing-box
 trojan-plus shadowsocksr-libev-ssr-redir shadowsocksr-libev-ssr-local
 shadowsocksr-libev-ssr-server"
@@ -101,7 +103,23 @@ _pa_installed() {
 
 # 固件里本来就有这个应用吗 —— 见文件头「该不该有」的门槛
 _pa_should() {
+    # opkg：固件装过才有 info/<包>.list。只读基底，remove 删不掉运行侧那份。
     [ -f "$ROMDIR/usr/lib/opkg/info/$1.list" ] && return 0
+    # apk：以**固件出厂的已安装数据库**为准。
+    # 【v.180.165】原来这里拿「包库里有没有 <包>-*.apk」当判据，是错的：
+    # 包库收的是兜底包，25.12 线 114 个 apk 远多于固件实际安装的 622 个包，
+    # 于是包库里每一个「有包但没装」的包都被判成「该有」。
+    # 2026-10-29 的 25.12 真机复现：ssrp 组 5 个包被判缺失，第 3 轮 --repair
+    # 把 xray-core / xray-plugin 装了上去（运行时 624 vs 出厂 622）——
+    # 这不是修复，是把用户没选的应用强加给机器。
+    # /rom/lib/apk/db/installed 是出厂的已安装库（P:<包名> 一行一个），
+    # 记录的是「固件带了什么」，与之后 user 装了什么都不相干，正好是判据。
+    if [ -f "$ROMDIR/lib/apk/db/installed" ]; then
+        grep -qxF "P:$1" "$ROMDIR/lib/apk/db/installed" 2>/dev/null
+        return $?
+    fi
+    # 兜底：老固件没有 apk 数据库时才退回包库判据（24.10 线走不到这里，
+    # 它的包都在 info/<包>.list 里命中了第一行）。
     for _pa_f in "$ROMDIR/root/apk-cache/$1"-*.apk "$ROMDIR/root/pkg-cache/$1"_*.ipk; do
         [ -f "$_pa_f" ] && return 0
     done

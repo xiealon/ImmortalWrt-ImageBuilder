@@ -1,13 +1,16 @@
 #!/bin/sh
 # pkg-cache-lib.sh — 本地包库公共函数库
 #
-# 【不单独执行】只被 pkg-cache-check.sh / pkg-cache-fix.sh /
-# pkg-cache-restore.sh 用 `. /usr/sbin/pkg-cache-lib.sh` 引入。
+# 【不单独执行】只被 pkg-cache-fix.sh / pkg-cache-restore.sh
+# 用 `. /usr/sbin/pkg-cache-lib.sh` 引入。
+# 【v.180.165】pkg-cache-check.sh 已删除：探针的源检查早在 v.180.133 就内联进
+# _pkgcache_probe（那份 check 看不见「死源」与「0 个包」两种坏法），旧脚本从
+# 上线起没被任何代码调用，判据也从没在真机验证过 —— 留着就是两套标准。
 # 这里只定义常量和函数，不做任何动作 —— 引入即产生副作用的话，
 # 三个入口脚本的顺序就不可控了。
 #
 # 顺序约定（调用方负责）：
-#   check（只读） → fix（resolve → feed → index） → restore（装回）
+#   fix（resolve → feed → index） → restore（装回）
 #
 # 环境变量（探针/夹具用，生产环境全空）：
 #   PKG_CACHE_RO / PKG_CACHE / PKG_CACHE_CONF / PKG_CACHE_LISTS
@@ -135,13 +138,21 @@ pcl_lists_dir() {
 pcl_feed_ok() {
     [ -n "$PKG_CACHE_ACT" ] || return 1
     [ -f "$PKG_CACHE_CONF" ] || return 1
+    # 【v.180.165】判据必须是**整行**（grep -x），不是子串。原来只查
+    # "file://<目录>" 有没有出现过，于是这三种坏法全被判成「源已正确」：
+    #   ① 整行被注释：`# ndx file:///rom/root/apk-cache/packages.adb`
+    #      子串仍在 → 命中；^ndx 计数为 0 → 也过。判定通过，包管理器却读不到源。
+    #   ② 源名前缀被改：`src/gz othername file:///rom/root/pkg-cache`
+    #      子串命中，但 opkg 按源名去 lists/othername 找索引，而铺的是 lists/pkgcache。
+    #   ③ 行尾被追加东西：同样命中。
+    # 2026-10-29 在 25.12 真机实测过 ①：把源行改成注释后 pkg-cache-fix.sh
+    # 明确输出「源已正确…跳过」，一个字节都没修。
     if [ "$PKG_MGR" = "apk" ]; then
-        # 只写目录的旧写法必须判为「需修复」：apk 对 repository 类型会去
-        # <目录>/<arch>/Packages.adb 找索引，而索引就在 <目录>/packages.adb，
-        # 找不到就等于没有源。所以这里要求整整指向索引文件。
-        grep -qF "file://$PKG_CACHE_ACT/packages.adb" "$PKG_CACHE_CONF" 2>/dev/null || return 1
+        # ndx 写法必须整行指向索引文件：只写目录时 apk 会去 <目录>/<arch>/Packages.adb
+        # 找索引（apk-repositories(5) 的 repository 类型规则），而我们的索引没有 arch 子目录。
+        grep -qxF "ndx file://$PKG_CACHE_ACT/packages.adb" "$PKG_CACHE_CONF" 2>/dev/null || return 1
     else
-        grep -qF "file://$PKG_CACHE_ACT" "$PKG_CACHE_CONF" 2>/dev/null || return 1
+        grep -qxF "src/gz pkgcache file://$PKG_CACHE_ACT" "$PKG_CACHE_CONF" 2>/dev/null || return 1
     fi
     _pcl_n=$(grep -cE "$PCR_PAT" "$PKG_CACHE_CONF" 2>/dev/null)
     [ "${_pcl_n:-0}" -le 1 ] || return 1

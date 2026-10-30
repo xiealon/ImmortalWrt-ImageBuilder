@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
-"""生成「11 组链式站位 · 31 节点」架构图 SVG + PNG
+"""生成「9 组链式站位 · 28 节点」架构图 SVG + PNG
 
-对应 crowdsec-lxc-bootstrap.sh v.180.113。
-节点与分组直接取自脚本的 DAG_NODES / NODE_GROUP_*，不是手写清单。
+对应 crowdsec-lxc-bootstrap.sh v.180.192。
+节点与分组直接取自脚本的 GROUP_SEQ / GROUP_TITLE_* / GROUP_DEP_* / DAG_NODES，
+不是手写清单。
 
-用法：python gen_bp_eleven_group_flow.py
-产物：bp-eleven-group-flow.svg / bp-eleven-group-flow.png
+v.180.157 起 smartdns 整块（配置 / 服务 / 验证）已移出 bootstrap，交给
+pkg-restore-smartdns.sh 与探针，因此不再有 SMARTCHK 组；DEPS 组也已并入
+BOUNCERVERIFY 之后，链尾直接是 ENROLL。
+
+用法：python gen_bp_nine_group_flow.py
+产物：bp-nine-group-flow.svg / bp-nine-group-flow.png
 """
 import io
 import os
@@ -17,34 +22,30 @@ FONT = "'Microsoft YaHei','Noto Sans CJK SC',sans-serif"
 
 # (组名, 阶段号, 标题, 节点, 前置组, 说明, 主色, 行高)
 GROUPS = [
-    ("NETBASE", "Ⅰ Ⅱ Ⅲ", "网络基线 → 从 /rom 补包 → smartdns 配置", None,
-     "", "补包 · 写 13 条上游 · dnsmasq 让出 53", "#2f6fd0", 136),
+    ("NETBASE", "Ⅰ", "网络基线：br-lan / lxcbr0 双网桥 + 防火墙 zone 与转发规则", None,
+     "", "最优先执行，不依赖 rootfs · 缺包从 /rom 补", "#2f6fd0", 136),
     ("INSTALL", "Ⅱ", "安装容器：迁移校验镜像 / 解压 rootfs / 写 config",
      ["img_migrate", "rootfs", "ct_config"], "", "rootfs 解压到 LXC_PATH", "#7b4fd0", 106),
-    ("PREP", "Ⅱ", "容器启动前的静态准备",
+    ("PREP", "Ⅱ", "容器启动前的全部静态准备：路由器网络 / 容器网络 / cgroup",
      ["ct_net", "cgroup_mount", "ct_bootlink", "ct_resolv"], "NETBASE INSTALL",
      "网卡 / cgroup / 开机链 / DNS", "#7b4fd0", 106),
-    ("CAPIBLOCK", "Ⅳ", "屏蔽 CAPI（容器内 online_client 停用）",
+    ("CAPIBLOCK", "Ⅳ", "屏蔽 CAPI：容器内 online_client 停用",
      ["capi_block"], "INSTALL PREP", "config.yaml 只在启动时读一次", "#e67e22", 106),
-    ("BOOT", "Ⅳ", "启动容器（全程唯一一次开机）",
+    ("BOOT", "Ⅳ", "启动容器：唯一一次开机",
      ["ct_boot"], "NETBASE PREP INSTALL CAPIBLOCK", "没有 SNAT 不启动", "#e67e22", 106),
-    ("LOGCONF", "Ⅳ", "日志链路与对外监听",
+    ("LOGCONF", "Ⅳ", "日志链路与对外监听：宿主推送 + 容器采集 + LAPI 监听地址",
      ["logconf"], "BOOT", "宿主机推送 + 容器采集", "#e67e22", 106),
-    ("LAPI", "Ⅳ", "取 LAPI 并填入路由器 bouncer",
+    ("LAPI", "Ⅳ", "获取 LAPI 并填入路由器 bouncer",
      ["lapi_fetch", "bouncer_fill"], "BOOT", "填完 api_url/key 重启 bouncer", "#e67e22", 106),
-    ("BOUNCERVERIFY", "Ⅳ", "验证 bouncer 真在拉，再解开 CAPI",
+    ("BOUNCERVERIFY", "Ⅳ", "验证 bouncer 列表生效并解开 CAPI",
      ["bouncer_verify", "capi_release"], "LOGCONF LAPI", "看 last_pull 新鲜度", "#e67e22", 106),
-    ("DEPS", "Ⅳ", "只验不装：网络通不通 / 组件就位没",
-     ["deps"], "BOUNCERVERIFY", "未就绪则 enroll 跳过", "#e67e22", 106),
-    ("SMARTCHK", "Ⅴ", "smartdns 运行态验证",
-     ["sd_serve"], "DEPS", "进程 / 53 监听 / 容器内解析", "#2e7d32", 106),
-    ("ENROLL", "Ⅴ", "Console Enroll —— 全程唯一联网点",
-     ["enroll"], "SMARTCHK", "主码缺失用本地保险柜", "#2e7d32", 106),
+    ("ENROLL", "Ⅴ", "Console Enroll：全程唯一联网点",
+     ["enroll"], "BOUNCERVERIFY", "主码缺失用本地保险柜", "#2e7d32", 106),
 ]
 
 NET_NODES = ["br_lan_ports", "lan_static", "dhcp_ignore", "bridge", "lxc_zone",
              "fwd_rules", "lan_input", "snat", "ip_forward", "svc_bind", "docker_fw"]
-NET_TAIL = ["pkg_base", "lxc_auto", "smartdns"]
+NET_TAIL = ["pkg_base", "lxc_auto"]
 
 ROW_GAP = 14
 TOP = 258
@@ -87,14 +88,14 @@ A('<text x="%d" y="127" font-size="16" fill="#222222" font-family="%s">'
 
 # ── 主标题
 A('<text x="%d" y="184" font-size="30" font-weight="700" fill="#111111" font-family="%s">'
-  'crowdsec-lxc-bootstrap.sh · 11 组 · 31 节点</text>' % (PAD, FONT))
+  'crowdsec-lxc-bootstrap.sh · 9 组 · 28 节点</text>' % (PAD, FONT))
 A('<text x="%d" y="214" font-size="17" fill="#666666" font-family="%s">'
-  'v.180.113 · 组内每个节点都是「先验证现场，达标就零写入；不达标才构建」</text>' % (PAD, FONT))
+  'v.180.192 · 组内每个节点都是「先验证现场，达标就零写入；不达标才构建」</text>' % (PAD, FONT))
 
 # 阶段图例
 lx = PAD
 for label, color in [("Ⅰ 网络", "#2f6fd0"), ("Ⅱ 容器", "#7b4fd0"),
-                     ("Ⅲ smartdns", "#0e8a8a"), ("Ⅳ crowdsec", "#e67e22"), ("Ⅴ 检测+注册", "#2e7d32")]:
+                     ("Ⅳ crowdsec", "#e67e22"), ("Ⅴ 注册", "#2e7d32")]:
     A('<rect x="%d" y="226" width="16" height="16" fill="%s"/>' % (lx, color))
     A('<text x="%d" y="240" font-size="15" fill="#333333" font-family="%s">%s</text>'
       % (lx + 22, FONT, esc(label)))
@@ -119,7 +120,7 @@ for idx, (name, phase, title, nodes, deps, note, color, h) in enumerate(GROUPS, 
       % (PAD + 52, y + 56, FONT, esc(title)))
     # 节点
     if name == "NETBASE":
-        rows = wrap_nodes(NET_NODES, 6) + ['（Ⅱ）' + ' · '.join(NET_TAIL)]
+        rows = wrap_nodes(NET_NODES + NET_TAIL, 6)
     elif nodes:
         rows = wrap_nodes(nodes, 8)
     else:
@@ -149,9 +150,9 @@ A('</svg>')
 
 out = '\n'.join(svg)
 here = os.path.dirname(os.path.abspath(__file__))
-io.open(os.path.join(here, 'bp-eleven-group-flow.svg'), 'w', encoding='utf-8', newline='\n').write(out)
+io.open(os.path.join(here, 'bp-nine-group-flow.svg'), 'w', encoding='utf-8', newline='\n').write(out)
 
 png = resvg_py.svg_to_bytes(svg_string=out, zoom=1.0)
-open(os.path.join(here, 'bp-eleven-group-flow.png'), 'wb').write(bytes(png))
+open(os.path.join(here, 'bp-nine-group-flow.png'), 'wb').write(bytes(png))
 print('SVG %d B / PNG %d B' % (len(out.encode('utf-8')),
-                               os.path.getsize(os.path.join(here, 'bp-eleven-group-flow.png'))))
+                               os.path.getsize(os.path.join(here, 'bp-nine-group-flow.png'))))

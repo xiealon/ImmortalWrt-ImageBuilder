@@ -6,7 +6,7 @@
 .n{font-family:"Noto Sans CJK SC","Noto Serif CJK SC",sans-serif;font-size:11px;fill:#6b7280}
 </style>
 <rect width="1000" height="780" fill="#ffffff"/>
-<text x="500.0" y="38" text-anchor="middle" class="t" font-size="19">ImmortalWrt-ImageBuilder-BACKUP 整体流程</text>
+<text x="500.0" y="38" text-anchor="middle" class="t" font-size="19">ImmortalWrt-ImageBuilder-24.10 整体流程</text>
 <text x="500.0" y="60" text-anchor="middle" class="n">编译期产出固件 · 运行期固件自举容器</text>
 <rect x="26" y="74" width="428" height="4" rx="2" fill="#2563eb"/>
 <text x="26" y="70" class="side" fill="#2563eb">编译期 · GitHub Actions</text>

@@ -50,7 +50,7 @@ out.append(f'<style>{CSS}</style>')
 out.append(f'<rect width="{W}" height="{H}" fill="#ffffff"/>')
 
 # 标题
-out.append(f'<text x="{W/2}" y="38" text-anchor="middle" class="t" font-size="19">ImmortalWrt-ImageBuilder-BACKUP 整体流程</text>')
+out.append(f'<text x="{W/2}" y="38" text-anchor="middle" class="t" font-size="19">ImmortalWrt-ImageBuilder-24.10 整体流程</text>')
 out.append(f'<text x="{W/2}" y="60" text-anchor="middle" class="n">编译期产出固件 · 运行期固件自举容器</text>')
 
 # 分栏标识

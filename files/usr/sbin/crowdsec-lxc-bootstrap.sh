@@ -5992,8 +5992,11 @@ if [ "${1:-}" = "--bouncer-heal" ]; then
                 *[!0-9]*) : ;;
                 *)
                     _bh_age=$(( _bh_up - _bh_start / 100 ))
-                    if [ "$_bh_age" -lt "$_bh_cool" ]; then
-                        log "[bouncer] 进程仅存活 ${_bh_age}s（< ${_bh_cool}s，刚重启过）-> 本轮跳过重启"
+                    # 只有「系统已运行超过 _bh_cool」才把进程短寿当成 heal 重启的结果：
+                    # 开机早期进程本来就活不到 1 小时，那种情况必须照常修
+                    # （2026-10-27 那次故障就发生在 bouncer 启动后 2 分钟）。
+                    if [ "$_bh_age" -lt "$_bh_cool" ] && [ "$_bh_up" -ge "$_bh_cool" ]; then
+                        log "[bouncer] 进程仅存活 ${_bh_age}s（系统已运行 ${_bh_up}s，刚被重启过）-> 本轮跳过重启"
                         exit 0
                     fi
                     ;;

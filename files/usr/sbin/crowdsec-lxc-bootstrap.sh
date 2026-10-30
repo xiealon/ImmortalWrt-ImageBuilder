@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-29.180.192"
+SCRIPT_VER="2026-10-30.180.193"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -5949,6 +5949,36 @@ fi
 if [ "${1:-}" = "--probe-check" ]; then
     bouncer_pulling
     exit $?
+fi
+
+# ---- 下发面健康检查（探针每 30 分钟一次，v.180.193）----
+# 为什么不能塞进 --probe-check：那条路径 60 秒一轮且只读，而这里要重启服务。
+# 为什么不能用 last_pull 判：netlink 脱节时 **拉取是成功的**，last_pull 照常刷新，
+# 唯一痕迹是 nft set 里一条元素都没有（真机 2026-10-30：14990 条拉到、set 全空）。
+# 判据必须是「LAPI 有决策 且 nft set 为空」—— 不接社区/没决策时 set 天然为空，
+# 只看 set 会天天误报。退出码：0=无需动作，1=动过手，其余=检查本身异常。
+if [ "${1:-}" = "--bouncer-heal" ]; then
+    if ! cs_active_on_host; then
+        log "[bouncer] 进程未运行（不是下发问题），交由 _ensure_bouncer_service"
+        _ensure_bouncer_service
+        exit 0
+    fi
+    _bh_dec=0
+    _bh_set=0
+    _ct_env "timeout 15 $CSCLI decisions list --limit 1 -o raw" 2>/dev/null | grep -q . && _bh_dec=1
+    nft list set ip crowdsec crowdsec-blacklists 2>/dev/null | grep -q 'elements' && _bh_set=1
+    if [ "$_bh_dec" = "1" ] && [ "$_bh_set" = "0" ]; then
+        _bh_n="$(_ct_env "timeout 20 $CSCLI decisions list -o raw" 2>/dev/null | wc -l | tr -d ' ')"
+        log "[bouncer] ** 下发失效：LAPI 有 ${_bh_n:-?} 条决策，nft set 里一条都没有 -> 重启 bouncer"
+        _bouncer_service_restart >/dev/null 2>&1 || true
+        if nft list set ip crowdsec crowdsec-blacklists 2>/dev/null | grep -q 'elements'; then
+            log "[bouncer] 重启后 nft set 已填充（下发已恢复）"
+        else
+            log "[bouncer] 重启后 nft set 仍为空（下一轮 30 分钟后再试）"
+        fi
+        exit 1
+    fi
+    exit 0
 fi
 
 # ---- 全量验证模式（v.108.25）----

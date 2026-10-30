@@ -63,6 +63,9 @@ PROBE_FAIL_ALERT="${CS_PROBE_FAIL_ALERT:-3}"
 # 「bouncer 拉得到吗」，配置被改坏但还能拉的时候它照样是绿的 —— 所以每隔
 # AUDIT_EVERY 轮做一次从头到脚的体检。0 = 关闭。
 PROBE_AUDIT_EVERY="${CS_PROBE_AUDIT_EVERY:-30}"
+# 【v.180.193】bouncer 下发面健康检查间隔（按轮数，默认 30 轮 = 30 分钟）。
+# 与体检同频但独立开关：体检只读（--verify-only 承诺不写），这里要重启服务。
+PROBE_HEAL_EVERY="${CS_PROBE_HEAL_EVERY:-30}"
 # 【v.108.67 设上限 / v.108.68 分档】bootstrap 内部每条宿主命令都有上限（v.108.66），
 # 但「节点数 × 10s」没有上界；probe 是常驻进程，卡在 wait 上不退 = procd 不 respawn
 # = 监视链路静默停摆（本文件里最像「看起来在跑、其实什么都没做」的一处）。
@@ -88,7 +91,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-29.180.192"
+SCRIPT_VER="2026-10-30.180.193"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -718,6 +721,19 @@ probe_tick() {
             P_AUDIT_BAD=$((${P_AUDIT_BAD:-0} + 1))
             plog "【体检】第 ${P_ROUND} 轮：首检与复检都不符（连续 ${P_AUDIT_BAD} 次），重跑引导按需补齐"
             _run_fix
+        fi
+    fi
+    # 【v.180.193】bouncer 下发面：与体检同频（每 PROBE_HEAL_EVERY 轮）。
+    # 只查「LAPI 有决策、内核 set 为空」这一种状态 —— netlink 脱节时 last_pull
+    # 照样新鲜，60 秒那套守护判定永远看不见它。动作只有一次重启，不写任何配置。
+    if [ "${PROBE_HEAL_EVERY:-30}" -gt 0 ] 2>/dev/null \
+       && [ $((P_ROUND % PROBE_HEAL_EVERY)) -eq 0 ]; then
+        _bh_rc=0
+        _boot --bouncer-heal >>"$BOOT_LOG" 2>&1 || _bh_rc=$?
+        if [ "$_bh_rc" = "1" ]; then
+            plog "【bouncer 下发】LAPI 有决策但 nft set 为空，已重启 crowdsec-firewall-bouncer（详见 $BOOT_LOG）"
+        elif [ "$_bh_rc" != "0" ]; then
+            plog "【bouncer 下发】检查异常退出 $_bh_rc（124=超时；详见 $BOOT_LOG）"
         fi
     fi
     # 【v.180.117】DNS 体检必须排在 last_pull 判定之前：后者在「链路正常」时直接

@@ -15,7 +15,7 @@
 # 那正是 v.108.44 踩过的坑（每分钟 6 个文件全重写）。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 GD="$REPO/$FILES_DIR/usr/sbin/crowdsec-guard.sh"
 
 R=0
@@ -44,7 +44,7 @@ ck "R36.1j 只留最近一份 .user-* 备份" "$(grep -c 'rm -rf "\$_gd_run".use
 
 echo
 echo "== 36.2 构建线把 tests 铺进固件 =="
-for _b in build24.sh build25.sh; do
+for _b in build24.sh; do
     ck "R36.2-$_b 有 crowdsec-tests 目录" "$(grep -c 'files/usr/share/crowdsec-tests' "$REPO/x86-64/$_b")" "$(grep -c 'files/usr/share/crowdsec-tests' "$REPO/x86-64/$_b")"
     ck "R36.2-$_b 会检查铺进去的个数 >0" "$(grep -c '_t_n" -gt 0' "$REPO/x86-64/$_b")" "1"
     ck "R36.2-$_b 危险脚本单独放 danger/（目标目录）" \

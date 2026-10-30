@@ -10,7 +10,7 @@
 # 三个调用点的相对顺序（guard 必须排在前置检查和 probe_tick 之前）。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 G="$REPO/$FILES_DIR/usr/sbin/crowdsec-guard.sh"
 RC="$REPO/$FILES_DIR/etc/rc.local"
 PR="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh"
@@ -188,7 +188,7 @@ ck "R13.43 轮转保留的是尾部内容" "$(grep -c 'padding line 1999' "$LOG"
 ck "R13.44 轮转没丢掉最新那条" "$(grep -c '已复原' "$LOG")" "1"
 
 echo "== 14 出镜像时执行位有断言，不靠 2>/dev/null 掩盖 =="
-for _b in "$B24" "$B25"; do
+for _b in "$B24"; do
     _n=$(basename "$_b")
     # 已不再逐个点名文件：改成扫目录（枚举法必然漏，v.180.163 起就是这么修的），
     # 所以这里只断言「扫的是源目录」这件事成立。

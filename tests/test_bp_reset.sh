@@ -7,7 +7,7 @@
 #   · 信号 trap —— 必须真的发信号，函数级调用测不出来
 # 前两套测试都是「调函数看返回值」，抓不到 trap 有没有装上、顺序对不对。
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 PASS=0; FAIL=0
 chk() {

@@ -14,7 +14,7 @@
 #   ③ main 里残留 eval "GSET_$_g=0"：v.99 值是 V:<ts>，0 是非空值会被判成已置位。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 # 只含活代码的副本：整行注释（行首可有空白 + #）不算命中。
 # 注释里提到某关键字（例如记录「曾经 disable lxc-auto」）不该被断言当成

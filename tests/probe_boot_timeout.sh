@@ -13,7 +13,7 @@
 # guard 自己的两处 attach（v.108.66）与 /health 的 wget（v.108.67）在 R13 里钉。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 PR="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh"
 RC="$REPO/$FILES_DIR/etc/rc.local"
 IN="$REPO/$FILES_DIR/etc/init.d/crowdsec-lxc-probe"

@@ -6,7 +6,7 @@
 #   ④ 其它节点（安装/复核/bouncer 本身的验证）一律先验证再动作，不看首次装机
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 
 R=0

@@ -17,7 +17,7 @@
 #   4. 每轮都要检查，不是等触发修复才查（tick 遇 lock-busy 会提前返回）。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 PR="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh"
 
 R=0

@@ -3,7 +3,7 @@
 # 背景：_ensure_lxc_auto 原来只在 build_ct_boot 里被调到，而 build_ct_boot 只在
 #       「容器没跑」时才执行。于是「容器跑着 + 配置空了」这种现场完全静默。
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 G="$REPO/$FILES_DIR/usr/sbin/crowdsec-guard.sh"
 R=0

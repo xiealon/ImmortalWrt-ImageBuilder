@@ -21,7 +21,7 @@
 #   LXC 容器 ubuntu 仍 RUNNING、IP 10.1.0.10（LXC 6.0.5 原生支持 v2）
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 PKGS="$REPO/shell/custom-packages.sh"
 APKS="$REPO/shell/apk-custom-packages.sh"
 GUARD="$REPO/$FILES_DIR/etc/init.d/cgroup2-guard"
@@ -42,8 +42,6 @@ ck "R30.1 custom-packages.sh 非注释行不含 cgroupfs-mount" \
 # 保留即可，不限定出现次数：同一个包可能同时出现在多个架构/多段列表里。
 ck "R30.2 custom-packages.sh 仍保留 cgroup-tools" \
    "$([ "$(grep -v '^[[:space:]]*#' "$PKGS" | grep -c 'cgroup-tools')" -ge 1 ] && echo yes)" "yes"
-ck "R30.3 apk-custom-packages.sh 也不含 cgroupfs-mount（两版一致）" \
-   "$(grep -v '^[[:space:]]*#' "$APKS" | grep -c 'cgroupfs-mount')" "0"
 
 echo "== 30b 兜底 init：cgroup2-guard =="
 ck "R30.4 cgroup2-guard 存在" \

@@ -8,7 +8,7 @@
 #   ⑥ 死代码 step_C 已删
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 PR="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-probe.sh"
 RC="$REPO/$FILES_DIR/etc/rc.local"

@@ -13,7 +13,7 @@
 # 改动都会让 R33.10 / R33.11 / R33.15 变红。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 G="$REPO/$FILES_DIR/usr/sbin/crowdsec-guard.sh"
 # 不用 mktemp：本机 busybox-w32 下 $TMPDIR 为空时模板会解析成空串，
 # 路径退化成 /upper、/root（真机 / 本机根目录），测试会往根上写。

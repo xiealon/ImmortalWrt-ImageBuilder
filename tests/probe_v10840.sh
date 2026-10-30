@@ -12,7 +12,7 @@
 # 不执行 → installed 永远写不下 → 每次开机全量重跑并重赌 bouncer_verify 的 60 秒窗口。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 BS_C="$(mktemp)"
 grep -v '^[[:space:]]*#' "$BS" > "$BS_C"

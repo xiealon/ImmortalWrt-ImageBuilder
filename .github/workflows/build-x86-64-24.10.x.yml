@@ -186,9 +186,9 @@ jobs:
           # 极简 rootfs 阶段：容器能不能起来，全看这几个 shell 脚本。
           # 语法错误拖到 make image 之后才炸要等一小时，这里 10 秒就拦住。
           for f in shell/prepare-crowdsec-minimal.sh \
-                   files-24/usr/sbin/crowdsec-lxc-bootstrap.sh.24 \
-                   files-24/etc/rc.local.24 \
-                   files-24/etc/uci-defaults/99-custom.sh.24; do
+                   files/usr/sbin/crowdsec-lxc-bootstrap.sh \
+                   files/etc/rc.local \
+                   files/etc/uci-defaults/99-custom.sh; do
             bash -n "$f" || { echo "::error::$f 语法错误"; exit 1; }
           done
           if command -v shellcheck >/dev/null 2>&1; then
@@ -213,7 +213,7 @@ jobs:
         # 重新出包（那边没有 schedule，只能手动触发）。
         run: |
           set -uo pipefail
-          OUT_DIR="files-24/etc/crowdsec"
+          OUT_DIR="files/etc/crowdsec"
           OUT="$OUT_DIR/lxc-crowdsec.tar.gz"
           mkdir -p "$OUT_DIR"
           SHORT="${GITHUB_SHA:0:7}"
@@ -333,24 +333,10 @@ jobs:
           echo "ROOTFS_SIZE=$ROOTFS_SIZE" >> $GITHUB_ENV
           luci_version="${{ github.event.inputs['Luci Version'] }}"
           echo "Building for rootfs_size: $profile"
-
-          # 【v.180.194】仓库里 files-24/ 下每个文件都带 .24 后缀，物理上与 files-25/ 的
-          # 同名文件完全无关。运行时不带这个后缀，挂载前在这里还原成原名。
-          # 规则只有一条：去掉文件名末尾的 .24，零歧义。
-          # 构建期生成的文件（etc/crowdsec/*）不带后缀，find 不会碰它们。
-          FILES_RT="$RUNNER_TEMP/files-24-runtime"
-          rm -rf "$FILES_RT"
-          mkdir -p "$FILES_RT"
-          cp -a "${{ github.workspace }}/files-24/." "$FILES_RT"/
-          find "$FILES_RT" -type f -name '*.24' | while IFS= read -r _f; do
-            mv "$_f" "${_f%.24}"
-          done
-          echo "==> files-24 展开：$(find "$FILES_RT" -type f | wc -l) 个文件，残留 .24 后缀 $(find "$FILES_RT" -type f -name '*.24' | wc -l) 个"
-
           docker run --rm -i \
             --user root \
             -v "${{ github.workspace }}/bin:/home/build/immortalwrt/bin" \
-            -v "$FILES_RT:/home/build/immortalwrt/files" \
+            -v "${{ github.workspace }}/files:/home/build/immortalwrt/files" \
             -v "${{ github.workspace }}/custom:/home/build/immortalwrt/custom" \
             -v "${{ github.workspace }}/x86-64/imm.config:/home/build/immortalwrt/.config" \
             -v "${{ github.workspace }}/shell:/home/build/immortalwrt/shell" \

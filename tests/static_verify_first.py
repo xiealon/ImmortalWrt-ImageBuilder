@@ -13,9 +13,9 @@
 
 用法：
     python3 tests/static_verify_first.py [脚本路径]
-    不传路径时读 $CS_FILES_DIR（默认 files-24），即
+    不传路径时读 $CS_FILES_DIR（默认 files），即
         python3 tests/static_verify_first.py
-        CS_FILES_DIR=files-25 python3 tests/static_verify_first.py
+        CS_FILES_DIR=files python3 tests/static_verify_first.py
 退出码：0 全过；1 有违规（逐条打印节点名与行号）
 """
 import os
@@ -46,7 +46,7 @@ def func_body(src, name):
 
 
 def main():
-    files_dir = os.environ.get('CS_FILES_DIR', 'files-24')
+    files_dir = os.environ.get('CS_FILES_DIR', 'files')
     path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         files_dir, 'usr/sbin/crowdsec-lxc-bootstrap.sh')
     src = open(path, encoding='utf-8').read()

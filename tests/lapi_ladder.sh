@@ -16,7 +16,7 @@
 # 就会变成「坏→丢层→好→再坏→再丢」的周期性抹盘。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-FILES_DIR="${CS_FILES_DIR:-files-24}"
+FILES_DIR="${CS_FILES_DIR:-files}"
 BS="$REPO/$FILES_DIR/usr/sbin/crowdsec-lxc-bootstrap.sh"
 # 只含活代码的副本：整行注释不算命中（同 probe_last_pull_semantics 的 cg 口径）
 BS_C="$REPO/tests/.r34.body.$$"

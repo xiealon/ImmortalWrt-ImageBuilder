@@ -31,7 +31,7 @@ if [ -z "$CUSTOM_PACKAGES" ]; then
   echo "⚪️ 未选择 任何第三方软件包"
 else
   echo "🔄 正在同步第三方软件仓库 Cloning run file repo..."
-  git clone --depth=1 https://github.com/wukongdaily/store.git /tmp/store-run-repo
+  git clone --depth=1 https://github.com/xiealon/store.git /tmp/store-run-repo
 
   mkdir -p /home/build/immortalwrt/extra-packages
   cp -r /tmp/store-run-repo/run/x86/* /home/build/immortalwrt/extra-packages/
@@ -94,7 +94,7 @@ if echo "$PACKAGES" | grep -q "clashoo"; then
     if [ -z "$_cl_ipk" ] || [ -z "$_cl_luci" ]; then
         echo "::error::PACKAGES 里选了 clashoo，但 packages/ 下缺包（clashoo=$_cl_ipk luci=$_cl_luci）——store 的 run 没解出 ipk"
         ls -la packages/ 2>/dev/null || true
-        echo "::error::预期来自 wukongdaily/store 的 run/x86/clashoo_2026.05.15_x86_64.run"
+        echo "::error::预期来自 xiealon/store 的 run/x86/clashoo_2026.05.15_x86_64.run"
         exit 1
     fi
     echo "✅ clashoo 就位: $_cl_ipk + $_cl_luci（自带 mihomo 内核，不再单独下载）"

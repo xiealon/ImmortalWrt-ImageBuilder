@@ -22,8 +22,28 @@
 # 判据主体是包管理器认不认。本版写死 apk（25.12 线只有 apk）：apk info -e。
 # 【v.180.167】唯一例外：daed-geoip / daed-geosite 的运行数据是软链接，包在册
 # 但链接断了同样算「缺失」—— 详见 _pa_data_ok 上方的说明。
-#   不看文件清单 —— 理由同 pkg-restore.sh 开头那三条：清单随版本漂、
-#   文件缺失 ≠ 功能缺失、两个判据混用会死循环。
+#   【v.180.192】补齐文件级判据（用户 2026-10-30 定）。原来这里写的是「不看文件清单」，
+#   理由是清单随版本漂 / 文件缺失 ≠ 功能缺失 / 两判据混用会死循环。这三条在
+#   「包完整在册、二进制被单独删掉」这种形态上都不成立：
+#     · 清单随版本漂 —— 读的是 /rom 侧固件原始清单（apk 域：/rom/lib/apk/packages），
+#       不随运行侧升级漂；
+#     · 文件缺失 ≠ 功能缺失 —— 这里只筛「可执行 / init / 共享库」，缺了包一定跑不起来；
+#       /usr/share 与 /etc/config 一律不看（用户改配置、删规则集不算坏）；
+#     · 混用会死循环 —— 不会：包级先判「该不该有」，文件级只在「包在册」之后补一刀，
+#       判定顺序单向；恢复动作仍只有一处（--tree → pkg-restore.sh 内有同源复检）。
+#   真实动机：clashoo 包里装的是 /usr/bin/mihomo 与 /usr/bin/clash-meta，包名与二进制名
+#   毫无关系。只判包名时这两个被删，--check 返回 0、探针 appbad 恒为 0 ——
+#   功能已死，日志全绿。24.10 线 2026-10-30 真机复现（192.168.1.201）：
+#     rm /usr/bin/mosdns → pkg-restore-apps.sh --check → rc=0
+#   覆盖范围（24.10 线真机实测，12 个包 86 个文件里落在判据内的 9 个）：
+#     clashoo           /usr/bin/mihomo /usr/bin/clash-meta /etc/init.d/clashoo
+#     daed              /usr/bin/daed /etc/init.d/daed
+#     luci-app-mosdns   /etc/init.d/mosdns
+#     mosdns            /usr/bin/mosdns
+#     sing-box          /usr/bin/sing-box /etc/init.d/sing-box
+#   25.12 的清单格式相同（一行一个绝对路径），但未在 25.12 新机上逐包复测路径覆盖率。
+#   LuCI 壳与 i18n（6 个包）的文件都在 /usr/share、/usr/lib/lua，判据内 0 行 → 恒放行，
+#   仍只靠记账判。这是有意的：那类文件删了顶多界面缺项，不会像二进制那样静默失去功能。
 #
 # 【关键】「该不该有」的门槛：只恢复固件里本来就带的那个应用。
 #   否则一台根本没装 daed 的机器，探针每轮都判「缺」、每轮装一次，装上了再被
@@ -177,13 +197,34 @@ _pa_data_ok() {
     esac
 }
 
+# 【v.180.192】包在册、关键文件被删 —— 判运行侧文件，不判 /rom：
+# 要问的是「现在能不能跑」，/rom 里的副本永远在，拿它当判据恒真。
+# 清单取 /rom 侧固件原始那份（apk 域 /rom/lib/apk/packages/<包>.list，一行一路径）：
+# 运行侧的 apk 记录是二进制的 installed.adb，取不出一行一路径的清单，正好只用 /rom 那份。
+# 清单本身不在 → 放行（判不了，别乱报）。
+# 与 pkg-restore.sh 的 _pr_files_ok 同源。两脚本各自独立部署（探针直接 exec 本脚本），
+# 没有共享库；重复的只是 6 行 case，比引入一层 source 稳。
+_pa_files_ok() {
+    _paf_l="$ROMDIR/lib/apk/packages/$1.list"
+    [ -f "$_paf_l" ] || return 0
+    while IFS= read -r _paf_f; do
+        case "$_paf_f" in
+        /usr/bin/*|/usr/sbin/*|/etc/init.d/*|/lib/*.so*|/usr/lib/*.so*) ;;
+        *) continue ;;
+        esac
+        [ -e "$_paf_f" ] || return 1
+    done < "$_paf_l"
+    return 0
+}
+
 # 输出「该有却没有」的包名（一行，空格分隔）。没有则输出空行。
-# 「没有」含两种形态：包不在册；或者包在册但运行数据断了（见 _pa_data_ok）。
+# 「没有」含三种形态：包不在册；包在册但运行数据断了（见 _pa_data_ok）；
+# 包在册但关键文件被删（见 _pa_files_ok，v.180.192）。
 _pa_missing() {
     _pa_m=""
     for _pa_p in $_PA_LIST; do
         _pa_should "$_pa_p" || continue
-        if _pa_installed "$_pa_p" && _pa_data_ok "$_pa_p"; then continue; fi
+        if _pa_installed "$_pa_p" && _pa_data_ok "$_pa_p" && _pa_files_ok "$_pa_p"; then continue; fi
         _pa_m="$_pa_m $_pa_p"
     done
     printf '%s\n' "$_pa_m" | sed 's/^ *//'
@@ -201,6 +242,8 @@ _pa_list() {
         if _pa_should "$_pa_p"; then
             if ! _pa_installed "$_pa_p"; then
                 _pa_s="缺失"
+            elif ! _pa_files_ok "$_pa_p"; then
+                _pa_s="文件缺失"   # 包在册但二进制/init 被删（v.180.192）
             elif _pa_data_ok "$_pa_p"; then
                 _pa_s="在位"
             else

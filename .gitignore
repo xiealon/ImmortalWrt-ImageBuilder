@@ -14,3 +14,10 @@ token.txt
 *.log
 *.tmp
 .DS_Store
+
+# 测试运行时临时目录
+# guard_pin.sh 在 tests/.r33.$$ 建夹具（mktemp 在 busybox-w32 下不可靠，改手拼路径），
+# 正常结束时它会 rm -rf 清掉，但中途 exit 或删除失败就会留下 —— 那时一次
+# `git add -A` 会把整个 rom/ 与 root/ 假根目录带进仓库。这里是兜底，不代替清理。
+tests/.r33.*/
+

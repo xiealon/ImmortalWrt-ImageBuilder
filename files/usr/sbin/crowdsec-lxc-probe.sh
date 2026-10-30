@@ -727,6 +727,8 @@ probe_tick() {
     # 具体判据在 bootstrap 的 --bouncer-heal 里：数 bouncer 日志中本轮进程
     # （最后一次 Starting 之后）出现几次 netlink 错误（不限子类）—— 脱节时 last_pull
     # 照样新鲜，60 秒那套守护判定永远看不见它。动作只有一次重启，不写任何配置。
+    # 是否真的动手还受 bootstrap 内的存活时间冷却约束（默认 1 小时 1 次）：
+    # 刚重启过的进程即便数到错误也只记日志、不重复重启。
     if [ "${PROBE_HEAL_EVERY:-10}" -gt 0 ] 2>/dev/null \
        && [ $((P_ROUND % PROBE_HEAL_EVERY)) -eq 0 ]; then
         _bh_rc=0

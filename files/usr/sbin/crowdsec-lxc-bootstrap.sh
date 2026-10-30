@@ -5971,12 +5971,35 @@ if [ "${1:-}" = "--bouncer-heal" ]; then
     # 拉到的数据不是一回事。拿它当判据会让这层兜底永久失效（_bh_dec 恒为 0）。
     # 现在直接数 bouncer 日志里的 netlink 错误，不再限定子类：bouncer 换版本时
     # 错误文案可能改（ENOENT -> 别的），限定子类会静默失效，只认大前缀才不会漏。
-    # 代价：不可自愈的错误也会触发重启，靠探针每 10 分钟才调一次来限流。
+    # 代价：不可自愈的错误也会触发重启，靠下面的存活时间冷却（默认 1 小时）限流。
     # awk 里的 n=0 是幂等关键：重启后日志末尾会追加新的 Starting，计数自然
     # 归零，既不依赖状态文件，也不会重启完下一轮又把同一批旧错误数一遍反复重启。
     _bh_err="$(tail -n 500 "$_BC_LOG" 2>/dev/null | awk '/Starting crowdsec-firewall-bouncer/{n=0; next} /netlink receive: /{n++} END{print n+0}')"
     case "$_bh_err" in ''|*[!0-9]*) _bh_err=0 ;; esac
     if [ "$_bh_err" -ge 2 ]; then
+        # 【v.180.198】重启冷却：进程存活不足 _bh_cool 秒就不动手（默认 3600）。
+        # 目的：把「修不好的错误 -> 每 10 分钟重启一次」压到「最坏 1 小时 1 次」，
+        # 而检查频率不变（判据仍每 10 分钟跑，健康时开销为零）。
+        # 取存活时间用 /proc/<pid>/stat 的 starttime 与 /proc/uptime 相减，
+        # 不依赖 ps -o etimes（busybox 不一定编了 -o）。
+        _bh_cool="${CS_BOUNCER_HEAL_COOLDOWN:-3600}"
+        _bh_pid="$(run pgrep -f "crowdsec-firewall-bouncer" 2>/dev/null | head -n1)"
+        if [ -n "$_bh_pid" ] && [ -r "/proc/$_bh_pid/stat" ]; then
+            _bh_start="$(awk -F') ' '{split($2,f," "); print f[20]}' "/proc/$_bh_pid/stat" 2>/dev/null)"
+            _bh_up="$(awk '{print int($1)}' /proc/uptime 2>/dev/null)"
+            if [ -n "$_bh_start" ] && [ -n "$_bh_up" ]; then
+                case "${_bh_start}${_bh_up}" in
+                *[!0-9]*) : ;;
+                *)
+                    _bh_age=$(( _bh_up - _bh_start / 100 ))
+                    if [ "$_bh_age" -lt "$_bh_cool" ]; then
+                        log "[bouncer] 进程仅存活 ${_bh_age}s（< ${_bh_cool}s，刚重启过）-> 本轮跳过重启"
+                        exit 0
+                    fi
+                    ;;
+                esac
+            fi
+        fi
         _bh_kind="$(tail -n 500 "$_BC_LOG" 2>/dev/null | grep -o 'netlink receive: [a-zA-Z ]*' | tail -1 | sed 's/^netlink receive: //')"
         log "[bouncer] ** 本轮进程已 ${_bh_err} 次 netlink 错误（最近：${_bh_kind:-未知}）-> 重启 bouncer"
         _bouncer_service_restart >/dev/null 2>&1 || true

@@ -22,7 +22,7 @@
 
 set -u
 
-# 【v.180.199】路径全部写死：固件里就在 /usr/sbin，不再做「同目录兜底」分支。
+# 【2026-10-31.0256】路径全部写死：固件里就在 /usr/sbin，不再做「同目录兜底」分支。
 _pcr_lib=/usr/sbin/pkg-cache-lib.sh
 if [ ! -f "$_pcr_lib" ]; then
     echo "找不到 $_pcr_lib" >&2
@@ -30,7 +30,7 @@ if [ ! -f "$_pcr_lib" ]; then
 fi
 . "$_pcr_lib"
 
-# 【v.180.199】opkg 是 24.10 的系统包管理器，必然在位，不再 command -v 探测。
+# 【2026-10-31.0256】opkg 是 24.10 的系统包管理器，必然在位，不再 command -v 探测。
 
 _pcr_fix=/usr/sbin/pkg-cache-fix.sh
 

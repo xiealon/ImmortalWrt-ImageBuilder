@@ -19,7 +19,7 @@
 
 set -u
 
-# 【v.180.199】路径写死：固件里就在 /usr/sbin，不再做「同目录兜底」分支。
+# 【2026-10-31.0256】路径写死：固件里就在 /usr/sbin，不再做「同目录兜底」分支。
 _pcf_lib=/usr/sbin/pkg-cache-lib.sh
 if [ ! -f "$_pcf_lib" ]; then
     echo "找不到 $_pcf_lib" >&2
@@ -51,7 +51,7 @@ _pcf_beat() {
     return 1
 }
 
-# 【v.180.199】opkg 是 24.10 的系统包管理器，必然在位，不再 command -v 探测。
+# 【2026-10-31.0256】opkg 是 24.10 的系统包管理器，必然在位，不再 command -v 探测。
 
 # ② 挂源：按前缀删掉旧行再追加，其余源一个字不碰
 _pcf_feed_ensure() {

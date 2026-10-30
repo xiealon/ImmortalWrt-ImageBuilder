@@ -36,7 +36,7 @@ set -u
 ROMDIR="${ROMDIR:-/rom}"
 PKGROOT="${PKGROOT:-}"
 
-# 【v.180.199】包级安装脚本路径写死（用户 2026-10-31 定：能写死的都写死）。
+# 【2026-10-31.0256】包级安装脚本路径写死（用户 2026-10-31 定：能写死的都写死）。
 # 固件里就在 /usr/sbin；「同目录兜底」那条分支在真机上从未走到过，删掉。
 RESTORE_BIN="${RESTORE_BIN:-/usr/sbin/pkg-cache-restore.sh}"
 

@@ -155,7 +155,7 @@ _PA_LIST="${CS_PROBE_APPS:-$_PA_CLASHOO $_PA_DAED $_PA_MOSDNS $_PA_COMMON}"
 
 log() { printf '[APP] %s\n' "$*"; }
 
-# 【v.180.199】_pa_pm 删除：opkg 是 24.10 的系统包管理器，必然在位（用户 2026-10-31 定）。
+# 【2026-10-31.0256】_pa_pm 删除：opkg 是 24.10 的系统包管理器，必然在位（用户 2026-10-31 定）。
 # 原来那层 command -v 探测只会产出一个永不触发的 exit 2。
 
 # 已装包名表缓存：一次全表扫描，四次判定共用（同 pkg-restore.sh 的 _PR_CACHE）

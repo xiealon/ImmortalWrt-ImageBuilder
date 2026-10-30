@@ -25,7 +25,7 @@ ROOT_DIR="${ROOT_DIR%/}"
 
 pcl_log() {
     echo "[PKG] $*"
-    # 【v.180.199】logger 是 busybox 自带 applet，写死不探测。
+    # 【2026-10-31.0256】logger 是 busybox 自带 applet，写死不探测。
     logger -t pkg-cache "$*" 2>/dev/null
     return 0
 }
@@ -53,7 +53,7 @@ pcl_log_q() {
 # 留着 `if [ "$PKG_MGR" = "apk" ]` 的结果是「一半分支永远不可达」——
 # 判据名义上存在，实际上谁也走不到，改起来还得多想一层。
 #
-# 【v.180.199】连 OPKG_BIN 变量也删了：直接写 `opkg`，命令名不再走一层间接。
+# 【2026-10-31.0256】连 OPKG_BIN 变量也删了：直接写 `opkg`，命令名不再走一层间接。
 # 需要假的 opkg 时放 PATH 前面即可，不必再造一个环境变量入口。
 
 PKG_CACHE_RO="${PKG_CACHE_RO:-$ROM_DIR/root/pkg-cache}"

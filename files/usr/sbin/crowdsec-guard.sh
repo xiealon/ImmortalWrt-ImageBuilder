@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.198】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【2026-10-31.0256】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-guard：核心脚本防篡改，以 /rom（squashfs 只读分区）为不可变基准
 #
 # 为什么不用 chattr +i：/usr/sbin 下的文件在 overlayfs 的合并视图里。还没被写过时，
@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-30.180.198"
+SCRIPT_VER="2026-10-31.0256"
 # 【v.180.152】补进 v.180.146~151 新增的 6 个恢复脚本。
 # 【v.180.162】再加 pkg-restore-apps.sh（应用主程序恢复），共 7 个。
 # 增删恢复脚本时必须同步这张清单 —— 漏一个是「脚本自己也会被删掉」的静默失效：
@@ -427,7 +427,7 @@ _lapi_audit() {
     # 容器没就位（overlay 未挂）时，LAPI 探测只会产出一堆「不可达」噪声。
     [ "$_CT_OK" = "1" ] || return 0
     command -v wget >/dev/null 2>&1 || return 0
-    # 【v.180.199】lxc-attach 必在（容器就是 LXC），写死不探测（用户 2026-10-31 定）。
+    # 【2026-10-31.0256】lxc-attach 必在（容器就是 LXC），写死不探测（用户 2026-10-31 定）。
     _lnow="$(date +%s 2>/dev/null)"
     case "$_lnow" in ''|*[!0-9]*) return 0 ;; esac
     _llast=0
@@ -594,7 +594,7 @@ _cs_cfg_audit() {
     return 0
 }
 
-# 【v.180.199】cmp 是 busybox 基础 applet，写死不探测（用户 2026-10-31 定）。
+# 【2026-10-31.0256】cmp 是 busybox 基础 applet，写死不探测（用户 2026-10-31 定）。
 
 # 容器侧两道门（v.108.45）。任一不满足 → 这一组整体跳过，一个字节都不碰。
 _ct_gate() {

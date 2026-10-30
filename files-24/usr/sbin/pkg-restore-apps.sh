@@ -19,27 +19,24 @@
 #   pkg-restore-apps.sh [--repair]  装回缺的那些，再复判一次
 #                                   0 = 全部在位；1 = 仍有缺（或装不上）
 #
-# 判据主体是包管理器认不认（opkg list-installed / apk info -e）。
+# 判据主体是包管理器认不认。本版写死 opkg（24.10 线只有 opkg）：opkg list-installed。
 # 【v.180.167】唯一例外：daed-geoip / daed-geosite 的运行数据是软链接，包在册
 # 但链接断了同样算「缺失」—— 详见 _pa_data_ok 上方的说明。
 #   不看文件清单 —— 理由同 pkg-restore.sh 开头那三条：清单随版本漂、
 #   文件缺失 ≠ 功能缺失、两个判据混用会死循环。
 #
 # 【关键】「该不该有」的门槛：只恢复固件里本来就带的那个应用。
-#   否则一台根本没装 daed 的机器，探针每轮都判「缺」、每轮装一次，装上了再被
-#   用户卸掉，又装 —— 就不是修复是强加。判据取 /rom 侧留下的痕迹：
-#     · opkg：/rom/usr/lib/opkg/info/<包>.list —— 固件里装过它才有这份清单，
+#     · /rom/usr/lib/opkg/info/<包>.list —— 固件里装过它才有这份清单，
 #             而且是只读基底，opkg remove 删不掉（运行侧那份会被删，不能用来判）
-#     · apk ：/rom/root/apk-cache/<包>-*.apk —— build25.sh 收进固件的那批包库
-#     · opkg 自建包：/rom/root/pkg-cache/<包>_*.ipk —— build24.sh 收的那批
-#   三处都没有 → 这台机器的固件没带这个应用 → 什么都不做，也不报错。
+#     · /rom/root/pkg-cache/<包>_*.ipk —— build24.sh 收进固件的那批包库
+#   两处都没有 → 这台机器的固件没带这个应用 → 什么都不做，也不报错。
 #
 # 环境变量：
 #   CS_PROBE_APPS  应用（包名）清单，空格分隔。默认见 _PA_LIST
 #   ROMDIR         只读基座，默认 /rom
 #   RESTORE_BIN    装包执行体，默认 /usr/sbin/pkg-restore.sh
 #
-# 退出码：0 / 1 / 2（2 只在 --check 用于「判断不了」）
+# 退出码：0 / 1 / 2（2 用于「判断不了」：opkg 不在，判不了 ≠ 包丢了）
 
 set -u
 ROMDIR="${ROMDIR:-/rom}"
@@ -140,46 +137,32 @@ _PA_LIST="${CS_PROBE_APPS:-$_PA_CLASHOO $_PA_DAED $_PA_MOSDNS $_PA_COMMON}"
 
 log() { printf '[APP] %s\n' "$*"; }
 
-# 包管理器：两个都不在 → 判断不了。返回 0 且置 _PA_PM，否则返回 1。
+# 包管理器：本版写死 opkg（24.10 线只有 opkg），不做跨版本探测。
+# 只查「opkg 在不在」——不在就返回 1，调用方 exit 2。
+# rc=2 是「判断不了」，不是「包丢了」：真丢了会返回 0、由 _pa_installed 说缺。
+# 这个口径与 pkg-restore.sh --deps 的 rc=2 一致，两边不能一个有一个没有。
 _PA_PM=""
 _pa_pm() {
     _PA_PM=opkg
-    return 0
+    command -v opkg >/dev/null 2>&1
 }
 
 # 已装包名表缓存：一次全表扫描，四次判定共用（同 pkg-restore.sh 的 _PR_CACHE）
 _PA_CACHE=""
 _pa_installed() {
-    if [ "$_PA_PM" = "opkg" ]; then
-        if [ -z "$_PA_CACHE" ]; then
-            _PA_CACHE=$(opkg list-installed 2>/dev/null | sed -n 's/ - .*//p')
-        fi
-        printf '%s\n' "$_PA_CACHE" | grep -qx "$1"
-        return $?
+    if [ -z "$_PA_CACHE" ]; then
+        _PA_CACHE=$(opkg list-installed 2>/dev/null | sed -n 's/ - .*//p')
     fi
-    apk info -e "$1" >/dev/null 2>&1
+    printf '%s\n' "$_PA_CACHE" | grep -qx "$1"
 }
 
-# 固件里本来就有这个应用吗 —— 见文件头「该不该有」的门槛
+# 固件里本来就有这个应用吗 —— 见文件头「该不该有」的门槛。
+# 本版只看 opkg 侧的两处痕迹；apk 的两条判据随版本拆分一并删除。
 _pa_should() {
-    # opkg：固件装过才有 info/<包>.list。只读基底，remove 删不掉运行侧那份。
+    # 固件装过才有 info/<包>.list。只读基底，opkg remove 删不掉运行侧那份。
     [ -f "$ROMDIR/usr/lib/opkg/info/$1.list" ] && return 0
-    # apk：以**固件出厂的已安装数据库**为准。
-    # 【v.180.165】原来这里拿「包库里有没有 <包>-*.apk」当判据，是错的：
-    # 包库收的是兜底包，25.12 线 114 个 apk 远多于固件实际安装的 622 个包，
-    # 于是包库里每一个「有包但没装」的包都被判成「该有」。
-    # 2026-10-29 的 25.12 真机复现：ssrp 组 5 个包被判缺失，第 3 轮 --repair
-    # 把 xray-core / xray-plugin 装了上去（运行时 624 vs 出厂 622）——
-    # 这不是修复，是把用户没选的应用强加给机器。
-    # /rom/lib/apk/db/installed 是出厂的已安装库（P:<包名> 一行一个），
-    # 记录的是「固件带了什么」，与之后 user 装了什么都不相干，正好是判据。
-    if [ -f "$ROMDIR/lib/apk/db/installed" ]; then
-        grep -qxF "P:$1" "$ROMDIR/lib/apk/db/installed" 2>/dev/null
-        return $?
-    fi
-    # 兜底：老固件没有 apk 数据库时才退回包库判据（24.10 线走不到这里，
-    # 它的包都在 info/<包>.list 里命中了第一行）。
-    for _pa_f in "$ROMDIR/root/apk-cache/$1"-*.apk "$ROMDIR/root/pkg-cache/$1"_*.ipk; do
+    # 构建时直接铺进固件、没走 opkg 的应用，只在包库里留了 ipk。
+    for _pa_f in "$ROMDIR/root/pkg-cache/$1"_*.ipk; do
         [ -f "$_pa_f" ] && return 0
     done
     return 1
@@ -250,16 +233,16 @@ _pa_repair() {
 
 case "${1:---repair}" in
 --check)
-    _pa_pm || { log "判断不了：opkg 与 apk 都不在"; exit 2; }
+    _pa_pm || { log "判断不了：opkg 不在"; exit 2; }
     _pa_check && exit 0 || exit 1
     ;;
 --list)
-    _pa_pm || { log "判断不了：opkg 与 apk 都不在"; exit 2; }
+    _pa_pm || { log "判断不了：opkg 不在"; exit 2; }
     _pa_list
     exit 0
     ;;
 --repair)
-    _pa_pm || { log "判断不了：opkg 与 apk 都不在"; exit 2; }
+    _pa_pm || { log "判断不了：opkg 不在"; exit 2; }
     _pa_repair && exit 0 || exit 1
     ;;
 -*)

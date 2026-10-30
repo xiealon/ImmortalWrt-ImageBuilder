@@ -5951,7 +5951,7 @@ if [ "${1:-}" = "--probe-check" ]; then
     exit $?
 fi
 
-# ---- 下发面健康检查（探针每 30 分钟一次，v.180.198）----
+# ---- 下发面健康检查（探针每 10 分钟一次，v.180.198）----
 # 为什么不能塞进 --probe-check：那条路径 60 秒一轮且只读，而这里要重启服务。
 # 为什么不能用 last_pull 判：netlink 脱节时 **拉取是成功的**，last_pull 照常刷新。
 # 判据改成直接数 bouncer 日志里的 netlink 错误 —— 它是最接近症状的信号：
@@ -5971,7 +5971,7 @@ if [ "${1:-}" = "--bouncer-heal" ]; then
     # 拉到的数据不是一回事。拿它当判据会让这层兜底永久失效（_bh_dec 恒为 0）。
     # 现在直接数 bouncer 日志里的 netlink 错误，不再限定子类：bouncer 换版本时
     # 错误文案可能改（ENOENT -> 别的），限定子类会静默失效，只认大前缀才不会漏。
-    # 代价：不可自愈的错误也会触发重启，靠探针每 30 分钟才调一次来限流。
+    # 代价：不可自愈的错误也会触发重启，靠探针每 10 分钟才调一次来限流。
     # awk 里的 n=0 是幂等关键：重启后日志末尾会追加新的 Starting，计数自然
     # 归零，既不依赖状态文件，也不会重启完下一轮又把同一批旧错误数一遍反复重启。
     _bh_err="$(tail -n 500 "$_BC_LOG" 2>/dev/null | awk '/Starting crowdsec-firewall-bouncer/{n=0; next} /netlink receive: /{n++} END{print n+0}')"
@@ -5982,7 +5982,7 @@ if [ "${1:-}" = "--bouncer-heal" ]; then
         _bouncer_service_restart >/dev/null 2>&1 || true
         sleep 2
         if cs_active_on_host; then
-            log "[bouncer] 重启后进程在跑；netlink 错误是否消失看下一轮（30 分钟后）"
+            log "[bouncer] 重启后进程在跑；netlink 错误是否消失看下一轮（10 分钟后）"
         else
             log "[bouncer] 重启后进程未起来（交给探针与下一轮）"
         fi

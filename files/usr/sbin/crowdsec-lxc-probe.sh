@@ -63,9 +63,9 @@ PROBE_FAIL_ALERT="${CS_PROBE_FAIL_ALERT:-3}"
 # 「bouncer 拉得到吗」，配置被改坏但还能拉的时候它照样是绿的 —— 所以每隔
 # AUDIT_EVERY 轮做一次从头到脚的体检。0 = 关闭。
 PROBE_AUDIT_EVERY="${CS_PROBE_AUDIT_EVERY:-30}"
-# 【v.180.198】bouncer 下发面健康检查间隔（按轮数，默认 30 轮 = 30 分钟）。
+# 【v.180.198】bouncer 下发面健康检查间隔（按轮数，默认 10 轮 = 10 分钟）。
 # 与体检同频但独立开关：体检只读（--verify-only 承诺不写），这里要重启服务。
-PROBE_HEAL_EVERY="${CS_PROBE_HEAL_EVERY:-30}"
+PROBE_HEAL_EVERY="${CS_PROBE_HEAL_EVERY:-10}"
 # 【v.108.67 设上限 / v.108.68 分档】bootstrap 内部每条宿主命令都有上限（v.108.66），
 # 但「节点数 × 10s」没有上界；probe 是常驻进程，卡在 wait 上不退 = procd 不 respawn
 # = 监视链路静默停摆（本文件里最像「看起来在跑、其实什么都没做」的一处）。
@@ -727,7 +727,7 @@ probe_tick() {
     # 具体判据在 bootstrap 的 --bouncer-heal 里：数 bouncer 日志中本轮进程
     # （最后一次 Starting 之后）出现几次 netlink 错误（不限子类）—— 脱节时 last_pull
     # 照样新鲜，60 秒那套守护判定永远看不见它。动作只有一次重启，不写任何配置。
-    if [ "${PROBE_HEAL_EVERY:-30}" -gt 0 ] 2>/dev/null \
+    if [ "${PROBE_HEAL_EVERY:-10}" -gt 0 ] 2>/dev/null \
        && [ $((P_ROUND % PROBE_HEAL_EVERY)) -eq 0 ]; then
         _bh_rc=0
         _boot --bouncer-heal >>"$BOOT_LOG" 2>&1 || _bh_rc=$?

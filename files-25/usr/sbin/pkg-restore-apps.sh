@@ -139,13 +139,11 @@ _PA_LIST="${CS_PROBE_APPS:-$_PA_CLASHOO $_PA_DAED $_PA_MOSDNS $_PA_COMMON}"
 
 log() { printf '[APP] %s\n' "$*"; }
 
-# 包管理器：本版写死 apk（25.12 线只有 apk），不做跨版本探测。
+# 包管理器：本版写死 apk（25.12 线只有 apk），不探测、不分支。
 # 只查「apk 在不在」——不在就返回 1，调用方 exit 2。
 # rc=2 是「判断不了」，不是「包丢了」：真丢了会返回 0、由 _pa_installed 说缺。
-# 这个口径与 pkg-restore.sh --deps 的 rc=2 一致，两边不能一个有一个没有。
-_PA_PM=""
+# 探针 _apps_watch 认这个 2（crowdsec-lxc-probe.sh:420）：不计数、不动作。
 _pa_pm() {
-    _PA_PM=apk
     command -v apk >/dev/null 2>&1
 }
 

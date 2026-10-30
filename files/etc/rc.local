@@ -86,7 +86,8 @@ rm -rf "$LOCK" 2>/dev/null
 # 靠它决定要不要让 dnsmasq 退 53，而 LAN 静态地址由 bootstrap 的 NETBASE.lan_static 落地。
 # 为什么放在锁外：它不碰容器、不碰锁内资源，只写 uci + 重启 smartdns；
 # 硬顶 60s（脚本内部重启后要等约 15s），超时只记日志 —— DNS 配不上不该把开机收尾拖住。
-# 失败不判死：探针每轮体检 53，连续不可用且冷却闸门通过时会自己再调 --repair。
+# 失败不判死：探针在「上游 0 条」连续 3 轮、且冷却闸门通过时会自己再调 --config
+# 重写一遍（v.180.198 起探针只数上游段，不再判 53 —— 53 起不来只能靠人看日志）。
 SD_RESTORE=/usr/sbin/pkg-restore-smartdns.sh
 if [ -x "$SD_RESTORE" ]; then
     timeout 60 /bin/sh "$SD_RESTORE" --config >>"$LOG" 2>&1

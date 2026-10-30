@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """生成「9 组链式站位 · 28 节点」架构图 SVG + PNG
 
-对应 crowdsec-lxc-bootstrap.sh v.180.192。
+对应 crowdsec-lxc-bootstrap.sh v.180.198。
 节点与分组直接取自脚本的 GROUP_SEQ / GROUP_TITLE_* / GROUP_DEP_* / DAG_NODES，
 不是手写清单。
 
@@ -90,7 +90,7 @@ A('<text x="%d" y="127" font-size="16" fill="#222222" font-family="%s">'
 A('<text x="%d" y="184" font-size="30" font-weight="700" fill="#111111" font-family="%s">'
   'crowdsec-lxc-bootstrap.sh · 9 组 · 28 节点</text>' % (PAD, FONT))
 A('<text x="%d" y="214" font-size="17" fill="#666666" font-family="%s">'
-  'v.180.192 · 组内每个节点都是「先验证现场，达标就零写入；不达标才构建」</text>' % (PAD, FONT))
+  'v.180.198 · 组内每个节点都是「先验证现场，达标就零写入；不达标才构建」</text>' % (PAD, FONT))
 
 # 阶段图例
 lx = PAD

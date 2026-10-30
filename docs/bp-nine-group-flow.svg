@@ -6,7 +6,7 @@
 <text x="56" y="101" font-size="16" fill="#222222" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif"><tspan>项目</tspan><tspan fill="#1a56c4">https://github.com/wukongdaily/ImmortalWrt-ImageBuilder</tspan></text>
 <text x="56" y="127" font-size="16" fill="#222222" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">进行修改的全自动化的immortalwrt的自动编译项目。</text>
 <text x="36" y="184" font-size="30" font-weight="700" fill="#111111" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">crowdsec-lxc-bootstrap.sh · 9 组 · 28 节点</text>
-<text x="36" y="214" font-size="17" fill="#666666" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">v.180.192 · 组内每个节点都是「先验证现场，达标就零写入；不达标才构建」</text>
+<text x="36" y="214" font-size="17" fill="#666666" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">v.180.198 · 组内每个节点都是「先验证现场，达标就零写入；不达标才构建」</text>
 <rect x="36" y="226" width="16" height="16" fill="#2f6fd0"/>
 <text x="58" y="240" font-size="15" fill="#333333" font-family="'Microsoft YaHei','Noto Sans CJK SC',sans-serif">Ⅰ 网络</text>
 <rect x="148" y="226" width="16" height="16" fill="#7b4fd0"/>

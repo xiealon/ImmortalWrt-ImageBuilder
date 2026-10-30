@@ -1,5 +1,5 @@
 #!/bin/bash
-# 【v.180.79】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.198】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 
 
 CUSTOM_PACKAGES="$CUSTOM_PACKAGES aria2 luci-app-aria2 luci-i18n-aria2-zh-cn"

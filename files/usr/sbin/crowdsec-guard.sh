@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【v.180.78】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【v.180.198】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-guard：核心脚本防篡改，以 /rom（squashfs 只读分区）为不可变基准
 #
 # 为什么不用 chattr +i：/usr/sbin 下的文件在 overlayfs 的合并视图里。还没被写过时，
@@ -105,7 +105,7 @@ GLOG="${CS_GUARD_LOG:-/root/crowdsec-guard.log}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-30.180.197"
+SCRIPT_VER="2026-10-30.180.198"
 # 【v.180.152】补进 v.180.146~151 新增的 6 个恢复脚本。
 # 【v.180.162】再加 pkg-restore-apps.sh（应用主程序恢复），共 7 个。
 # 增删恢复脚本时必须同步这张清单 —— 漏一个是「脚本自己也会被删掉」的静默失效：

@@ -731,29 +731,16 @@ PKGROOT="${PKGROOT:-}"
 #     （拷文件那套对 conffiles 一律 continue，缺了永远补不上）。
 # 装不上就明确报错，不再拷文件兜底：拷回来的包记不上账，是能跑但半残。
 # v.180.150 起 bootstrap 里已无任何文件恢复路径，连 bouncer 也走本地包安装。
-# 【v.180.130】一份脚本同时服务 24.10(opkg) 与 25.12(apk)。
-# 25.12 起 OpenWrt 全面换成 apk：包是 .apk、索引是 packages.adb、命令行是 apk，
-# 和 opkg 那套（.ipk / Packages 纯文本 / opkg）没有任何兼容性。但「被卸的包用
-# 固件自带的装回来」两条线是同一个需求，所以不拆成两份脚本 —— 只在这里分流一次，
-# 其余逻辑（/rom 优先解析、死源清理、guard/probe 守护）完全共用，改一处两边都受益。
-# 24.10 只有 opkg：两份 files 已按版本拆开，不再运行时探测。
-_PKG_MGR="opkg"
-case "$_PKG_MGR" in
-apk)
-    _PKG_DEF_OV=/root/apk-cache
-    _PKG_DEF_RO=/rom/root/apk-cache
-    _PKG_IDX=packages.adb
-    _PKG_EXT=apk
-    ;;
-*)
-    _PKG_DEF_OV=/root/pkg-cache
-    _PKG_DEF_RO=/rom/root/pkg-cache
-    # opkg 的 file:// 源只认 Packages.gz，判据必须与 opkg 的真实要求一致，
-    # 否则会把「有 Packages 但 opkg 读不了」的目录当成可用源指过去。
-    _PKG_IDX=Packages.gz
-    _PKG_EXT=ipk
-    ;;
-esac
+# 【v.180.198】本仓库只编 24.10，包管理器就是 opkg —— 写死，不再运行时判断。
+# 25.12 那套 apk（.apk / packages.adb / etc/apk/repositories）完整地活在自己的仓库里，
+# 两个仓库各管各的（用户 2026-10-31 定）。原来的 _PKG_MGR + case 分流在 24.10 上
+# 恒走 opkg，apk 那一路永远不可达 —— 留着只让人多读一层，判断等于没判断。
+_PKG_DEF_OV=/root/pkg-cache
+_PKG_DEF_RO=/rom/root/pkg-cache
+# opkg 的 file:// 源只认 Packages.gz，判据必须与 opkg 的真实要求一致，
+# 否则会把「有 Packages 但 opkg 读不了」的目录当成可用源指过去。
+_PKG_IDX=Packages.gz
+_PKG_EXT=ipk
 
 PKG_CACHE="${PKG_CACHE:-$_PKG_DEF_OV}"
 # 【v.180.128】只读基座副本，解析时优先于 overlay。
@@ -798,28 +785,8 @@ _pkgcache_ready() {
 # 当前真正可用的目录。
 _pkgcache_feed_ensure() {
     _pkgcache_resolve || return 1
-    # apk 的源列表是 /etc/apk/repositories，一行一个 URL，没有 "src/gz 名字" 前缀。
-    # 清理只删自己那条（以 file:// 开头且含 apk-cache 的整行），别动官方源。
-    if [ "$_PKG_MGR" = "apk" ]; then
-        _pcf_conf="${PKG_CACHE_CONF:-/etc/apk/repositories}"
-        _pcf_dir="${_pcf_conf%/*}"
-        _pcf_tmp="$_pcf_conf.tmp.$$"
-        mkdir -p "$_pcf_dir" 2>/dev/null
-        if [ -f "$_pcf_conf" ]; then
-            # 只认「目录名以 apk-cache / pkg-cache 结尾」的 file:// 行：
-            # 不靠路径里出现字样（PKG_CACHE 一改路径就会漏删、越挂越多），
-            # 也不无脑删所有 file://（用户自己挂 /mnt/usb/pkgs 那种源不该被清）。
-            grep -vE '^file://.*/(apk|pkg)-cache/?$' "$_pcf_conf" > "$_pcf_tmp" 2>/dev/null
-            [ -f "$_pcf_tmp" ] || return 1
-        else
-            : > "$_pcf_tmp" 2>/dev/null || return 1
-        fi
-        printf 'file://%s\n' "$_PKG_CACHE_ACT" >> "$_pcf_tmp" 2>/dev/null || return 1
-        cat "$_pcf_tmp" > "$_pcf_conf" 2>/dev/null || { rm -f "$_pcf_tmp"; return 1; }
-        rm -f "$_pcf_tmp"
-        log "[PKG] 已挂载本地 apk 源：file://$_PKG_CACHE_ACT"
-        return 0
-    fi
+    # 【v.180.198】原来这里还分 apk / opkg 两路（apk 写 /etc/apk/repositories，
+    # opkg 写 /etc/opkg/customfeeds.conf）。本仓库固定 opkg，apk 那段删除。
     # PKG_CACHE_CONF 只给夹具用：生产环境为空，写的仍是 /etc/opkg/customfeeds.conf
     _pcf_conf="${PKG_CACHE_CONF:-/etc/opkg/customfeeds.conf}"
     _pcf_dir="${_pcf_conf%/*}"
@@ -842,9 +809,8 @@ _pkgcache_feed_ensure() {
 # 让 opkg 认识这个源。优先直接铺索引到 lists 目录 —— opkg update 会去连所有
 # 远程源，离线时白等几十秒，而本地索引根本不需要联网。
 _pkgcache_lists() {
-    # apk 不需要铺索引：它直接读源目录里的 packages.adb，没有 opkg 那种
-    # /var/opkg-lists 中间层，也就不存在「被 opkg update 清掉」的问题。
-    [ "$_PKG_MGR" = "apk" ] && return 0
+    # 【v.180.198】原来开头是 `[ "$_PKG_MGR" = "apk" ] && return 0`（apk 没有 lists
+    # 中间层，不需要铺索引）。本仓库固定 opkg，索引必须铺到 lists_dir，那行删除。
     # PKG_CACHE_LISTS 只给夹具用：生产环境为空，仍按 /etc/opkg.conf 的 lists_dir 走
     if [ -n "${PKG_CACHE_LISTS:-}" ]; then
         _pcl_dir="$PKG_CACHE_LISTS"
@@ -871,7 +837,8 @@ _pkgcache_lists() {
 # 而 opkg update 会把本地 file:// 源判为「签名缺失」直接丢弃该源的索引。
 # 所以每轮检查一次，缺了就从包库重新铺 —— 成本是一次 cp，换的是「永远可用」。
 _pkgcache_lists_ensure() {
-    [ "$_PKG_MGR" = "apk" ] && return 0
+    # 【v.180.198】原来开头是 `[ "$_PKG_MGR" = "apk" ] && return 0`。
+    # 本仓库固定 opkg，这段自愈必须留着（见上面两行说明），那行删除。
     if [ -n "${PKG_CACHE_LISTS:-}" ]; then
         _ple_dir="$PKG_CACHE_LISTS"
     else
@@ -895,51 +862,9 @@ _pkgcache_lists_ensure() {
 #    参数支持与否先探测一次；老版本 opkg 没这开关就不带，别为个参数把整条路堵死。
 _PKG_SIGOPT=""
 
-# apk 侧装回。25.12 真机实测（apk-tools 3.0.5）把原来两条路全否了：
-#   ① `apk add <绝对路径.apk>`：依赖要「从源里取」，--no-network 一句
-#      "masked in: --no-network" 连 file:// 一起屏蔽 → 必失败（rc=17）。
-#   ② `--repository file://<目录>`：只按 v2 布局找 <目录>/<arch>/APKINDEX.tar.gz，
-#      我们的索引是 <目录>/packages.adb → 报 "No such file"。
-# 现在只走一条：repositories 文件里写 `file://<目录>/packages.adb`，用
-# --repositories-file 只喂本地这一个源。唯一源是本地 → 不会联网，
-# 不需要 --no-network，也就不会被 mask。
-# 记账位置与 opkg 不同（apk 写 /etc/apk/world），对外效果一样：
-# 包管理器认这个包是装着的，LuCI 软件包页面看得见。
-_pkgcache_install_apk() {
-    _pci_pkg="$1"
-    _pkgcache_ready || return 1
-    command -v apk >/dev/null 2>&1 || return 1
-    # 已装就跳过：没坏的东西不该重装一遍
-    # 【v.180.161】PCR_FORCE=1 时不跳：同上，记账在、文件缺。
-    if [ "${PCR_FORCE:-0}" != "1" ] && apk info -e "$_pci_pkg" >/dev/null 2>&1; then
-        return 0
-    fi
-    # 【v.180.184】apk add 对已装包是 no-op —— 「记账有、文件被删」只有 apk fix
-    # 会按校验和重装（实测删掉 /usr/bin/dns2socks 后 fix 打出 Reinstalling 并补回）。
-    _pci_repos="${TMPDIR:-/tmp}/bootstrap-pkg.repos"
-    printf 'file://%s/%s\n' "$_PKG_CACHE_ACT" "$_PKG_IDX" > "$_pci_repos" 2>/dev/null || {
-        log "[PKG] 写不出临时源文件：$_pci_repos"
-        return 1
-    }
-    if [ "${PCR_FORCE:-0}" = "1" ] && apk info -e "$_pci_pkg" >/dev/null 2>&1; then
-        if apk fix --allow-untrusted --repositories-file "$_pci_repos" "$_pci_pkg" >/dev/null 2>&1; then
-            log "[PKG] 本地 apk 强制重装成功：$_pci_pkg"
-            rm -f "$_pci_repos"
-            return 0
-        fi
-        log "[PKG] 本地 apk 强制重装失败：$_pci_pkg（本地库没有它）"
-        rm -f "$_pci_repos"
-        return 1
-    fi
-    if apk add --allow-untrusted --repositories-file "$_pci_repos" "$_pci_pkg" >/dev/null 2>&1; then
-        log "[PKG] 本地 apk 源装回成功：$_pci_pkg（/etc/apk/world 记账正确，LuCI 可见）"
-        rm -f "$_pci_repos"
-        return 0
-    fi
-    rm -f "$_pci_repos"
-    log "[PKG] 本地 apk 装不回 $_pci_pkg（本地库缺它或缺依赖），放弃 —— 不再拷文件兜底"
-    return 1
-}
+# 【v.180.198】这里原本是 _pkgcache_install_apk()，连同它上面那段 25.12 实测说明
+# （apk add / --repository / --repositories-file 的取舍）。本仓库固定 opkg，
+# 该函数已无调用点，整段删除。
 
 _pkgcache_install() {
     # 【v.180.133】优先交给独立脚本 pkg-cache-restore.sh：它自己会先按
@@ -952,10 +877,8 @@ _pkgcache_install() {
         fi
         log "[PKG] pkg-cache-restore.sh 未成功：$1，回退内置实现"
     fi
-    if [ "$_PKG_MGR" = "apk" ]; then
-        _pkgcache_install_apk "$1"
-        return $?
-    fi
+    # 【v.180.198】原来这里分 apk / opkg 两路；本仓库固定 opkg，
+    # apk 那一路（_pkgcache_install_apk）整段删除。
     _pci_pkg="$1"
     _pkgcache_ready || return 1
     command -v "$OPKG_BIN" >/dev/null 2>&1 || return 1

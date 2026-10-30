@@ -45,43 +45,24 @@ pcl_log_q() {
     return 0
 }
 
-# ---- 包管理器：25.12 起 apk，24.10 及以前 opkg ----
-# PKG_MGR_OVERRIDE 只给夹具用：生产环境为空，仍按真实二进制判断。
-# 没有它的话，在一台两个包管理器都没有的机器上，四个脚本里三条分支都测不到。
-PKG_MGR="${PKG_MGR_OVERRIDE:-opkg}"   # 24.10 固定 opkg；override 保留给夹具
+# ---- 包管理器：本仓库固定 opkg（24.10）----
+# 【v.180.198】不再运行时判断 apk / opkg（用户 2026-10-31 定）。
+# 两个发行版早已拆成两个独立仓库：这个仓库只编 24.10，包管理器就是 opkg；
+# apk 那一套完整地活在自己的 25.12 仓库里，两边各管各的。
+# 留着 `if [ "$PKG_MGR" = "apk" ]` 的结果是「一半分支永远不可达」——
+# 判据名义上存在，实际上谁也走不到，改起来还得多想一层。
 OPKG_BIN="${OPKG_BIN:-opkg}"
-# apk 二进制同理：生产环境就是 apk，夹具里可以指到一个假的，
-# 好在没有真实 apk 的机器上验「索引重建」这条分支。
-APK_BIN="${APK_BIN:-apk}"
 
-case "$PKG_MGR" in
-apk)
-    PKG_CACHE_RO="${PKG_CACHE_RO:-$ROM_DIR/root/apk-cache}"
-    PKG_CACHE="${PKG_CACHE:-$ROOT_DIR/root/apk-cache}"
-    PKG_IDX="packages.adb"
-    PKG_EXT="apk"
-    PKG_CACHE_CONF="${PKG_CACHE_CONF:-/etc/apk/repositories}"
-    ;;
-opkg)
-    PKG_CACHE_RO="${PKG_CACHE_RO:-$ROM_DIR/root/pkg-cache}"
-    PKG_CACHE="${PKG_CACHE:-$ROOT_DIR/root/pkg-cache}"
-    # 判据必须是 Packages.gz：opkg 的 file:// 源只认 .gz，给裸 Packages 一律
-    # copy_file: .../Packages.gz: No such file or directory（24.10.6 真机实证）
-    PKG_IDX="Packages.gz"
-    PKG_EXT="ipk"
-    PKG_CACHE_CONF="${PKG_CACHE_CONF:-/etc/opkg/customfeeds.conf}"
-    ;;
-esac
+PKG_CACHE_RO="${PKG_CACHE_RO:-$ROM_DIR/root/pkg-cache}"
+PKG_CACHE="${PKG_CACHE:-$ROOT_DIR/root/pkg-cache}"
+# 判据必须是 Packages.gz：opkg 的 file:// 源只认 .gz，给裸 Packages 一律
+# copy_file: .../Packages.gz: No such file or directory（24.10.6 真机实证）
+PKG_IDX="Packages.gz"
+PKG_EXT="ipk"
+PKG_CACHE_CONF="${PKG_CACHE_CONF:-/etc/opkg/customfeeds.conf}"
 
 # 源配置里「我们那一行」的行首特征
-if [ "$PKG_MGR" = "apk" ]; then
-    # 【v.180.141】要同时匹配两种写法：升级前固件里可能残留旧的
-    # `file://<目录>`（那种写法 apk 会去 <目录>/<arch>/Packages.adb 找索引，
-    # 永远找不到），升级后要能被识别并替换掉，不能留两条源。
-    PCR_PAT='^(ndx[[:space:]]+)?file://.*/(apk|pkg)-cache(/packages\.adb)?/?$'
-else
-    PCR_PAT='^src/gz[[:space:]]*pkgcache[[:space:]]'
-fi
+PCR_PAT='^src/gz[[:space:]]*pkgcache[[:space:]]'
 
 PKG_CACHE_ACT=""
 
@@ -96,22 +77,9 @@ pcl_resolve() {
         PKG_CACHE_ACT="$_pcl_d"
         return 0
     done
-    # 第二轮（仅 apk）：包都在、只缺索引的目录也算可用。
-    # 为什么要有这一轮：apk 没有 lists 中转层，索引就躺在源目录里，构建时
-    # `apk index` 一旦失败，镜像里就是「118 个包 + 没有 packages.adb」。
-    # 如果只在有索引时才算可用，这种情况会被判成「包库不可用」，而事实是
-    # 包全在、只差一份能现场重建的索引 —— 判死等于让人只能重刷固件。
-    # 只挑可写的那个：/rom 是 squashfs，重建写不进去。
-    if [ "$PKG_MGR" = "apk" ]; then
-        for _pcl_d in "$PKG_CACHE" "$PKG_CACHE_RO"; do
-            [ -n "$_pcl_d" ] || continue
-            [ -d "$_pcl_d" ] || continue
-            [ -n "$(ls "$_pcl_d"/*.apk 2>/dev/null)" ] || continue
-            [ -w "$_pcl_d" ] || continue
-            PKG_CACHE_ACT="$_pcl_d"
-            return 0
-        done
-    fi
+    # 【v.180.198】原来这里还有一轮「包都在、只缺索引的目录也算可用」，那是 apk
+    # 专属的补救（apk 的索引就躺在源目录里，构建时 apk index 失败就会「有包没索引」）。
+    # opkg 的索引是单独的 Packages.gz，没有那种形态；判据写死成 opkg 后整段删除。
     PKG_CACHE_ACT=""
     return 1
 }
@@ -140,49 +108,21 @@ pcl_feed_ok() {
     #   ③ 行尾被追加东西：同样命中。
     # 2026-10-29 在 25.12 真机实测过 ①：把源行改成注释后 pkg-cache-fix.sh
     # 明确输出「源已正确…跳过」，一个字节都没修。
-    if [ "$PKG_MGR" = "apk" ]; then
-        # 【v.180.183】apk 侧判据反过来：源行**不该存在**（用户 2026-10-29 定）。
-        # 真机实测 apk update 每次都打
-        #   WARNING: opening file:///rom/root/apk-cache/packages.adb: UNTRUSTED signature
-        # 因为这份索引是 `apk mkndx --allow-untrusted` 生成的，没有可信签名，
-        # apk-tools 3.x 把整条源跳过。`apk policy daed` 实测：官方源一条、
-        # installed 一条，没有任何一条来自 file:///rom/root/apk-cache ——
-        # 源挂着但等于不存在，唯一效果是刷警告、让 update 输出里混进「错误」。
-        # 【v.180.184】补一条实测修正，免得把「源无效」当成结论：
-        #   `apk --allow-untrusted policy hysteria` 能列出 file:// 的 2.9.2-r1 /
-        #   2.9.3-r1 —— 这份索引不是不能用，只是**不带 --allow-untrusted 时被跳过**。
-        #   所以真正的问题是「全局挂一条不可信源，每次 apk 操作都刷警告」，不是源无效。
-        # 装包也不靠全局这条：pkg-cache-restore.sh 自己写一个临时 repositories 文件
-        #   （一行 file://<目录>/packages.adb），用 --repositories-file 只喂本地源，
-        #   并显式 --allow-untrusted。
-        # 所以这里的「健康」= 配置里没有我们那一行；有就返回 1，交给 feed_ensure 清掉。
-        grep -qE "$PCR_PAT" "$PKG_CACHE_CONF" 2>/dev/null && return 1
-        return 0
-    else
-        grep -qxF "src/gz pkgcache file://$PKG_CACHE_ACT" "$PKG_CACHE_CONF" 2>/dev/null || return 1
-    fi
+    # 【v.180.183】apk 侧那条反向判据（源行不该存在）只对 apk 有效，
+    # 24.10 这里是「源行必须精确指向当前目录、且只有一条」，判据写死成 opkg 后
+    # apk 那段整块删除。
+    grep -qxF "src/gz pkgcache file://$PKG_CACHE_ACT" "$PKG_CACHE_CONF" 2>/dev/null || return 1
     _pcl_n=$(grep -cE "$PCR_PAT" "$PKG_CACHE_CONF" 2>/dev/null)
     [ "${_pcl_n:-0}" -le 1 ] || return 1
     return 0
 }
 
-# 索引是否已铺设。
-# apk 没有中间层：索引就是源目录里的 packages.adb，所以「铺设」等于「它存在且非空」。
-# 【v.180.137】这里原来对 apk 直接 return 0，后果是 fix 第③步永远判定「已在位」、
-# 永远跳过 _pcf_lists_ensure，apk 缺索引时没有任何修复动作 —— 判据恒真比没有判据更坏。
+# 索引是否已铺设：opkg 要的是 lists_dir 里那份 pkgcache。
+# 【v.180.198】apk 那条判据（源目录里的 packages.adb 存在且非空）随分支一起删除。
 pcl_lists_ok() {
-    if [ "$PKG_MGR" = "apk" ]; then
-        [ -n "$PKG_CACHE_ACT" ] || return 1
-        [ -s "$PKG_CACHE_ACT/packages.adb" ] || return 1
-        return 0
-    fi
     [ -f "$(pcl_lists_dir)/pkgcache" ]
 }
 
 pcl_installed() {
-    if [ "$PKG_MGR" = "apk" ]; then
-        apk info -e "$1" >/dev/null 2>&1
-    else
-        "$OPKG_BIN" list-installed 2>/dev/null | grep -q "^$1 "
-    fi
+    "$OPKG_BIN" list-installed 2>/dev/null | grep -q "^$1 "
 }

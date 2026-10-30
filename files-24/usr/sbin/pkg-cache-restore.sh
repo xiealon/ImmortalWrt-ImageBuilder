@@ -120,20 +120,45 @@ _pcr_install() {
         return 1
     fi
 
-    _pcr_f=$(ls "$PKG_CACHE_ACT/${_pcr_p}"_*.ipk 2>/dev/null | head -n1)
+    # 【v.180.194】2026-10-30 24.10.6 真机实测，两个坑，都会让恢复比不恢复更糟：
+    #   ① 本地库没有这个包时，按包名 install --force-reinstall 不是「装不上」，
+    #      而是**把已经装好的包卸掉**：pkg-restore.sh yq（yq 不在 pkg-cache）之后，
+    #      /usr/lib/opkg/status 从 "install ok installed" 变成
+    #      "install user not-installed"，/usr/lib/opkg/info/yq.list 被删，
+    #      记账 692 → 691。本来只是「文件缺」，一修变「整包没了」。
+    #   ② 多版本 ipk 不能盲取 head -n1：pkg-cache 里同时有 mosdns_5.3.3-r1 与
+    #      mosdns_5.3.3-r4，head 拿到 r1（旧版），降级失败同样把包卸掉
+    #      （实测 692 → 690）。
+    # 所以：先按「已装版本」精确匹配，找不到退回最后一个；本地一个都没有时
+    # 绝不拿已装的包去试包管理器 —— 只有「本来就未装」才按包名从源里装。
+    _pcr_ver=$("$OPKG_BIN" list-installed "$_pcr_p" 2>/dev/null | awk '{print $3}')
+    _pcr_f=""
+    if [ -n "$_pcr_ver" ]; then
+        _pcr_f=$(ls "$PKG_CACHE_ACT/${_pcr_p}_${_pcr_ver}"_*.ipk 2>/dev/null | head -n1)
+    fi
+    [ -n "$_pcr_f" ] || _pcr_f=$(ls "$PKG_CACHE_ACT/${_pcr_p}"_*.ipk 2>/dev/null | tail -n1)
     if [ -n "$_pcr_f" ] && "$OPKG_BIN" install --force-reinstall "$_pcr_f" >/dev/null 2>&1; then
-        pcl_log "直装成功：$_pcr_p"
+        pcl_log "直装成功：$_pcr_p（$(basename "$_pcr_f")）"
         return 0
     fi
     # --no-check-signature：老固件（无 Packages.sig、无公钥）不跳过就装不上；
     # 新固件签了名，带上也无害 —— 包来自本机只读 squashfs，来源可信。
-    if "$OPKG_BIN" --help 2>&1 | grep -q 'no-check-signature'; then
-        "$OPKG_BIN" --no-check-signature install --force-reinstall "$_pcr_p" >/dev/null 2>&1 \
+    _pcr_sign=""
+    "$OPKG_BIN" --help 2>&1 | grep -q 'no-check-signature' && _pcr_sign="--no-check-signature"
+    if [ -n "$_pcr_f" ] && pcl_installed "$_pcr_p"; then
+        "$OPKG_BIN" $_pcr_sign install --force-reinstall "$_pcr_p" >/dev/null 2>&1 \
             && { pcl_log "源装成功：$_pcr_p"; return 0; }
-    else
-        "$OPKG_BIN" install --force-reinstall "$_pcr_p" >/dev/null 2>&1 \
-            && { pcl_log "源装成功：$_pcr_p"; return 0; }
+        pcl_log "重装失败：$_pcr_p（本地有包但没装上）"
+        return 1
     fi
+    if pcl_installed "$_pcr_p"; then
+        pcl_log "本地库没有 $_pcr_p 的 ipk，且它已在册：不动包管理器（避免掉记账）"
+        return 1
+    fi
+    # 未装 + 本地没有：按包名从系统源装。离线环境会失败，但不会破坏已有包。
+    "$OPKG_BIN" $_pcr_sign install "$_pcr_p" >/dev/null 2>&1 \
+        && { pcl_log "源装成功：$_pcr_p"; return 0; }
+    pcl_log "恢复失败：$_pcr_p（本地库与系统源都没有可用包）"
     return 1
 }
 

@@ -269,7 +269,9 @@ _up_run() {
 # 【v.180.198】服务是否真的在生效：pidof smartdns + 53 端口归属反查。
 # 判据不在这里写第二遍 —— 交 pkg-restore-smartdns.sh --check（内部的 _sd_serve），
 # 与 --config 用的是同一份「53 该归谁」的定义。修法留一处，判据也留一处。
-# 脚本本身不在位时返回 0（放行）：那是 pkg-restore 的事，不该让 DNS 通道误报。
+# 注意：这里判的是「脚本文件在不在」，不是「smartdns 包在不在」。
+# 后者不在这里放行 —— 二进制缺失由 --check 判坏、由 --config 装回（见 _up_watch 开头）。
+# 脚本文件本身不在位时返回 0（放行）：那是 pkg-restore 的事，不该让 DNS 通道误报。
 _up_svc() {
     [ -x "$_SD_RESTORE" ] || return 0
     "$_SD_RESTORE" --check >/dev/null 2>&1
@@ -312,12 +314,12 @@ _run_fix() {
 # 修 DNS 会把「容器拉不动」的累计清零，反过来也一样（v.108.58 踩过）。
 # 不判「上游少了几条」：用户可能自己删过某几条，那是配置自由；0 条才算失效。
 _up_watch() {
-    # 没装 smartdns 不是这条通道的事（包由 pkg-restore.sh 管），直接放行
-    if [ ! -x /usr/sbin/smartdns ]; then
-        P_UP_BAD=0
-        P_UP_FIX=0
-        return 0
-    fi
+    # 【v.180.198】这里**不判**「smartdns 装没装」就放行（用户 2026-10-31 定）：
+    # 装包也是 --config 的活 —— 它第一步 _sd_pkg_ok / _sd_pkg 就从 /rom 装回来。
+    # 探针一旦自己放行，包被卸掉这件事就再没有东西会发现：bootstrap 的 pkg_base
+    # 自 v.180.157 起只管 lxc，smartdns 早就不在它的覆盖里了。
+    # 所以二进制不在 → --check 必然失败 → 判坏 → 第 3 轮交 --config（含装包）。
+    # 装不回来时 _sd_pkg 返回 1 → 连续失败照数 → 最终喊人，不静默。
     _uw_why=""
     _up_svc || _uw_why="53 未由 smartdns 接管"
     _uw_n=$(_up_n)

@@ -15,7 +15,7 @@
 #   C. 触发链上不许出现 bootstrap（与 last_pull 那条链彻底分开）；
 #   D. 四道闸：1-2 轮告警 → 第 3 轮动作 → 冷却 → 连续失败锁存；
 #   E. 状态键不被 _probe_load 的贪婪 sed 串改；
-#   F. 没装 smartdns 时整条通道放行，不许反复调 --config。
+#   F. 没装 smartdns 也交脚本（--config 内部会从 /rom 装回），不许探针自己放行。
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 FILES_DIR="${CS_FILES_DIR:-files}"
@@ -103,8 +103,8 @@ ck "R34.3j 不自己动 uci（日志文案不算）" \
    "$(printf '%s' "$_uw" | grep -cE '^[[:space:]]*uci ')" "0"
 ck "R34.3k 失败计数用 PROBE_FAIL_ALERT" \
    "$(printf '%s' "$_uw" | grep -c 'PROBE_FAIL_ALERT')" "2"
-ck "R34.3l 前置检查 smartdns 二进制" \
-   "$(printf '%s' "$_uw" | grep -c '/usr/sbin/smartdns')" "1"
+ck "R34.3l 不自己判二进制就放行（装包交脚本）" \
+   "$(printf '%s' "$_uw" | grep -c '/usr/sbin/smartdns')" "0"
 echo
 echo "== 34.4 动态：四道闸 =="
 TMPD=$(mktemp -d "${TMPDIR:-/tmp}/up.XXXXXX") || { echo "FAIL: mktemp"; exit 1; }
@@ -112,9 +112,9 @@ trap 'rm -rf "$TMPD"' EXIT
 
 LIB="$TMPD/fns.sh"
 : > "$LIB"
-# 抽 _up_watch 时把「smartdns 二进制在不在」这条前置条件换成可控开关：
-# 开发机上没有 /usr/sbin/smartdns，原样抽出来会直接走「放行」分支，四道闸一条都测不到。
-body _up_watch "$PR" | sed 's#\[ ! -x /usr/sbin/smartdns \]#[ "${SD_MISSING:-0}" = "1" ]#' >> "$LIB"
+# _up_watch 里已经没有「二进制不在就放行」的前置分支（v.180.198 删掉了），
+# 原样抽出来即可，不再需要 sed 把路径换成开关。
+body _up_watch "$PR" >> "$LIB"
 body _probe_load "$PR" >> "$LIB"
 [ -s "$LIB" ] || { echo "FAIL: 抽不到函数"; exit 1; }
 
@@ -122,7 +122,6 @@ STATE_FILE="$TMPD/state"
 PROBE_STALL_ROUNDS=3
 PROBE_COOLDOWN=600
 PROBE_FAIL_ALERT=3
-SD_MISSING=0
 log_out="$TMPD/out.log"
 : > "$log_out"
 : > "$TMPD/boot_calls"
@@ -204,14 +203,6 @@ ck "R34.4v 上游恢复后失败计数清零" "$P_UP_FIX" "0"
 # 注意：当前实现恢复时不清 P_HUMAN_UP —— 锁存后要人工确认。
 # 这里断言的是现状，不是理想行为。
 ck "R34.4w 恢复不清锁存位（现状）" "$P_HUMAN_UP" "1"
-
-# F. 没装 smartdns：整条通道放行，不许反复调 --config
-SD_MISSING=1
-P_UP_BAD=9; P_UP_FIX=2; P_HUMAN_UP=0; P_UP_TRIG=0; P_ACTION=""
-_up_watch
-ck "R34.4x 没装 smartdns 时放行" "$P_ACTION" ""
-ck "R34.4y 没装时计数被清零" "$P_UP_BAD" "0"
-ck "R34.4z 没装时失败计数被清零" "$P_UP_FIX" "0"
 echo
 echo "== 34.5 状态键（防贪婪 sed 串改）=="
 _sv=$(grep -n "printf 'stall=%s" "$PR" | head -1 | cut -d: -f1)

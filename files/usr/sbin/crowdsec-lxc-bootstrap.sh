@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-30.180.196"
+SCRIPT_VER="2026-10-30.180.197"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -5951,10 +5951,10 @@ if [ "${1:-}" = "--probe-check" ]; then
     exit $?
 fi
 
-# ---- 下发面健康检查（探针每 30 分钟一次，v.180.195）----
+# ---- 下发面健康检查（探针每 30 分钟一次，v.180.197）----
 # 为什么不能塞进 --probe-check：那条路径 60 秒一轮且只读，而这里要重启服务。
 # 为什么不能用 last_pull 判：netlink 脱节时 **拉取是成功的**，last_pull 照常刷新。
-# 判据改成直接数 bouncer 日志里的 netlink ENOENT —— 它就是症状本体：
+# 判据改成直接数 bouncer 日志里的 netlink 错误 —— 它是最接近症状的信号：
 #   真机 2026-10-30 实测 cscli decisions list 报「No active decisions」，
 #   而 cscli metrics 同时报 60315 条、内核 nft 有 69232 个元素 —— 列表视图不可信。
 # 退出码：0=无需动作，1=动过手，其余=检查本身异常。
@@ -5964,22 +5964,25 @@ if [ "${1:-}" = "--bouncer-heal" ]; then
         _ensure_bouncer_service
         exit 0
     fi
-    # 【2026-10-30.180.195】判据改为直接数症状。
+    # 【2026-10-30.180.197】判据改为数全部 netlink 错误。
     # 为什么弃用 cscli decisions list：真机 2026-10-30 实测该命令返回
     # 「No active decisions」，而同一时刻 cscli metrics 报 Local API Decisions
     # 60315 条、内核 nft 有 69232 个元素 —— cscli 的列表视图与 bouncer 实际
     # 拉到的数据不是一回事。拿它当判据会让这层兜底永久失效（_bh_dec 恒为 0）。
-    # 现在直接数 bouncer 日志里的 netlink ENOENT：那正是句柄失效的症状本体。
+    # 现在直接数 bouncer 日志里的 netlink 错误，不再限定子类：bouncer 换版本时
+    # 错误文案可能改（ENOENT -> 别的），限定子类会静默失效，只认大前缀才不会漏。
+    # 代价：不可自愈的错误也会触发重启，靠探针每 30 分钟才调一次来限流。
     # awk 里的 n=0 是幂等关键：重启后日志末尾会追加新的 Starting，计数自然
     # 归零，既不依赖状态文件，也不会重启完下一轮又把同一批旧错误数一遍反复重启。
-    _bh_err="$(tail -n 500 "$_BC_LOG" 2>/dev/null | awk '/Starting crowdsec-firewall-bouncer/{n=0; next} /netlink receive: no such file or directory/{n++} END{print n+0}')"
+    _bh_err="$(tail -n 500 "$_BC_LOG" 2>/dev/null | awk '/Starting crowdsec-firewall-bouncer/{n=0; next} /netlink receive: /{n++} END{print n+0}')"
     case "$_bh_err" in ''|*[!0-9]*) _bh_err=0 ;; esac
     if [ "$_bh_err" -ge 2 ]; then
-        log "[bouncer] ** 本轮进程已 ${_bh_err} 次 netlink ENOENT（句柄失效，不会自愈）-> 重启 bouncer"
+        _bh_kind="$(tail -n 500 "$_BC_LOG" 2>/dev/null | grep -o 'netlink receive: [a-zA-Z ]*' | tail -1 | sed 's/^netlink receive: //')"
+        log "[bouncer] ** 本轮进程已 ${_bh_err} 次 netlink 错误（最近：${_bh_kind:-未知}）-> 重启 bouncer"
         _bouncer_service_restart >/dev/null 2>&1 || true
         sleep 2
         if cs_active_on_host; then
-            log "[bouncer] 重启后进程在跑；ENOENT 是否消失看下一轮（30 分钟后）"
+            log "[bouncer] 重启后进程在跑；netlink 错误是否消失看下一轮（30 分钟后）"
         else
             log "[bouncer] 重启后进程未起来（交给探针与下一轮）"
         fi

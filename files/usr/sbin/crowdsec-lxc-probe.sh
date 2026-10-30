@@ -91,7 +91,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-30.180.196"
+SCRIPT_VER="2026-10-30.180.197"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -723,16 +723,16 @@ probe_tick() {
             _run_fix
         fi
     fi
-    # 【v.180.196】bouncer 下发面：与体检同频（每 PROBE_HEAL_EVERY 轮）。
+    # 【v.180.197】bouncer 下发面：与体检同频（每 PROBE_HEAL_EVERY 轮）。
     # 具体判据在 bootstrap 的 --bouncer-heal 里：数 bouncer 日志中本轮进程
-    # （最后一次 Starting 之后）出现几次 netlink ENOENT —— netlink 脱节时 last_pull
+    # （最后一次 Starting 之后）出现几次 netlink 错误（不限子类）—— 脱节时 last_pull
     # 照样新鲜，60 秒那套守护判定永远看不见它。动作只有一次重启，不写任何配置。
     if [ "${PROBE_HEAL_EVERY:-30}" -gt 0 ] 2>/dev/null \
        && [ $((P_ROUND % PROBE_HEAL_EVERY)) -eq 0 ]; then
         _bh_rc=0
         _boot --bouncer-heal >>"$BOOT_LOG" 2>&1 || _bh_rc=$?
         if [ "$_bh_rc" = "1" ]; then
-            plog "【bouncer 下发】本轮进程 netlink ENOENT 达阈值，已重启 crowdsec-firewall-bouncer（详见 $BOOT_LOG）"
+            plog "【bouncer 下发】本轮进程 netlink 错误达阈值，已重启 crowdsec-firewall-bouncer（详见 $BOOT_LOG）"
         elif [ "$_bh_rc" != "0" ]; then
             plog "【bouncer 下发】检查异常退出 $_bh_rc（124=超时；详见 $BOOT_LOG）"
         fi

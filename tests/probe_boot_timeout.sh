@@ -39,8 +39,12 @@ ck "R35.3b _boot 用 _BOOT_MAX 传给 timeout，参数原样透传" \
    "$(cg "$PR" '^    timeout "\$_BOOT_MAX" "\$BOOT" "\$@"$')" "1"
 
 echo "===== R35b. probe：所有 bootstrap 调用都走 _boot ====="
-ck "R35.4 _boot 调用 8 处（补印1 + 体检4 + 主判定1 + 触发1 + 复检1）" \
-   "$(cg "$PR" '_boot ')" "8"
+# 【2026-10-31.0256】原来用 `cg "$PR" '_boot '` 数含该串的行：这个串会把
+# `_ensure_boot`（124/288 两处）的尾巴、以及 793 行注释里的 `_boot 的总上限`
+# 一起算进来 → 恒比真实调用多。旧固件 2026-10-30.180.198 真机实测就是 FAIL=1，
+# 与本轮改动无关。改成排除注释行、排除 _ensure_boot 前缀后数真实调用 7 处。
+ck "R35.4 _boot 真实调用 7 处（补印1 + 体检3 + 主判定1 + 触发1 + 复检1）" \
+   "$(grep -vE '^[[:space:]]*#' "$PR" | grep -cE '(^|[^[:alnum:]_])_boot( |$)')" "7"
 ck "R35.5 probe_tick 里没有裸 \"\$BOOT\" 调用（全部走 _boot）" \
    "$(body probe_tick "$PR" | grep -c '"$BOOT" ')" "0"
 ck "R35.6 124 撞上限时单独记账，且用的是本档实际上限" \

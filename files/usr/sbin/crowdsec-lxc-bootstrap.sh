@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-30.180.193"
+SCRIPT_VER="2026-10-30.180.194"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -5966,12 +5966,12 @@ if [ "${1:-}" = "--bouncer-heal" ]; then
     _bh_dec=0
     _bh_set=0
     _ct_env "timeout 15 $CSCLI decisions list --limit 1 -o raw" 2>/dev/null | grep -q . && _bh_dec=1
-    nft list set ip crowdsec crowdsec-blacklists 2>/dev/null | grep -q 'elements' && _bh_set=1
+    nft list table ip crowdsec 2>/dev/null | grep -qE 'elements[[:space:]]*=' && _bh_set=1
     if [ "$_bh_dec" = "1" ] && [ "$_bh_set" = "0" ]; then
         _bh_n="$(_ct_env "timeout 20 $CSCLI decisions list -o raw" 2>/dev/null | wc -l | tr -d ' ')"
         log "[bouncer] ** 下发失效：LAPI 有 ${_bh_n:-?} 条决策，nft set 里一条都没有 -> 重启 bouncer"
         _bouncer_service_restart >/dev/null 2>&1 || true
-        if nft list set ip crowdsec crowdsec-blacklists 2>/dev/null | grep -q 'elements'; then
+        if nft list table ip crowdsec 2>/dev/null | grep -qE 'elements[[:space:]]*='; then
             log "[bouncer] 重启后 nft set 已填充（下发已恢复）"
         else
             log "[bouncer] 重启后 nft set 仍为空（下一轮 30 分钟后再试）"

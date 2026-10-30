@@ -112,9 +112,17 @@ _pr_pkg() {
         return 1
     }
     if [ "$_pf" = "1" ]; then
-        PCR_FORCE=1 "$RESTORE_BIN" "$_p1" >/dev/null 2>&1 \
-            && { log "强制重装完成：$_p1"; _PR_CACHE=""; return 0; }
-        log "强制重装失败：$_p1"
+        # 【v.180.193】装完必须复检文件。apk 的 fix 对「包不在本地库」的包会打
+        #   (1/1) [APK unavailable, skipped] Reinstalling yq (4.53.3-r2)
+        #   OK: 652.3 MiB in 622 packages
+        # 然后返回 **0** —— 一个字节都没写。只看下层退出码就会把它当成功。
+        # 25.12 实测：删掉 /usr/bin/yq 后这里报「强制重装完成」，文件其实没回来。
+        if PCR_FORCE=1 "$RESTORE_BIN" "$_p1" >/dev/null 2>&1 && _pr_files_ok "$_p1"; then
+            log "强制重装完成：$_p1"
+            _PR_CACHE=""
+            return 0
+        fi
+        log "强制重装失败：$_p1（本地库没有它，或装完文件仍缺）"
         return 1
     fi
     if "$RESTORE_BIN" "$_p1" >/dev/null 2>&1; then

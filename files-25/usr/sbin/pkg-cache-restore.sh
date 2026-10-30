@@ -79,8 +79,10 @@ _pcr_install() {
     # 另一条必须分开：apk add 对已装包是 no-op。「记账有、文件被删」用 add 永远修不
     # 回来（实测 rc=0、什么都没做），只有 apk fix 会按校验和重装（实测删掉
     # /usr/bin/dns2socks 后 fix 打出 "Reinstalling dns2socks (2.1-r2)" 并真的补回）。
-    # 退出码实测：fix 包不在库=1；fix 有包但未装=0 且静默跳过；add 依赖不全=4；
-    # 成功=0。所以 fix 只在「确实已装」时用，不会出现假成功。
+    # 退出码实测（v.180.193 更正）：fix 包不在库 = **0**，同时打一句
+    # "[APK unavailable, skipped]"，一个字节都没写；fix 有包但未装 = 0 且静默跳过；
+    # add 依赖不全 = 4；成功 = 0。所以 fix 的成败不能只看 rc，必须同时看输出里
+    # 有没有 "APK unavailable"。
     if [ "$PKG_MGR" = "apk" ]; then
         _pcr_repos="${TMPDIR:-/tmp}/pkg-cache-restore.repos"
         printf 'file://%s/%s\n' "$PKG_CACHE_ACT" "$PKG_IDX" > "$_pcr_repos" 2>/dev/null || {
@@ -92,12 +94,21 @@ _pcr_install() {
             _pcr_use_fix=1
         fi
         if [ "$_pcr_use_fix" = "1" ]; then
-            if apk fix --allow-untrusted --repositories-file "$_pcr_repos" "$_pcr_p" >/dev/null 2>&1; then
+            # 【v.180.193】rc=0 不等于装上了。25.12 实测（apk-tools 3.0.5）：
+            # 包不在本地库时 apk fix 打
+            #   (1/1) [APK unavailable, skipped] Reinstalling yq (4.53.3-r2)
+            #   OK: 652.3 MiB in 622 packages
+            # 然后返回 **0** —— 一个字节都没写。原来只看 rc，于是报「强制重装成功」。
+            # （上面注释写「fix 包不在库=1」与实测不符，已按实测改。）
+            _pcr_fix_out="$(apk fix --allow-untrusted --repositories-file "$_pcr_repos" "$_pcr_p" 2>&1)"
+            _pcr_fix_rc=$?
+            if [ "$_pcr_fix_rc" = "0" ] \
+               && ! printf '%s\n' "$_pcr_fix_out" | grep -q 'APK unavailable'; then
                 pcl_log "强制重装成功：$_pcr_p（按校验和复检文件）"
                 rm -f "$_pcr_repos"
                 return 0
             fi
-            pcl_log "强制重装失败：$_pcr_p（本地库没有它，或索引读不了）"
+            pcl_log "强制重装失败：$_pcr_p（本地库没有它，或装完文件仍缺）"
             rm -f "$_pcr_repos"
             return 1
         fi

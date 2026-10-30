@@ -115,9 +115,18 @@ _pr_pkg() {
         return 1
     }
     if [ "$_pf" = "1" ]; then
-        PCR_FORCE=1 "$RESTORE_BIN" "$_p1" >/dev/null 2>&1 \
-            && { log "强制重装完成：$_p1"; _PR_CACHE=""; return 0; }
-        log "强制重装失败：$_p1"
+        # 【v.180.193】装完必须复检文件，不能只看下层退出码。25.12 实测
+        # （apk-tools 3.0.5）：包不在本地库时 apk fix 打一句
+        #   (1/1) [APK unavailable, skipped] Reinstalling xxx
+        # 然后返回 0，一个字节都没写，上层却报了「强制重装完成」。
+        # 24.10 的 opkg 走 --force-reinstall，找不到包一般返回非 0，
+        # 但这个复检对两边都成立，成本只是一次清单比对。
+        if PCR_FORCE=1 "$RESTORE_BIN" "$_p1" >/dev/null 2>&1 && _pr_files_ok "$_p1"; then
+            log "强制重装完成：$_p1"
+            _PR_CACHE=""
+            return 0
+        fi
+        log "强制重装失败：$_p1（本地库没有它，或装完文件仍缺）"
         return 1
     fi
     if "$RESTORE_BIN" "$_p1" >/dev/null 2>&1; then

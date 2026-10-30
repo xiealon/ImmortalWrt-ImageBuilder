@@ -710,12 +710,44 @@ fi
 # apk 文件名是 <包名>-<版本>.apk，版本一定以数字开头，所以从「-数字」处截断。
 # 不能按最后一段截：lxc-auto-6.0.5-r1.apk 的包名自己带连字符。
 # 不含容器内组件的原因同 24 版：crowdsec 跑在 LXC 容器里，宿主机没有这个包。
-_ak_man=$(ls "$_AK_DIR"/*.apk 2>/dev/null \
-    | sed -E 's#.*/##; s/\.apk$//; s/-[0-9][0-9A-Za-z._-]*$//' \
+#
+# 【v.180.193】两处口径修正，真机 r37978 实测暴露：
+#
+# ① 字符类必须含 `~`。OpenWrt 用 ~ 标预发布，apk 文件名会出现
+#    clashoo-2026.05.27~38cb06d-r1.apk。原字符类 [0-9A-Za-z._-] 不含 ~，
+#    截不断，整串文件名被当包名写进 manifest —— 实测 113 个文件里 19 条如此。
+#    后果：apk info -e 恒返回不存在，--all 每轮报「缺失」再装失败，
+#    真包名（clashoo）反而从未列入，永远补不回来。
+#
+# ② 必须与 PACKAGES 求交集，不能取包库全量（同 24 版 v.180.145）。
+#    --all 的语义是「补齐缺失」，全量口径会把固件本来没选的包
+#    （passwall / ssr-plus / bandix 等兜底包）一个个装上去 —— 那不叫恢复，叫扩容。
+#    真机实测：全量 111 条里 38 条不该在里面，--all 真装 31 个包、world 多 17 行。
+#    正确口径 = PACKAGES（含 CUSTOM_PACKAGES）∩ 包库里有文件的包，实测 73 条。
+_ak_all=$(ls "$_AK_DIR"/*.apk 2>/dev/null \
+    | sed -E 's#.*/##; s/\.apk$//; s/-[0-9][0-9A-Za-z._~-]*$//' \
     | grep -v '^$' | sort -u)
+: > /tmp/ak-want-inst.txt
+for _awi in $PACKAGES; do
+    case "$_awi" in -*) continue ;; esac
+    echo "$_awi"
+done | sort -u > /tmp/ak-want-inst.txt
+# busybox grep 的 -f 碰到空模式文件不是「一条都不匹配」，而是把整份输入全吐出来
+# （24 版夹具实测：want 0 行 -> 全量通过）。那样 PACKAGES 为空时就悄悄退回
+# 「包库全量」这个错行为。必须显式挡一道。
+if [ -s /tmp/ak-want-inst.txt ]; then
+    _ak_man=$(printf '%s\n' "$_ak_all" | grep -Fxf /tmp/ak-want-inst.txt 2>/dev/null)
+else
+    _ak_man=""
+fi
 printf '%s\n' "$_ak_man" > "$_AK_DIR/manifest.txt"
 _ak_mn=$(printf '%s\n' "$_ak_man" | grep -c .)
-echo "==> [apk-cache] manifest.txt：$_ak_mn 个包名（供 restore --all 比对）"
+_ak_alln=$(printf '%s\n' "$_ak_all" | grep -c .)
+echo "==> [apk-cache] manifest.txt：$_ak_mn 个包名（库内 $_ak_alln 个，只列本固件该装的；供 restore --all 比对）"
+if [ "$_ak_mn" -lt 1 ]; then
+    echo "::error::manifest 为空：PACKAGES 与包库没有交集，restore --all 将无事可做"
+    exit 1
+fi
 
 ls "$_AK_DIR" | head -n 20
 

@@ -597,10 +597,7 @@ _cs_cfg_audit() {
     return 0
 }
 
-command -v cmp >/dev/null 2>&1 || {
-    _glog "【完整性】缺少 cmp，无法与只读基准比对，本次跳过"
-    exit 0
-}
+# 【v.180.199】cmp 是 busybox 基础 applet，写死不探测（用户 2026-10-31 定）。
 
 # 容器侧两道门（v.108.45）。任一不满足 → 这一组整体跳过，一个字节都不碰。
 _ct_gate() {

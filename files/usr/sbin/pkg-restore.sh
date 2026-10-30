@@ -36,18 +36,9 @@ set -u
 ROMDIR="${ROMDIR:-/rom}"
 PKGROOT="${PKGROOT:-}"
 
-# 包级安装脚本的查找顺序（v.180.147）：
-#   ① 显式 RESTORE_BIN
-#   ② /usr/sbin/pkg-cache-restore.sh —— 固件里的正式位置
-#   ③ 与本脚本同目录 —— 脚本被拷到 /tmp 单独验时的情况
-RESTORE_BIN="${RESTORE_BIN:-}"
-if [ -z "$RESTORE_BIN" ]; then
-    if [ -x /usr/sbin/pkg-cache-restore.sh ]; then
-        RESTORE_BIN=/usr/sbin/pkg-cache-restore.sh
-    else
-        RESTORE_BIN="$(dirname "$0")/pkg-cache-restore.sh"
-    fi
-fi
+# 【v.180.199】包级安装脚本路径写死（用户 2026-10-31 定：能写死的都写死）。
+# 固件里就在 /usr/sbin；「同目录兜底」那条分支在真机上从未走到过，删掉。
+RESTORE_BIN="${RESTORE_BIN:-/usr/sbin/pkg-cache-restore.sh}"
 
 log() { printf '[PKG] %s\n' "$*"; }
 

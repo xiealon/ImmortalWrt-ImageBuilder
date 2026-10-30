@@ -25,7 +25,8 @@ ROOT_DIR="${ROOT_DIR%/}"
 
 pcl_log() {
     echo "[PKG] $*"
-    command -v logger >/dev/null 2>&1 && logger -t pkg-cache "$*" 2>/dev/null
+    # 【v.180.199】logger 是 busybox 自带 applet，写死不探测。
+    logger -t pkg-cache "$*" 2>/dev/null
     return 0
 }
 
@@ -51,7 +52,9 @@ pcl_log_q() {
 # apk 那一套完整地活在自己的 25.12 仓库里，两边各管各的。
 # 留着 `if [ "$PKG_MGR" = "apk" ]` 的结果是「一半分支永远不可达」——
 # 判据名义上存在，实际上谁也走不到，改起来还得多想一层。
-OPKG_BIN="${OPKG_BIN:-opkg}"
+#
+# 【v.180.199】连 OPKG_BIN 变量也删了：直接写 `opkg`，命令名不再走一层间接。
+# 需要假的 opkg 时放 PATH 前面即可，不必再造一个环境变量入口。
 
 PKG_CACHE_RO="${PKG_CACHE_RO:-$ROM_DIR/root/pkg-cache}"
 PKG_CACHE="${PKG_CACHE:-$ROOT_DIR/root/pkg-cache}"
@@ -124,5 +127,5 @@ pcl_lists_ok() {
 }
 
 pcl_installed() {
-    "$OPKG_BIN" list-installed 2>/dev/null | grep -q "^$1 "
+    opkg list-installed 2>/dev/null | grep -q "^$1 "
 }

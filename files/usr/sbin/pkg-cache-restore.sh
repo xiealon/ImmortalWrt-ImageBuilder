@@ -22,23 +22,17 @@
 
 set -u
 
-_pcr_dir=$(dirname "$0")
+# 【v.180.199】路径全部写死：固件里就在 /usr/sbin，不再做「同目录兜底」分支。
 _pcr_lib=/usr/sbin/pkg-cache-lib.sh
-[ -f "$_pcr_lib" ] || _pcr_lib="$_pcr_dir/pkg-cache-lib.sh"
 if [ ! -f "$_pcr_lib" ]; then
-    echo "找不到 pkg-cache-lib.sh" >&2
+    echo "找不到 $_pcr_lib" >&2
     exit 1
 fi
 . "$_pcr_lib"
 
-# 【v.180.198】不再判 PKG_MGR（本仓库固定 opkg，判据在 pkg-cache-lib.sh 里写死）。
-command -v "$OPKG_BIN" >/dev/null 2>&1 || {
-    pcl_log "没有 $OPKG_BIN，无法装回"
-    exit 1
-}
+# 【v.180.199】opkg 是 24.10 的系统包管理器，必然在位，不再 command -v 探测。
 
 _pcr_fix=/usr/sbin/pkg-cache-fix.sh
-[ -x "$_pcr_fix" ] || _pcr_fix="$_pcr_dir/pkg-cache-fix.sh"
 
 # 装之前的最小前置：源与索引都健康才跳过 fix
 _pcr_prepare() {
@@ -80,22 +74,22 @@ _pcr_install() {
     #      （实测 692 → 690）。
     # 所以：先按「已装版本」精确匹配，找不到退回最后一个；本地一个都没有时
     # 绝不拿已装的包去试包管理器 —— 只有「本来就未装」才按包名从源里装。
-    _pcr_ver=$("$OPKG_BIN" list-installed "$_pcr_p" 2>/dev/null | awk '{print $3}')
+    _pcr_ver=$(opkg list-installed "$_pcr_p" 2>/dev/null | awk '{print $3}')
     _pcr_f=""
     if [ -n "$_pcr_ver" ]; then
         _pcr_f=$(ls "$PKG_CACHE_ACT/${_pcr_p}_${_pcr_ver}"_*.ipk 2>/dev/null | head -n1)
     fi
     [ -n "$_pcr_f" ] || _pcr_f=$(ls "$PKG_CACHE_ACT/${_pcr_p}"_*.ipk 2>/dev/null | tail -n1)
-    if [ -n "$_pcr_f" ] && "$OPKG_BIN" install --force-reinstall "$_pcr_f" >/dev/null 2>&1; then
+    if [ -n "$_pcr_f" ] && opkg install --force-reinstall "$_pcr_f" >/dev/null 2>&1; then
         pcl_log "直装成功：$_pcr_p（$(basename "$_pcr_f")）"
         return 0
     fi
     # --no-check-signature：老固件（无 Packages.sig、无公钥）不跳过就装不上；
     # 新固件签了名，带上也无害 —— 包来自本机只读 squashfs，来源可信。
     _pcr_sign=""
-    "$OPKG_BIN" --help 2>&1 | grep -q 'no-check-signature' && _pcr_sign="--no-check-signature"
+    opkg --help 2>&1 | grep -q 'no-check-signature' && _pcr_sign="--no-check-signature"
     if [ -n "$_pcr_f" ] && pcl_installed "$_pcr_p"; then
-        "$OPKG_BIN" $_pcr_sign install --force-reinstall "$_pcr_p" >/dev/null 2>&1 \
+        opkg $_pcr_sign install --force-reinstall "$_pcr_p" >/dev/null 2>&1 \
             && { pcl_log "源装成功：$_pcr_p"; return 0; }
         pcl_log "重装失败：$_pcr_p（本地有包但没装上）"
         return 1
@@ -105,7 +99,7 @@ _pcr_install() {
         return 1
     fi
     # 未装 + 本地没有：按包名从系统源装。离线环境会失败，但不会破坏已有包。
-    "$OPKG_BIN" $_pcr_sign install "$_pcr_p" >/dev/null 2>&1 \
+    opkg $_pcr_sign install "$_pcr_p" >/dev/null 2>&1 \
         && { pcl_log "源装成功：$_pcr_p"; return 0; }
     pcl_log "恢复失败：$_pcr_p（本地库与系统源都没有可用包）"
     return 1

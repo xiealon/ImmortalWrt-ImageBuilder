@@ -881,17 +881,17 @@ _pkgcache_install() {
     # apk 那一路（_pkgcache_install_apk）整段删除。
     _pci_pkg="$1"
     _pkgcache_ready || return 1
-    command -v "$OPKG_BIN" >/dev/null 2>&1 || return 1
+    # 【v.180.199】opkg 必在，写死不探测。
     # 已经装着的就跳过：没坏的东西不该被 --force-reinstall 重写一遍
     # 【v.180.161】PCR_FORCE=1 时不跳：调用方已确认文件真的不在，而记账还在。
     if [ "${PCR_FORCE:-0}" != "1" ] \
-       && "$OPKG_BIN" list-installed 2>/dev/null | grep -q "^$_pci_pkg "; then
+       && opkg list-installed 2>/dev/null | grep -q "^$_pci_pkg "; then
         return 0
     fi
     # ① 绝对路径直装。用 ls 匹配而不是猜文件名：版本号里带 r 修订，猜不准
     _pci_ipk=$(ls "$_PKG_CACHE_ACT/${_pci_pkg}"_*.ipk 2>/dev/null | head -n1)
     if [ -n "$_pci_ipk" ]; then
-        if "$OPKG_BIN" install --force-reinstall "$_pci_ipk" >/dev/null 2>&1; then
+        if opkg install --force-reinstall "$_pci_ipk" >/dev/null 2>&1; then
             log "[PKG] 本地 ipk 直装成功：$_pci_pkg（opkg 记账正确，LuCI 可见）"
             return 0
         fi
@@ -901,7 +901,7 @@ _pkgcache_install() {
     _pkgcache_feed_ensure || return 1
     _pkgcache_lists_ensure || log "[PKG] 本地索引铺设失败，改用 opkg update 拉取"
     if [ -z "$_PKG_SIGOPT" ]; then
-        if "$OPKG_BIN" --help 2>&1 | grep -q 'no-check-signature'; then
+        if opkg --help 2>&1 | grep -q 'no-check-signature'; then
             _PKG_SIGOPT="--no-check-signature"
         else
             _PKG_SIGOPT="unsupported"
@@ -909,9 +909,9 @@ _pkgcache_install() {
     fi
     _pci_rc=0
     if [ "$_PKG_SIGOPT" = "unsupported" ]; then
-        "$OPKG_BIN" install --force-reinstall "$_pci_pkg" >/dev/null 2>&1 || _pci_rc=1
+        opkg install --force-reinstall "$_pci_pkg" >/dev/null 2>&1 || _pci_rc=1
     else
-        "$OPKG_BIN" "$_PKG_SIGOPT" install --force-reinstall "$_pci_pkg" >/dev/null 2>&1 || _pci_rc=1
+        opkg "$_PKG_SIGOPT" install --force-reinstall "$_pci_pkg" >/dev/null 2>&1 || _pci_rc=1
     fi
     if [ "$_pci_rc" = "0" ]; then
         log "[PKG] 本地包源装回成功：$_pci_pkg（记账正确，LuCI 可见）"

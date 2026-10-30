@@ -2395,60 +2395,99 @@ _luci_smartdns_ok() {
 > 待办：真实设备上跑一次 `sh tests/luci_restore.sh` 复核；`tests/test_bp_reset.sh` 等结构测试
 > 依赖 `dash` 与 `mktemp -d`，在 Windows busybox 下跑不起来，只能在路由器上验。
 
-## v.180.117：探针补上 smartdns / 53 体检
+## v.180.117 → v.180.198：53 体检的引进与撤销
 
-### 补的是一个一直存在的盲区
+> **⚠ 判据已于 v.180.198 整体替换。** 本节先记 v.180.117 引进「53 体检」的缘由，
+> 再记 v.180.198 为什么把它撤掉、换成了什么。**现状以「v.180.198 之后」那几段为准。**
+
+### v.180.117 补的是什么盲区
 
 探针原来只盯容器 `last_pull`。而 `last_pull` 取的是 LAPI 的时间戳，`api_url` 是
 **IP 直连**（`http://10.1.0.10:8080/`），**不查 DNS**。于是「53 没人应答」这类故障，
 探针完全看不见 —— 日志一路 `ok`，`SMARTCHK` 不跑，一直要等人发现网页打不开、去翻
-`/etc/resolv.conf` 才知道。典型成因就是上一条说的：在 LuCI 里把 smartdns 配置改坏。
+`/etc/resolv.conf` 才知道。
 
-### 判据：只认本地故障
+### v.180.117 / v.180.186 的旧判据（已删）
 
 | 现场 | 判定 | 动作 |
 |---|---|---|
 | `pidof smartdns` 为空 | 进程没了 | 计数 → 触发 |
-| `netstat -lnu` 无 `:53` | 端口没起 / `bind_device` 绑错网卡 | 计数 → 触发 |
-| 进程在、53 在听 | **算好** | 不动手 |
+| 53 端口没监听 / 被别的进程占着 | 没起来或绑错网卡 | 计数 → 触发 |
+| 进程在、53 归 smartdns | **算好** | 不动手 |
 
-第三行是刻意的：上游全挂、外网不通时，重跑引导**修不好**它，每轮触发只会刷日志、
-白撞冷却。所以判据里不写 `nslookup`、不比对上游表。
+v.180.186 把「53 在听」从 `netstat -lnu` 的粗判改成按 socket inode 反查归属
+（`/proc/net/udp{,6}` 里 `0035` 且 `st=07` 的 inode，再到 `/proc/<pid>/fd/*` 找
+`socket:[<inode>]`），因为 dnsmasq 占着 53 时旧判据照样通过。
+
+### v.180.198 为什么撤销（用户 2026-10-31 定）
+
+两条理由：
+
+1. **本固件的取向是「smartdns 必须占 53」**。53 起不来是必须让人看见的硬故障，
+   不该用「重跑修复脚本」去掩盖；配套地，`pkg-restore-smartdns.sh` 里
+   「失败就把 53 还给 dnsmasq」的回滚也一并删除 —— 从此 53 只归 smartdns，
+   起不来就报错，不偷偷换人。
+2. **53 通不代表配置对**。上游被删光时 53 照样在听、照样回 SERVFAIL 或超时，
+   旧判据一路判 ok —— 这才是更常见、也更隐蔽的坏法。
+
+### v.180.198 之后的判据：只数上游段
+
+| 现场 | 判定 | 动作 |
+|---|---|---|
+| `uci show smartdns` 里 `=server` 段 ≥ 1 | 配着上游 | 不动手 |
+| 一条都没有 | 上游被删光 | 计数 → 第 3 轮交 `--config` 写回 13 条 |
+| 没装 smartdns 二进制 | 不归本通道管 | 放行（包由 `pkg-restore.sh` 管） |
+
+判据只有一句可读的话：**`uci -q show smartdns | grep -c '=server$'`**。
+用 uci 而不是查 smartdns 的实际生效配置，是因为 uci 是唯一事实来源，
+smartdns 的 init 每次 start 都从它生成 conf；数段只做一次 `uci show` + `grep`，
+约 10 ms，每 60 秒一轮可忽略。
+
+**不判「少了几条」**：用户可能自己删过某几条上游，那是配置自由；0 条才算失效。
+
+**已知盲区（已接受）**：进程挂了 / 53 没绑，只要 uci 段还在，本通道就判 ok，
+没有任何东西会自动发现 —— 那时要看的是 `logread` 里 smartdns 自己的报错。
 
 ### 与 last_pull 通道的关系
 
-- **共用** `_run_fix`（持锁 → 跑 bootstrap → 回收锁）。原来补印、全量体检、停滞三处
-  各写了一遍这段，`pid` 写进锁这个细节迟早会分叉，现在统一。
-- **不共用**计数与锁存：`P_DNS_BAD` / `P_DNS_FIX` / `P_DNS_TRIG` / `P_HUMAN_DNS` 全是
-  独立的。共用的话，修 DNS 会把「容器拉不动」的累计清零，反之亦然 —— 这正是
+- **不共用** `_run_fix`：v.180.191 起上游通道不再跑 bootstrap，只调
+  `pkg-restore-smartdns.sh --config`。`_run_fix` 现在只剩 last_pull 停滞与补印复验两条在用。
+- **不共用**计数与锁存：`P_UP_BAD` / `P_UP_FIX` / `P_UP_TRIG` / `P_HUMAN_UP` 全是
+  独立的。共用的话，修上游会把「容器拉不动」的累计清零，反之亦然 —— 这正是
   v.108.58 在 `P_HUMAN` / `P_HUMAN_PULL` 上踩过的坑。
-- **复验看现场不看退出码**：引导可能 `exit 0`（`sd_serve` 失败是 hard 终止在最后一步）
-  也可能 `exit 1` 而 DNS 其实已恢复，唯一可信的是再问一次 `_dns_ok`。
+- **不信退出码，看下一轮的事实**：v.180.198 删掉了 `_sd_run` 里「sleep 等服务起来
+  + 现场复验」那两步，`_up_run` 只转发脚本日志并返回退出码；上游到底写回没有，
+  由下一轮的 `_up_n` 再数一次。理由：复验只能验当时那一刻，还得白睡几秒。
 
-### 状态键为什么叫 `dnsfix` / `dnshold`
+### 状态键为什么叫 `upfix` / `uphold`
 
 `_probe_load` 用 `sed -n 's/.*fail=\([0-9]*\).*/\1/p'` 这类**贪婪**表达式取值。
-新键只要含有旧键的字面量就会被顶掉：叫 `dns_fail` 含 `fail=`，叫 `dns_human` 含 `human=`
-—— 结果是「DNS 修复失败 2 次」把 last_pull 的失败计数改成 2。
-所以叫 `dnsfix` / `dnshold`。`tests/probe_dns_watch.sh` 里 R34.3e~g 用真实的一行状态
-和真实的表达式跑了一遍，确认各取各的。
+新键只要含有旧键的字面量就会被顶掉：叫 `up_fail` 含 `fail=`，叫 `up_human` 含 `human=`
+—— 结果是「上游写回失败 2 次」把 last_pull 的失败计数改成 2。
+所以叫 `upfix` / `uphold`（v.180.117 时它叫 `dnsfix` / `dnshold`，v.180.198 改名）。
+`tests/probe_dns_watch.sh` 里 R34.5e~l 用真实的一行状态和真实的表达式跑了一遍，
+确认各取各的。
 
 ### 时间账（别按 3 分钟算）
 
 | 阶段 | 耗时 |
 |---|---|
-| 连续 3 轮不通过 | 120–180 s |
-| 跑一轮 bootstrap | 60–180 s |
-| smartdns restart 到 53 应答 | 2–3 s |
-| **真正恢复** | **约 3–6 分钟** |
+| 连续 3 轮「上游 0 条」 | 120–180 s |
+| 跑一轮 `pkg-restore-smartdns.sh --config` | 约 15 s（重写主段 + 13 条上游 + commit + restart） |
+| **真正写回** | **约 2–3 分钟** |
 
-`PROBE_COOLDOWN=600`：首次自愈不成，10 分钟内不再试；`PROBE_FAIL_ALERT=5` 连续失败
+`PROBE_COOLDOWN=600`：首次写回不成，10 分钟内不再试；`PROBE_FAIL_ALERT=3` 连续失败
 才写「需人工介入」并锁存停手（解除：修好重启探针，或删 `/tmp/crowdsec-probe.state`）。
 
 ### 安全性
 
-`sd_serve` 失败走 `exit 1`，**不会**触发整机重装 —— `_structurally_broken` 只看
-rootfs 资产（`/etc`、`crowdsec` 二进制等），不看 DNS。
+`_up_run` 失败只让探针记一次失败，**不会**触发整机重装 —— `_structurally_broken` 只看
+rootfs 资产（`/etc`、`crowdsec` 二进制等），不看 DNS、不看上游。
+
+配套的口径变化（v.180.198）：`pkg-restore-smartdns.sh` 的 `_sd_apply` 在
+「写完配置、15 秒内 53 没监听」时**不再把 53 还给 dnsmasq**，只 `log` 报错并 `return 1`。
+代价是已知的：此时整机没有 DNS，且没有东西会自动回滚 —— 换来的是
+「53 只归 smartdns」这一条不被静默绕过。
 
 ## v.180.118：探针自愈 bootstrap 本体
 

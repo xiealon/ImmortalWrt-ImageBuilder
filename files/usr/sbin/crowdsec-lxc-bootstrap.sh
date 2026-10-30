@@ -705,7 +705,7 @@ SD_DNS_IPS="$SD_DNS_IP_CN $SD_DNS_IP_OUT"
 # 【v.180.102 → v.180.157】pkg_base 现在只管 lxc 五件套。
 #   · v.180.102 曾把阀门扩到「lxc + smartdns」，v.180.157 又把 smartdns 整坨
 #     （包 / 规则文件 / uci / 界面）搬出本脚本，所以这里只剩 lxc 这一半；
-#     smartdns 的去处在 pkg-restore-smartdns.sh 的文件头，判在探针的 _dns_ok；
+#     smartdns 的去处在 pkg-restore-smartdns.sh 的文件头，判在探针的 _up_n（上游条数）；
 #   · 判据是「命令/文件真能用」而不是包名：lxc 看五件套 + 一次 lxc-start --version 冒烟；
 #   · 缺了先走 /rom 包级自愈（lxc→pkg-restore.sh --lxc），自愈后仍缺才 hard exit 1。
 _LXC_MISSING=""
@@ -1107,7 +1107,7 @@ _preflight() {
 # 【v.180.112】本函数旧名带 sd 字样，有歧义：函数体只查 lxc 五件套，
 # 与 smartdns 毫无关系；v.180.112 之前本函数旧名带 sd 字样，容易被读成
 # 「smartdns 也在这里查」。v.180.157 起 smartdns 已整坨移出本脚本：
-# 恢复归 pkg-restore-smartdns.sh，判定归探针的 _dns_ok / _dns_watch，
+# 恢复归 pkg-restore-smartdns.sh，判定归探针的 _up_n / _up_watch，
 # 本脚本不再有、也不该有 smartdns 的检查入口。
 _lxc_missing_deps() {
     _LXC_MISSING=""

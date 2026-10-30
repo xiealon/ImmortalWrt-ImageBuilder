@@ -21,7 +21,8 @@
 #      网桥配置、容器网络配置、lxc 与 bouncer 恢复、crowdsec 容器恢复、
 #      crowdsec 与 bouncer 的本地联动配置。smartdns 归本脚本 + 探针。
 #      dnsmasq 让出 53 不在这里做：port=53 且 auto_set_dnsmasq=1 时由 smartdns
-#      的 init 自己完成（见下方 _sd_restore_dnsmasq 上方的依据说明）。
+#      的 init 自己完成（见下方「不再手动让位」那段的依据）。53 只归 smartdns，
+#      失败也不回滚给 dnsmasq（v.180.198，用户 2026-10-31 定）。
 #      判据是「验证包在位就写」，不逐项比对配置差异 —— 上游表写死，
 #      覆盖式写入。副作用：在 LuCI 里手改的上游会被下一轮冲掉（与原
 #      bootstrap 的 build_smartdns_upstream 行为一致）。
@@ -90,11 +91,14 @@ _sd_pkg_ok() {
 }
 
 # 只读判定，不启动、不重启。重启只发生在 --config / --repair 走到末尾 _sd_apply 时。
-# 【v.180.186】判据补上「53 是谁在听」，与探针的 _dns_ok 完全同步：
+# 【v.180.186】判据补上「53 是谁在听」：
 #   pidof 有进程 + netstat 里有 :53 这两条是独立的，合起来并不能说明
 #   「smartdns 真的绑上了 53」—— dnsmasq 占着 53 时旧判据照样通过。
 #   现在按 socket inode 反查：/proc/net/udp{,6} 里 local port=0035 且 st=07
 #   的 inode，再在 /proc/<smartdns pid>/fd/* 里找 socket:[<inode>]。
+# 【v.180.198】探针已不再判 53（它只数 uci 上游段），这条判据现在只服务本脚本
+#   自己：_sd_apply 写完配置后用它确认「53 真的到了 smartdns 手上」，失败就
+#   log + return 1，不再把 53 还给 dnsmasq。
 _sd_serve() {
     _ss_pid=$(pidof smartdns 2>/dev/null | awk '{print $1}')
     [ -n "$_ss_pid" ] || return 1
@@ -199,20 +203,16 @@ _sd_main_seg() {
 # hostip 取自 network.lan.ipaddr。lan 没静态地址时 init 静默跳过、谁都不让位，
 # 那时 53 仍被 dnsmasq 占着 —— 这种情形由 _sd_apply 的失败分支报出来。
 #
-# 回滚保留：init 让出 53 后若 smartdns 起不来，整机就是没有 DNS，必须还回去。
-# 原值由 _sd_apply 在 restart 之前记进 _sda_dm_port。
-_sd_restore_dnsmasq() {
-    if [ -n "${_sda_dm_port:-}" ] && [ "$_sda_dm_port" != "53" ]; then
-        uci -q set "dhcp.@dnsmasq[0].port=$_sda_dm_port" 2>/dev/null
-    else
-        # 原来是没设（等价 53）→ 删掉字段即恢复默认
-        uci -q delete "dhcp.@dnsmasq[0].port" 2>/dev/null
-    fi
-    uci commit dhcp >/dev/null 2>&1
-    [ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq restart >/dev/null 2>&1
-    log "已回滚：dnsmasq 重新占用 53（smartdns 未接管，避免整机无 DNS）"
-    return 0
-}
+# 【v.180.198】删除回滚：smartdns 必须占 53（用户 2026-10-31 定）。
+#
+# 旧行为是「init 让出 53 后若 smartdns 起不来，就把 53 还给 dnsmasq」。删掉的理由：
+#   · 与本固件的 DNS 取向冲突 —— 这台机器就是拿 smartdns 当主 DNS 用，
+#     53 一旦被 dnsmasq 拿回去，分流与拦截全部失效，而没有任何机制再把它拿回来：
+#     init 的 set_main_dns 只在 restart smartdns 时判断，dnsmasq 占着 53 就不会再让位。
+#   · 回滚把「起不来」这件必须立刻知道的事，变成一条「已回滚」日志就算了结 ——
+#     表面上有 DNS，实际 smartdns 的规则一条都没生效。
+# 现在失败只报错并返回 1，由探针下一轮重试（--config 会重写 uci 并重启）。
+# 对应地，探针不再检查 53，只检查上游条数（见 crowdsec-lxc-probe.sh 的 _up_watch）。
 
 # 主配置段：不存在就建，逐项写死
 _sd_cfg_main() {
@@ -306,8 +306,6 @@ SD_UPSTREAM_EOF
 # 我们只 restart smartdns，然后等 53 真的在听。
 _sd_apply() {
     uci commit smartdns || { log "uci commit smartdns 失败"; _sd_discard; return 1; }
-    # 让位前的端口，供失败时 _sd_restore_dnsmasq 还原
-    _sda_dm_port=$(uci -q get dhcp.@dnsmasq[0].port 2>/dev/null)
     [ -x /etc/init.d/smartdns ] || { log "没有 /etc/init.d/smartdns，无法重启"; return 1; }
     /etc/init.d/smartdns restart >/dev/null 2>&1
     _sda_i=0
@@ -317,8 +315,10 @@ _sd_apply() {
         _sda_i=$((_sda_i + 1))
     done
     log "配置已写入，但 53 端口 15 秒内没有监听（端口被占、配置语法或动态库问题）"
-    # 走到这里时 init 可能已经把 dnsmasq 的 53 让出去了 —— 整机是真的没有 DNS
-    _sd_restore_dnsmasq
+    # 【v.180.198】不回滚：smartdns 必须占 53（用户 2026-10-31 定）。
+    # 此时 dnsmasq 的 53 已被 smartdns 的 init 让出，机器确实没有可用 DNS ——
+    # 这条错误必须被看见，而不是用「把 53 还给 dnsmasq」把它掩盖成一条「已回滚」。
+    # 重试由探针的 _up_watch 承担（它只判上游条数，不看 53）。
     return 1
 }
 
@@ -326,13 +326,14 @@ _sd_apply() {
 # 脏数据仍在，下次任何人 commit smartdns 都会把它带进去 —— 半套配置上线的后果比不写更糟。
 # 只 revert smartdns：dhcp 由 smartdns 的 init 改，本脚本不再碰它，
 # 贸然 revert dhcp 会把别人（LuCI 编辑中）尚未提交的改动一起丢掉。
-# 只用在「还没 commit 就失败」的路径；已经 commit 的失败走 _sd_restore_dnsmasq。
+# 只用在「还没 commit 就失败」的路径；已经 commit 的失败由 _sd_apply 报错返回，
+# 不回滚（53 必须归 smartdns，v.180.198）。
 _sd_discard() {
     uci -q revert smartdns 2>/dev/null
     return 0
 }
 
-# --config 主流程：验证存在 → 补规则文件 → 写主段 → 写上游 → 让出 53 → commit/重启
+# --config 主流程：验证存在 → 补规则文件 → 写主段 → 写上游 → commit/重启
 _sd_config() {
     command -v uci >/dev/null 2>&1 || { log "没有 uci，无法写配置"; return 1; }
     if ! _sd_pkg_ok; then
@@ -363,7 +364,7 @@ case "${1:-}" in
     ;;
 # --config 与 --repair 现在等价：_sd_config 内部已经按「缺包先装包」的顺序走完，
 # 保留两个名字是为了调用点语义清楚（rc.local 开机配一次用 --config，
-# probe 在 53 连续不可用时兜底用 --repair。bootstrap 自 v.180.157 起不再调用本脚本）。
+# probe 在上游连续 0 条时兜底用 --repair。bootstrap 自 v.180.157 起不再调用本脚本）。
 --config|--repair)
     _sd_config && exit 0 || exit 1
     ;;

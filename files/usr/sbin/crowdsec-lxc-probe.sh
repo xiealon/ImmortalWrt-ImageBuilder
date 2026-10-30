@@ -196,56 +196,25 @@ _ensure_boot() {
     return 0
 }
 
-# ---- smartdns 53 体检（v.180.117）----
-# 补的是一整类白屏：DNS 挂了但 last_pull 照样新鲜，于是 stalled 判定永远不触发。
-# last_pull 走的是 IP 直连 LAPI（http://10.1.0.10:8080/），不查 DNS ——
-# 所以「53 没人应答」这件事，原来的探针完全看不见，一直要到人去翻 /etc/resolv.conf 才发现。
-# 典型成因：在 LuCI 里改 smartdns 配置写坏了 → restart 失败 → 53 无应答 → 全家断网，
-# 而探针日志一路「ok」，重启路由器才恢复。
+# ---- smartdns 上游条数体检（v.180.198）----
+# 【v.180.198】原「53 体检」整段删除（用户 2026-10-31 定）。
+# 旧判据是 pidof smartdns + /proc/<pid>/fd 反查 53 的 socket inode，
+# 连续 PROBE_STALL_ROUNDS 轮不可用就调 pkg-restore-smartdns.sh --repair。
+# 删掉的两条理由：
+#   · 本固件的取向是「smartdns 必须占 53」：53 起不来是必须让人看见的硬故障，
+#     不该用「重跑修复脚本」掩盖；配套地，pkg-restore-smartdns.sh 里
+#     「把 53 还给 dnsmasq」的回滚也一并删除。
+#   · 53 通不代表配置对。上游被删光时 53 照样在听、照样回 SERVFAIL 或超时，
+#     旧判据一路判 ok —— 这才是更常见、也更隐蔽的坏法。
 #
-# 判据取向（只认本地故障，这一点决定了它不会误刷）：
-#   · 进程不在        → 本机问题，重跑引导有意义
-#   · 53 没在监听     → 本机问题（起不来 / bind 绑到具体网卡）
-#   · 53 有人听但不是它 → 本机问题（见 v.180.186）
-#   · 进程在、53 归它 → 一律算好。上游全挂、外网不通也一样「算好」——
-#     那是网络问题，重跑引导修不好，每轮触发只会刷日志、白撞冷却。
-#
-# 【v.180.186】补上「53 到底是谁在听」这一维。
-# 原来判据是两条独立的判据：pidof 有 smartdns + netstat 里出现 :53。
-# 两者都满足就算好，可它们说的不是同一件事 —— 谁在听根本没人问。
-# 于是有一个很难发现的假阳性：smartdns 进程活着，但没绑上 53
-# （port 被改成别的、或启动竞态里 dnsmasq 还没让位），而 dnsmasq 正占着 53。
-# 此时探针判「ok」，DNS 也确实能用，但 smartdns 的分流与拦截一条都没生效 ——
-# 比彻底挂掉更隐蔽，而且永远不会被修。
-# 现在按 socket inode 反查归属：
-#   /proc/net/udp{,6} 里 local port=0035 且 st=07 的 inode
-#   → 遍历 /proc/<smartdns pid>/fd/*，找 socket:[<inode>]
-# 只有真的是它拿着这个 socket 才算可用。实测（192.168.1.201，2026-10-29）：
-#   53 → inode 20605 → pid 17467 comm=smartdns，判定 TRUE；
-#   smartdns 的 fd 共 26 个，整段查完约 0.01s，每 60s 一轮可忽略。
-# 与 pkg-restore-smartdns.sh 的 _sd_serve 保持同一判据（两处同步改）。
-_dns_ok() {
-    _do_pid=$(pidof smartdns 2>/dev/null | awk '{print $1}')
-    if [ -z "$_do_pid" ]; then
-        DNS_WHY="进程不在"
-        return 1
-    fi
-    _do_ino=$(awk 'NR>1 && $4=="07" { n=split($2,a,":"); if (a[n]=="0035") print $10 }' \
-        /proc/net/udp /proc/net/udp6 2>/dev/null)
-    if [ -z "$_do_ino" ]; then
-        DNS_WHY="53 未监听（UDP）"
-        return 1
-    fi
-    for _do_i in $_do_ino; do
-        for _do_f in /proc/"$_do_pid"/fd/*; do
-            if [ "$(readlink "$_do_f" 2>/dev/null)" = "socket:[$_do_i]" ]; then
-                DNS_WHY=""
-                return 0
-            fi
-        done
-    done
-    DNS_WHY="53 被别的进程占着（smartdns 没绑上）"
-    return 1
+# 现在只判一件可读的事：uci 里还剩几条 server 段。一条都没有就写回 13 条。
+# 不判 53、不判进程，是有意的取舍：进程挂了 uci 段仍在，本通道判 ok。
+# 数 uci 里的上游段数。返回纯数字（0 = 没配任何上游）。
+# 为什么用 uci 而不是查 smartdns 的实际生效配置：uci 是唯一事实来源，
+# smartdns 的 init 每次 start 都从它生成 conf；数段只做一次 uci show + grep，
+# 约 10ms，每 60 秒一轮可忽略。
+_up_n() {
+    uci -q show smartdns 2>/dev/null | grep -c '=server$'
 }
 
 # ---- 修复一律交脚本（v.180.158）----
@@ -265,8 +234,10 @@ _dns_ok() {
 #     所以它是三项的联合健康信号，不必再分别探三者的进程 / 端口；
 #     失效时直接拉 bootstrap，由它去验、去恢复这三项
 #     （lxc、bouncer、容器 正好是 bootstrap 六件事里的三件）。
-#   · smartdns 进程在不在（pidof）
-#   · 53/UDP 有没有人在听（netstat -lnu）
+#   · smartdns 的上游还配着几条（v.180.198）：uci show smartdns | grep -c '=server$'，
+#     一条都没有就调 pkg-restore-smartdns.sh --config 写回 13 条。
+#     不再判进程、不再判 53（理由见下方「smartdns 上游条数体检」那一段）。
+#     已知盲区并接受：进程挂了而 uci 段仍在时，本通道判 ok。
 #   · 其余应用（daed / ssrp / mosdns / clashoo）只判包在不在册，
 #     不搞进程/端口 —— 它们不像 smartdns 那样接管 53，端口多维度没有意义。
 #     判的是「主程序 + 依赖内核 + LuCI 界面」整组（v.180.164 扩范围），
@@ -287,23 +258,23 @@ _dns_ok() {
 # 连续 N 轮不可用且冷却闸门通过之后触发，不会每分钟来一次。
 _SD_RESTORE="${CS_PROBE_SD_RESTORE:-/usr/sbin/pkg-restore-smartdns.sh}"
 
-# 跑脚本的一个子命令。输出转 syslog（标签与探针分开，排障时能分清谁说的），
-# 然后用 _dns_ok 现场复验 —— 脚本 exit 0 不等于 53 真在听，判据始终看现场。
-_sd_run() {
+# 跑脚本的一个子命令。输出转 syslog（标签与探针分开，排障时能分清谁说的）。
+# 【v.180.198】不再做「53 现场复验」：复验函数随 53 体检一起删除。
+# 上游是否写回由下一轮的 _up_n 再数一次 —— 判据看下一轮的事实，不信退出码。
+_up_run() {
     [ -x "$_SD_RESTORE" ] || return 1
-    _sr_out="$("$_SD_RESTORE" "$1" 2>&1)"
-    _sr_rc=$?
-    [ -n "$_sr_out" ] && printf '%s\n' "$_sr_out" | logger -t crowdsec-probe-sd 2>/dev/null
-    [ "$_sr_rc" = "0" ] || return 1
-    sleep "${CS_PROBE_SD_WAIT:-2}"
-    _dns_ok
+    _ur_out="$("$_SD_RESTORE" "$1" 2>&1)"
+    _ur_rc=$?
+    [ -n "$_ur_out" ] && printf '%s\n' "$_ur_out" | logger -t crowdsec-probe-sd 2>/dev/null
+    [ "$_ur_rc" = "0" ] || return 1
+    return 0
 }
 
 # 持锁跑一轮 bootstrap，等它结束，回收锁。返回它的退出码；77 = 抢锁失败。
 # 抽出来是因为有两条通道要跑同一件事（last_pull 停滞 / 补印复验），
 # 各写一遍的话，「pid 写进锁」这类容易写错的细节迟早会分叉 ——
 # 陈旧锁判定依据的是持有者 pid，不是探针自己，写错了会让锁被误判成陈旧。
-# 【v.180.191】DNS 通道已退出本函数（见 _dns_watch），现在是这两条在用。
+# 【v.180.191】DNS 通道已退出本函数（见 _up_watch），现在是这两条在用。
 _run_fix() {
     # 先保证要跑的东西在：不在就什么都别谈。返回 78 与抢锁失败的 77 区分开 ——
     # 两者的日志和处置完全不同（一个是「等下一轮」，一个是「要重刷固件」）。
@@ -324,72 +295,67 @@ _run_fix() {
     return "$_rf_rc"
 }
 
-# DNS 通道：连续 PROBE_STALL_ROUNDS 轮不可用 → 冷却检查 → 交 pkg-restore-smartdns.sh --repair。
-# 【v.180.191】只有这一级，不再跑 bootstrap —— 它与 smartdns 已经彻底分开，
-# 理由写在函数体里「到此为止，不再拉 bootstrap」那段。这也让 DNS 通道
-# 不再持 bootstrap 的锁：修 DNS 不会和 last_pull 那条链路抢锁。
-# 计数与锁存都是独立的（P_DNS_*）：与 last_pull 那条链路根因完全不同，
-# 共用一个计数器的话，修 DNS 会把「容器拉不动」的累计清零，反过来也一样 ——
-# 这正是 v.108.58 在两个锁存上踩过的坑（P_HUMAN 归补印、P_HUMAN_PULL 归停滞）。
-# 复验不看退出码看现场：--repair 可能 exit 0 而 53 根本没起（比如被别的进程占着），
-# 所以 _sd_run 内部最后一步一定是 _dns_ok，外面只认这一步。
-_dns_watch() {
-    if _dns_ok; then
-        if [ "${P_DNS_BAD:-0}" -gt 0 ]; then
-            plog "【DNS】smartdns 已恢复（此前不可用 $P_DNS_BAD 轮）"
+# 上游通道：连续 PROBE_STALL_ROUNDS 轮「上游 0 条」→ 冷却检查 → 交 pkg-restore-smartdns.sh --config。
+# 【v.180.198】取代原「DNS 53 通道」（用户 2026-10-31 定）：
+#   · 只判 uci 里的 server 段数，0 条才动手；
+#   · 不看 53、不看进程（理由见 _up_n 上方的注释）；
+#   · 计数与锁存独立（P_UP_*），不与 last_pull 链路共用 —— 共用一个计数器的话，
+#     修 DNS 会把「容器拉不动」的累计清零，反过来也一样（v.108.58 踩过）。
+# 为什么不判「少了几条」：用户可能自己删过某几条上游，那是配置自由；0 条才是失效。
+_up_watch() {
+    # 没装 smartdns 不是这条通道的事（包由 pkg-restore.sh 管），直接放行
+    if [ ! -x /usr/sbin/smartdns ]; then
+        P_UP_BAD=0
+        P_UP_FIX=0
+        return 0
+    fi
+    _uw_n=$(_up_n)
+    case "$_uw_n" in ''|*[!0-9]*) _uw_n=0 ;; esac
+    if [ "$_uw_n" -gt 0 ]; then
+        if [ "${P_UP_BAD:-0}" -gt 0 ]; then
+            plog "【上游】上游已恢复（$_uw_n 条，此前缺 ${P_UP_BAD} 轮）"
         fi
-        P_DNS_BAD=0
-        P_DNS_FIX=0
+        P_UP_BAD=0
+        P_UP_FIX=0
         return 0
     fi
-    P_DNS_BAD=$((${P_DNS_BAD:-0} + 1))
-    if [ "${P_HUMAN_DNS:-0}" = "1" ]; then
-        P_ACTION="dns-need-human-hold"
-        plog "【DNS】【需人工介入】已停止重跑（smartdns 仍不可用：$DNS_WHY，累计第 ${P_DNS_BAD} 轮）。修好后重启探针或删除 $STATE_FILE 解除"
+    P_UP_BAD=$((${P_UP_BAD:-0} + 1))
+    if [ "${P_HUMAN_UP:-0}" = "1" ]; then
+        P_ACTION="up-need-human-hold"
+        plog "【上游】【需人工介入】已停止重跑（上游 0 条，累计第 ${P_UP_BAD} 轮）。修好后重启探针或删除 $STATE_FILE 解除"
         return 0
     fi
-    if [ "$P_DNS_BAD" -lt "$PROBE_STALL_ROUNDS" ]; then
-        P_ACTION="dns-warn"
-        plog "【DNS】smartdns 不可用：$DNS_WHY（第 $P_DNS_BAD/$PROBE_STALL_ROUNDS 轮）"
+    if [ "$P_UP_BAD" -lt "$PROBE_STALL_ROUNDS" ]; then
+        P_ACTION="up-warn"
+        plog "【上游】上游 0 条（第 $P_UP_BAD/$PROBE_STALL_ROUNDS 轮）"
         return 0
     fi
-    _dw_now="$(date +%s)"
-    if [ $((_dw_now - ${P_DNS_TRIG:-0})) -lt "$PROBE_COOLDOWN" ]; then
-        P_ACTION="dns-cooldown"
-        plog "【DNS】smartdns 持续不可用（$DNS_WHY），冷却中（剩余 $((PROBE_COOLDOWN - (_dw_now - P_DNS_TRIG)))s），暂不触发"
+    _uw_now="$(date +%s)"
+    if [ $((_uw_now - ${P_UP_TRIG:-0})) -lt "$PROBE_COOLDOWN" ]; then
+        P_ACTION="up-cooldown"
+        plog "【上游】上游仍 0 条，冷却中（剩余 $((PROBE_COOLDOWN - (_uw_now - P_UP_TRIG)))s），暂不触发"
         return 0
     fi
-    P_DNS_TRIG="$_dw_now"
-    P_DNS_BAD=0
-    # 【v.180.157】先交 smartdns 自己的脚本修：bootstrap 已不再处理 smartdns，
-    # 重跑引导对「配置被写坏」这类故障已经无能为力（它只重走网络与容器）。
-    # 放在冷却闸门之后调，是因为 --repair 会重写 uci 并重启服务，不能每轮都来一次。
-    P_ACTION="dns-script-repair"
-    plog "【DNS】smartdns 连续 ${PROBE_STALL_ROUNDS} 轮不可用（$DNS_WHY），交 pkg-restore-smartdns.sh --repair"
-    if _sd_run --repair; then
-        P_DNS_FIX=0
-        P_ACTION="dns-script-fixed"
-        plog "【DNS】脚本修复成功：smartdns 已恢复"
+    P_UP_TRIG="$_uw_now"
+    P_UP_BAD=0
+    # --config 会重写主段与 13 条上游、commit 并重启 smartdns（约 15 秒），
+    # 所以必须放在冷却闸门之后，不能每轮都来一次。
+    P_ACTION="up-repair"
+    plog "【上游】上游 0 条连续 ${PROBE_STALL_ROUNDS} 轮，交 pkg-restore-smartdns.sh --config 写回 13 条"
+    if _up_run --config; then
+        P_UP_FIX=0
+        P_ACTION="up-fixed"
+        plog "【上游】已写回：下一轮复核上游条数"
         return 0
     fi
-    # 【v.180.191】到此为止，不再拉 bootstrap。
-    # 原来这里还会 _run_fix 跑一遍完整引导（上限 900s，正常 5~6 分钟）。删掉的理由：
-    #   · bootstrap 自 v.180.157 起一行 smartdns 恢复代码都没有（全脚本只剩注释
-    #     说明「已移出」），六件事扫下来没有一件能让 53 回来；
-    #   · 它唯一沾边的动作是 dhcp 分组 flush 时 restart dnsmasq，而 dnsmasq 让不让
-    #     53 由 smartdns 自己的 init（auto_set_dnsmasq）决定，restart 解决不了抢占；
-    #   · 它真帮得上的那些情形（网卡没起、network 配置坏了）会让 last_pull 一起坏，
-    #     last_pull 停滞通道早就在跑同一个 bootstrap —— 这里再跑一遍只是白等 5 分钟，
-    #     顺带动一次容器与网桥，把一次局部故障放大成一次全局抖动。
-    # 判据仍看现场：_sd_run 内部最后一步就是 _dns_ok，脚本 exit 0 不算数。
-    P_DNS_FIX=$((${P_DNS_FIX:-0} + 1))
-    if [ "$P_DNS_FIX" -ge "$PROBE_FAIL_ALERT" ]; then
-        P_ACTION="dns-need-human"
-        P_HUMAN_DNS=1
-        plog "【DNS】【需人工介入】--repair 连续 $P_DNS_FIX 次未能让 smartdns 恢复（仍 $DNS_WHY）。依次查：/etc/config/smartdns 是否被手工改坏、/etc/smartdns 下规则文件是否被遮、53 是否被别的进程占着"
+    P_UP_FIX=$((${P_UP_FIX:-0} + 1))
+    if [ "$P_UP_FIX" -ge "$PROBE_FAIL_ALERT" ]; then
+        P_ACTION="up-need-human"
+        P_HUMAN_UP=1
+        plog "【上游】【需人工介入】--config 连续 $P_UP_FIX 次未能写回上游。依次查：/etc/config/smartdns 是否可写、uci 是否被锁、/etc/smartdns 下规则文件是否被遮"
     else
-        P_ACTION="dns-fix-fail"
-        plog "【DNS】--repair 未能让 smartdns 恢复（仍 $DNS_WHY，连续第 $P_DNS_FIX/${PROBE_FAIL_ALERT} 次）"
+        P_ACTION="up-fix-fail"
+        plog "【上游】--config 未能写回上游（连续第 $P_UP_FIX/${PROBE_FAIL_ALERT} 次）"
     fi
     return 0
 }
@@ -620,7 +586,7 @@ _lxc_watch() {
 # ---- 可测化的一轮处理：判定 + 动作 ----
 # 全局状态（测试可直接预设/断言）：
 #   P_STALL 连续停滞轮数 / P_LAST_TRIG 上次触发时刻 / P_FAIL 连续修复失败次数
-#   P_DNS_BAD 连续 DNS 不可用轮数 / P_DNS_TRIG 上次 DNS 触发时刻 / P_DNS_FIX 连续 DNS 修复失败次数
+#   P_UP_BAD 连续「上游 0 条」轮数 / P_UP_TRIG 上次写回时刻 / P_UP_FIX 连续写回失败次数 / P_HUMAN_UP 停手锁存
 #   P_APP_BAD 连续主程序缺失轮数 / P_APP_TRIG 上次装回时刻 / P_APP_FIX 连续装回失败次数
 #   P_LOCK_RECLAIMED 本轮是否回收过陈旧锁 / P_ACTION 本轮动作标签
 probe_tick() {
@@ -740,8 +706,8 @@ probe_tick() {
         fi
     fi
     # 【v.180.117】DNS 体检必须排在 last_pull 判定之前：后者在「链路正常」时直接
-    # return 0，放在它后面等于永远不执行 —— 而 DNS 挂掉恰恰是「链路照样正常」的情形。
-    _dns_watch
+    # return 0，放在它后面等于永远不执行 —— 而上游被删光恰恰是「链路照样正常」的情形。
+    _up_watch
     # 应用主程序通道同样必须排在 last_pull 判定之前：应用被删不影响 last_pull，
     # 放在「链路正常就 return 0」后面等于永远不执行 —— v.180.117 在 DNS 上踩过这一脚。
     _apps_watch
@@ -946,10 +912,10 @@ _probe_save() {
     # 四组都避开了旧键字面量（human= / fail= / appbad= 等），不会互相取错。
     # 【v.180.189】lxc 文件通道：lxcbad / lxctrig / lxcfix / lxchold。
     # 同样避开 —— lxcbad 不含 "appbad="，lxctrig 不含 "dnstrig="/"kmodtrig="。
-    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s human_pull=%s dnsbad=%s dnsfix=%s dnstrig=%s dnshold=%s appbad=%s apptrig=%s appfix=%s apphold=%s kmodbad=%s kmodtrig=%s kmodfix=%s kmodhold=%s lxcbad=%s lxctrig=%s lxcfix=%s lxchold=%s\n' \
+    printf 'stall=%s last_trig=%s fail=%s action=%s ts=%s round=%s audit_bad=%s human=%s human_pull=%s upbad=%s upfix=%s uptrig=%s uphold=%s appbad=%s apptrig=%s appfix=%s apphold=%s kmodbad=%s kmodtrig=%s kmodfix=%s kmodhold=%s lxcbad=%s lxctrig=%s lxcfix=%s lxchold=%s\n' \
         "${P_STALL:-0}" "${P_LAST_TRIG:-0}" "${P_FAIL:-0}" "${P_ACTION:-none}" "$(date +%s)" \
         "${P_ROUND:-0}" "${P_AUDIT_BAD:-0}" "${P_HUMAN:-0}" "${P_HUMAN_PULL:-0}" \
-        "${P_DNS_BAD:-0}" "${P_DNS_FIX:-0}" "${P_DNS_TRIG:-0}" "${P_HUMAN_DNS:-0}" \
+        "${P_UP_BAD:-0}" "${P_UP_FIX:-0}" "${P_UP_TRIG:-0}" "${P_HUMAN_UP:-0}" \
         "${P_APP_BAD:-0}" "${P_APP_TRIG:-0}" "${P_APP_FIX:-0}" "${P_HUMAN_APP:-0}" \
         "${P_KMOD_BAD:-0}" "${P_KMOD_TRIG:-0}" "${P_KMOD_FIX:-0}" "${P_HUMAN_KMOD:-0}" \
         "${P_LXC_BAD:-0}" "${P_LXC_TRIG:-0}" "${P_LXC_FIX:-0}" "${P_HUMAN_LXC:-0}" \
@@ -973,15 +939,15 @@ _probe_load() {
     [ -n "$_v" ] && P_AUDIT_BAD="$_v"
     _v=$(printf '%s\n' "$_pl" | sed -n 's/.*human=\([0-9][0-9]*\).*/\1/p')
     [ -n "$_v" ] && P_HUMAN="$_v"
-    # 【v.180.117】DNS 通道的独立计数与锁存。旧状态文件没这几个键 → 保持 0（向后兼容）。
-    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*dnsbad=\([0-9][0-9]*\).*/\1/p')
-    [ -n "$_v" ] && P_DNS_BAD="$_v"
-    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*dnsfix=\([0-9][0-9]*\).*/\1/p')
-    [ -n "$_v" ] && P_DNS_FIX="$_v"
-    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*dnstrig=\([0-9][0-9]*\).*/\1/p')
-    [ -n "$_v" ] && P_DNS_TRIG="$_v"
-    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*dnshold=\([0-9][0-9]*\).*/\1/p')
-    [ -n "$_v" ] && P_HUMAN_DNS="$_v"
+    # 【v.180.198】上游通道的独立计数与锁存。旧状态文件没这几个键 → 保持 0（向后兼容）。
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*upbad=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_UP_BAD="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*upfix=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_UP_FIX="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*uptrig=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_UP_TRIG="$_v"
+    _v=$(printf '%s\n' "$_pl" | sed -n 's/.*uphold=\([0-9][0-9]*\).*/\1/p')
+    [ -n "$_v" ] && P_HUMAN_UP="$_v"
     # 【v.180.162】应用通道的独立计数与锁存。旧状态文件没这几个键 → 保持 0（向后兼容）。
     _v=$(printf '%s\n' "$_pl" | sed -n 's/.*appbad=\([0-9][0-9]*\).*/\1/p')
     [ -n "$_v" ] && P_APP_BAD="$_v"
@@ -1021,10 +987,10 @@ P_ROUND=0
 P_AUDIT_BAD=0
 P_HUMAN=0
 P_HUMAN_PULL=0
-P_DNS_BAD=0
-P_DNS_FIX=0
-P_DNS_TRIG=0
-P_HUMAN_DNS=0
+P_UP_BAD=0
+P_UP_FIX=0
+P_UP_TRIG=0
+P_HUMAN_UP=0
 # 【v.180.162】应用主程序通道（daed / ssrp / mosdns / clashoo）
 P_APP_BAD=0
 P_APP_TRIG=0
@@ -1040,7 +1006,6 @@ P_LXC_BAD=0
 P_LXC_TRIG=0
 P_LXC_FIX=0
 P_HUMAN_LXC=0
-DNS_WHY=""
 _probe_load
 while true; do
     P_LOCK_RECLAIMED=0

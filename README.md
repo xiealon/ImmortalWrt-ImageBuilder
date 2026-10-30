@@ -10,7 +10,7 @@
 
 ## 一、编译期（GitHub Actions）
 
-全部手动触发，没有任何 `on: push`。两个构建入口 `build-x86-64-24.10.x.yml` / `build-x86-64-25.12.x.yml` 流程一致，只是 LuCI 版本和 packages 配置不同。
+全部手动触发，没有任何 `on: push`。本仓库只有一个构建入口 `build-x86-64-24.10.x.yml`。25.12 已是独立仓库 `ImmortalWrt-ImageBuilder-25.12`，两边代码同源，区别只在包管理器（opkg / apk）与 LuCI 版本。
 
 **① 手动 Run workflow**
 在 Actions 页面选一个入口点 Run，填 10 项输入。
@@ -36,7 +36,7 @@ Docker、LXC、CrowdSec 容器都已锁定为内置（纯 X86 平台，没有「
 `prepare-crowdsec-rootfs.sh` 拉 Ubuntu 22.04 base rootfs，在 chroot 里 `apt-get install crowdsec`，清理 apt 缓存后打成 `files/etc/crowdsec/lxc-ubuntu.tar.gz`。这个 tar 就是固件里预置的容器镜像——**不需要联网拉镜像**。
 
 **⑤ Docker 里跑 build.sh**
-用 `immortalwrt/imagebuilder:x86-64-openwrt-<luci版本>` 官方镜像，把 `bin` / `files` / `custom` / `shell` / `.config` / `build25.sh` 全部挂载进去，跑 `build.sh`。脚本拉 feeds、装软件包、必要时下 clash/mihomo 内核，最后 `make image` 出 `*squashfs-combined-efi.img.gz`。
+用 `immortalwrt/imagebuilder:x86-64-openwrt-<luci版本>` 官方镜像，把 `bin` / `files` / `custom` / `shell` / `.config` / `build24.sh` 全部挂载进去，跑 `build.sh`。脚本拉 feeds、装软件包、必要时下 clash/mihomo 内核，最后 `make image` 出 `*squashfs-combined-efi.img.gz`。
 
 **⑥ 发布 Release**
 产物传到 tag `Autobuild-x86-64` 的 Release，同时作为 artifact 留档。Release 说明里写后台地址/账号密码。
@@ -586,7 +586,7 @@ Docker 的 bind mount 会**整体遮蔽**挂载点目录的原有内容，而 `c
 | `files/etc/uci-defaults/98-lxc-auto.sh` | 新增，首启写 `container` 段（不在 `/etc/config` 下，不受挂载影响） |
 | `_ensure_lxc_auto` | 恢复「能补写 + commit」（v.108.7 的「只校验」= 永远拉不起来） |
 | `crowdsec-guard.sh` | `/etc/config/lxc-auto` **移出** GUARD_FILES（v.108.7 加的，撤回） |
-| `build24.sh` / `build25.sh` | chmod 列表加 `98-lxc-auto.sh` |
+| `build24.sh` | chmod 列表加 `98-lxc-auto.sh` |
 
 guard 必须撤的理由：guard 的基准是 `/rom`，而 `/rom` 里就是那份注释模板，
 纳进去等于「bootstrap 写一次、guard 复原一次」，容器在两次之间随机起不来。
@@ -599,8 +599,8 @@ v.108.8 是绕路（运行期写）。根因是挂载本身写错了，正确做
 | 位置 | 改动 |
 |---|---|
 | `files/etc/config/lxc-auto` | **恢复**，内容是 `config container` / `option name 'ubuntu'` / `option timeout '300'` |
-| workflow（24.10 / 25.12） | `custom` 改挂到 `/home/build/immortalwrt/custom`，不再盖住 `files/etc/config` |
-| `build24.sh` / `build25.sh` | 新增 `custom/*` → `files/etc/config/` 的拷贝循环，拷贝失败 `exit 1` |
+| workflow（24.10） | `custom` 改挂到 `/home/build/immortalwrt/custom`，不再盖住 `files/etc/config` |
+| `build24.sh` | 新增 `custom/*` → `files/etc/config/` 的拷贝循环，拷贝失败 `exit 1` |
 
 Docker 的 bind mount 是「整体替换目录」而非「合并」，这正是 `files/etc/config/` 下
 任何文件都会凭空消失的原因 —— 不只是 lxc-auto，将来往这里加任何配置文件都会中招。
@@ -645,7 +645,7 @@ Docker 的 bind mount 是「整体替换目录」而非「合并」，这正是 
 | 断言点名的函数在脚本里是否存在（抽不到会拿空串比） | 9 处引用，0 缺失 |
 | `files/` 权限位（git 视角，不是 Windows 视角） | 6 个脚本全 100755 |
 | `GUARD_FILES` 6 项与实物对账 | 全部存在 |
-| 两个 workflow 的挂载是否一致 | 一致（只有 config 文件名不同：imm / imm25） |
+| 两个仓库的 workflow 挂载是否一致 | 一致（只有 config 文件名不同：imm / imm25） |
 | `ensure()` 是否会被子 shell 吃掉 `exit 1` | 全部直接调用，无 `$(ensure)` / `\| ensure` |
 
 新发现三处，都修了：
@@ -1782,7 +1782,7 @@ SSH 仍然只绑 LAN 侧，不再有「无差别监听所有口」的风险；�
 
 ### E. 边界
 
-- 固件仍会带 `luci-i18n-ttyd-zh-cn`（`build24.sh` / `build25.sh` / `apk-custom-packages.sh`）：
+- 固件仍会带 `luci-i18n-ttyd-zh-cn`（`build24.sh` / `shell/custom-packages.sh`）：
   那是**语言包**，ttyd 本体由 LuCI 依赖拉入；本次只改引导脚本的判断与写入，不动编译期包列表。
 - `docs/` 里的 `dag-flow.svg` 等是 v.82 时代的分层图（19 节点、含 `wan_port`），
   早已与生产 DAG 不符；本次不动它，避免出现「svg 改了、png 还是旧的」这种更糟的不一致。

@@ -51,23 +51,23 @@ Docker、LXC、CrowdSec 容器都已锁定为内置（纯 X86 平台，没有「
 **⑧ 抢引导锁**
 `mkdir` 原子锁。残留锁（mtime 超 30 分钟，被 kill -9 或断电留下）会被强夺后继续，避免"一次异常永久不再引导"。锁在，说明上一次还在跑，本次跳过。
 
-**⑨ bootstrap 十一组链式置位**
-按 `NETBASE → INSTALL → PREP → CAPIBLOCK → BOOT → LOGCONF → LAPI → BOUNCERVERIFY → DEPS → SMARTCHK → ENROLL`（`GROUP_SEQ` 定序）执行，每组开跑前校验所有前置组已置位。组内每个节点都是**先验证现场、达标就零写入、不达标才构建**。构建失败分两种处置：结构性节点（`_structurally_broken`）失败直接整机重装，软节点（`bouncer_verify` / `enroll` / `deps`）失败只记 failed 继续跑。复核统一放在 flush 之后与开机后，**不在 build 后即时复核**。
+**⑨ bootstrap 九组链式置位**
+按 `NETBASE → INSTALL → PREP → CAPIBLOCK → BOOT → LOGCONF → LAPI → BOUNCERVERIFY → ENROLL`（`GROUP_SEQ` 定序）执行，每组开跑前校验所有前置组已置位。组内每个节点都是**先验证现场、达标就零写入、不达标才构建**。构建失败分两种处置：结构性节点（`_structurally_broken`）失败直接整机重装，软节点（`bouncer_verify` / `enroll`）失败只记 failed 继续跑。复核统一放在 flush 之后与开机后，**不在 build 后即时复核**。
 
-**⑩ NETBASE（14 节点）**
-网络基线 11 项：`br_lan_ports` `lan_static` `dhcp_ignore` `bridge` `lxc_zone` `fwd_rules` `lan_input` `snat` `ip_forward` `svc_bind` `docker_fw`；`pkg_base` / `lxc_auto` 负责缺包时从 `/rom` 本地装回（不联网）—— `pkg_base` 另带 `luci-app-smartdns` 界面：只在这台固件编过它、运行时又缺时才补，补不上不影响引导；`smartdns` 写 13 条上游并让 dnsmasq 交还 53。
+**⑩ NETBASE（13 节点）**
+网络基线 11 项：`br_lan_ports` `lan_static` `dhcp_ignore` `bridge` `lxc_zone` `fwd_rules` `lan_input` `snat` `ip_forward` `svc_bind` `docker_fw`；`pkg_base` / `lxc_auto` 负责缺包时从 `/rom` 本地装回（不联网）—— `pkg_base` 另带 `luci-app-smartdns` 界面：只在这台固件编过它、运行时又缺时才补，补不上不影响引导。（v.180.157 起 smartdns 整块——配置 / 服务 / 验证——已移出本脚本，交给 `pkg-restore-smartdns.sh` 与探针。）
 
 **⑪ INSTALL / PREP / CAPIBLOCK / BOOT**
 `INSTALL` 三节点：迁移校验镜像、解压 rootfs、写容器 config；`PREP` 四节点：容器网络、cgroup 挂载、开机链、resolv.conf；`CAPIBLOCK` 在开机前停用 `online_client`（`config.yaml` 只在 crowdsec 启动时读一次，启动后再改等于没改）；`BOOT` 依赖 `snat`，没 SNAT 不启动，全程唯一一次开机。
 
-**⑫ LOGCONF / LAPI / BOUNCERVERIFY / DEPS / SMARTCHK / ENROLL**
-宿主机日志推送 + 容器内采集解析（用标记日志验入库）、从容器内 `cscli` 取 LAPI 填入路由器 bouncer、验证 bouncer 真在拉（看 `last_pull` 新鲜度）才放开 CAPI、`DEPS` 只验不装（网络是否通 / lxc 与 smartdns 是否就位）、`SMARTCHK` 验 smartdns 运行态（进程 / 53 监听 / 容器内解析）、最后 `ENROLL` 做 Console 账号绑定 —— **全程唯一联网点**。
+**⑫ LOGCONF / LAPI / BOUNCERVERIFY / ENROLL**
+宿主机日志推送 + 容器内采集解析（用标记日志验入库）、从容器内 `cscli` 取 LAPI 填入路由器 bouncer、验证 bouncer 真在拉（看 `last_pull` 新鲜度）才放开 CAPI、最后 `ENROLL` 做 Console 账号绑定 —— **全程唯一联网点**。
 
 > **为什么 CAPIBLOCK 一定要在 BOOT 之前**：`config.yaml` / `acquis` / `resolv.conf` / 网络文件
 > 都是 crowdsec 与 systemd 启动时读一次。启动后再改，不重启就不生效——流程里所有
 > 「改静态配置」的步骤必须排在启动之前。
 
-> **组间只保留真实存在的硬顺序**：`NETBASE → INSTALL → PREP → CAPIBLOCK → BOOT → LOGCONF/LAPI → BOUNCERVERIFY → DEPS → SMARTCHK → ENROLL`。
+> **组间只保留真实存在的硬顺序**：`NETBASE → INSTALL → PREP → CAPIBLOCK → BOOT → LOGCONF/LAPI → BOUNCERVERIFY → ENROLL`。
 > `LOGCONF` 与 `LAPI` 之间没有依赖，谁先谁后都行；把它们串成一条直线只是为了日志好读。
 
 ### 核心脚本防篡改（`crowdsec-guard.sh`）

@@ -161,8 +161,9 @@ build 失败   → hard 终止引导
 | `bridge` | 只 `ip link add` 建裸桥，不写 `network.lxc`、不配地址 | `ct_net` / 双向 ping 全链失败 |
 | `ip_forward` | 写完无条件 log「已置 1」 | `/proc` 只读时 SNAT 与转发全废 |
 
-检测手段固化在 `tests/test_bp_consistency.sh`：对每个节点**单独注入损坏**，
-断言「build 之后 verify 必须自己变回 0」。这是唯一能抓到这类问题的方法——
+检测手段是静态的：`tests/static_verify_first.py` 逐节点核查四条——
+`verify_<node>` 存在、`build_<node>` 存在、`build_` 体内有判据（先判再写）、
+`verify_` 体内没有写动作。这是唯一能廉价抓住「先写后验」的办法——
 正常的「全就绪 → 零动作」流水测试永远走不到 build 分支。
 
 ### commit 与 reload 的区别，为什么必须成对
@@ -484,38 +485,40 @@ forwarding——那正是用户在 LuCI 里建的配置，现在改成「有则�
 删完走 network 组统一 commit + reload。
 
 **删段不波及桥接**：只删 `network.wan` / `network.wan6` 两个 section，
-`br_lan`、`lan`、`ports`、`lan.device` 一概不动——测试 G5~G8 专门守这条。
+`br_lan`、`lan`、`ports`、`lan.device` 一概不动——这四项不动就是判据。
 
 ## 测试怎么跑
 
-四套，全在 `tests/` 下，纯 `sh` 无依赖（只要求 `dash` / `python3` / `shellcheck` 可选）：
+全在 `tests/` 下，纯 `sh`，无外部依赖（只有静态检查那一条要 `python3`）。
 
 ```sh
-sh tests/test_bp_dag.sh           # 361  八组链 / DAG 拓扑 / 置位语义
-sh tests/test_bp_net.sh           # 159  旁路由网络与防火墙写入
-sh tests/test_bp_consistency.sh   #  80  单节点损坏注入：verify/build 对称性
-sh tests/test_bp_reset.sh         # 137  退出即恢复（含 R7 哨兵 / R8 置位格式 / R9 指纹 / R11 复验 / R12 last_pull，转调下面的探针）
-sh tests/probe_ipfwd_sentinel.sh  #  15  ip_forward 哨兵（被 reset 调用，也可单独跑）
-sh tests/probe_flag_format.sh     #  24  置位值格式「分类+时间戳」（被 reset 调用）
-sh tests/probe_stamp_fingerprint.sh # 35  内容指纹：判「一不一样」不比时间（被 reset 调用）
-sh tests/probe_restart_verify.sh  #  15  重启态逐组复验：哪个坏了修哪个（被 reset 调用）
-sh tests/probe_last_pull_semantics.sh # 19  last_pull 判定诚实性：判不了不许假装没问题（被 reset 调用）
+sh tests/test_bp_reset.sh            # 退出即恢复，内部转调下面 4 个探针
+sh tests/probe_ipfwd_sentinel.sh     # ip_forward 哨兵（也可单独跑）
+sh tests/probe_flag_format.sh        # 置位值格式「分类+时间戳」
+sh tests/probe_stamp_fingerprint.sh  # 内容指纹：判「一个不一样」，不比时间
+sh tests/probe_restart_verify.sh     # 重启态逐组复验：哪个坏了修哪个
+python3 tests/static_verify_first.py # 逐节点核查「先验证后写入」
 ```
 
-合计 811 条断言。四套的定位不一样，缺一套就会漏一类问题：
+另有 19 个脚本可单独执行：`probe_v10830` ~ `probe_v10858` 一组按版本命名的回归探针
+（对应各次修复）、`probe_audit` / `probe_guard` / `probe_netsafe` / `probe_lxc_auto` /
+`probe_boot_heal` / `probe_boot_timeout` / `probe_dns_watch`、以及 `guard_pin` /
+`guard_tests_dir` / `lapi_ladder` / `log_trim`。
 
-| 套件 | 只验「函数返回对不对」会漏掉什么 |
+每条脚本末尾自带通过数，以实际输出为准。
+
+| 关注点 | 对应测试 |
 |---|---|
-| `dag` | 组间置位依赖、`ensure` 跳过逻辑 |
-| `net` | 写入内容的细节（uci 值、SNAT 段唯一性） |
-| `consistency` | **build 假成功**：verify 不过 → build 返回 0 → 状态其实没改 |
-| `reset` | **退出路径**：trap 有没有装、信号来了跑不跑、置位清没清 |
-| `probe_stamp_fingerprint` | **判据本身错**：拿 mtime 比时间当「变没变」，两个方向都会错 |
+| 退出路径：trap 有没有者、信号来了跑不跑、置位清没清 | `test_bp_reset.sh` |
+| 判据本身错：拿 mtime 比时间当「变没变」，两个方向都会错 | `probe_stamp_fingerprint.sh` |
+| 形状错：build 体内没有判据，等于无条件覆盖 | `static_verify_first.py` |
+| 脚本自身被改坏 / `tests/` 目录没进镜像 | `guard_pin.sh` / `guard_tests_dir.sh` |
 
-`consistency` 和 `reset` 是这一轮新增的：前者治「改错了没人发现」，后者治「跑崩了留尾巴」。
-两者的共同点是**用损坏注入 / 真实信号去逼出缺陷**，而不是复述"正常情况应该怎样"。
+> v.180.162 起，`test_bp_dag.sh` / `test_bp_net.sh` / `test_bp_consistency.sh` /
+> `probe_last_pull_semantics.sh` / `luci_restore.sh` 这 5 个失效测试已从 `tests/` 删除。
+> 旧文档里 `sh tests/test_bp_*.sh` 那一排命令不要再照抄。
 
-## 与主仓（bk，双模式版）的差异
+## 与双模式版（原 bk 仓）的差异
 
 | | 本仓（旁路由版） | bk（双模式版） |
 |---|---|---|

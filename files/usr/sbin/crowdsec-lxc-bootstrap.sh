@@ -46,7 +46,7 @@
 #   也摘掉，否则 exit 会二次触发 EXIT、恢复逻辑跑两遍（这个坑踩过一次）。
 #   顺序：先做重装失败计数、再做恢复——反了的话计数会读到已被清空的状态。
 
-SCRIPT_VER="2026-10-30.180.194"
+SCRIPT_VER="2026-10-30.180.195"
 
 LXC_NAME="${LXC_NAME:-ubuntu}"
 CS_HOME="${CS_HOME:-/etc/crowdsec}"
@@ -5951,30 +5951,37 @@ if [ "${1:-}" = "--probe-check" ]; then
     exit $?
 fi
 
-# ---- 下发面健康检查（探针每 30 分钟一次，v.180.193）----
+# ---- 下发面健康检查（探针每 30 分钟一次，v.180.195）----
 # 为什么不能塞进 --probe-check：那条路径 60 秒一轮且只读，而这里要重启服务。
-# 为什么不能用 last_pull 判：netlink 脱节时 **拉取是成功的**，last_pull 照常刷新，
-# 唯一痕迹是 nft set 里一条元素都没有（真机 2026-10-30：14990 条拉到、set 全空）。
-# 判据必须是「LAPI 有决策 且 nft set 为空」—— 不接社区/没决策时 set 天然为空，
-# 只看 set 会天天误报。退出码：0=无需动作，1=动过手，其余=检查本身异常。
+# 为什么不能用 last_pull 判：netlink 脱节时 **拉取是成功的**，last_pull 照常刷新。
+# 判据改成直接数 bouncer 日志里的 netlink ENOENT —— 它就是症状本体：
+#   真机 2026-10-30 实测 cscli decisions list 报「No active decisions」，
+#   而 cscli metrics 同时报 60315 条、内核 nft 有 69232 个元素 —— 列表视图不可信。
+# 退出码：0=无需动作，1=动过手，其余=检查本身异常。
 if [ "${1:-}" = "--bouncer-heal" ]; then
     if ! cs_active_on_host; then
         log "[bouncer] 进程未运行（不是下发问题），交由 _ensure_bouncer_service"
         _ensure_bouncer_service
         exit 0
     fi
-    _bh_dec=0
-    _bh_set=0
-    _ct_env "timeout 15 $CSCLI decisions list --limit 1 -o raw" 2>/dev/null | grep -q . && _bh_dec=1
-    nft list table ip crowdsec 2>/dev/null | grep -qE 'elements[[:space:]]*=' && _bh_set=1
-    if [ "$_bh_dec" = "1" ] && [ "$_bh_set" = "0" ]; then
-        _bh_n="$(_ct_env "timeout 20 $CSCLI decisions list -o raw" 2>/dev/null | wc -l | tr -d ' ')"
-        log "[bouncer] ** 下发失效：LAPI 有 ${_bh_n:-?} 条决策，nft set 里一条都没有 -> 重启 bouncer"
+    # 【2026-10-30.180.195】判据改为直接数症状。
+    # 为什么弃用 cscli decisions list：真机 2026-10-30 实测该命令返回
+    # 「No active decisions」，而同一时刻 cscli metrics 报 Local API Decisions
+    # 60315 条、内核 nft 有 69232 个元素 —— cscli 的列表视图与 bouncer 实际
+    # 拉到的数据不是一回事。拿它当判据会让这层兜底永久失效（_bh_dec 恒为 0）。
+    # 现在直接数 bouncer 日志里的 netlink ENOENT：那正是句柄失效的症状本体。
+    # awk 里的 n=0 是幂等关键：重启后日志末尾会追加新的 Starting，计数自然
+    # 归零，既不依赖状态文件，也不会重启完下一轮又把同一批旧错误数一遍反复重启。
+    _bh_err="$(tail -n 500 "$_BC_LOG" 2>/dev/null | awk '/Starting crowdsec-firewall-bouncer/{n=0; next} /netlink receive: no such file or directory/{n++} END{print n+0}')"
+    case "$_bh_err" in ''|*[!0-9]*) _bh_err=0 ;; esac
+    if [ "$_bh_err" -ge 2 ]; then
+        log "[bouncer] ** 本轮进程已 ${_bh_err} 次 netlink ENOENT（句柄失效，不会自愈）-> 重启 bouncer"
         _bouncer_service_restart >/dev/null 2>&1 || true
-        if nft list table ip crowdsec 2>/dev/null | grep -qE 'elements[[:space:]]*='; then
-            log "[bouncer] 重启后 nft set 已填充（下发已恢复）"
+        sleep 2
+        if cs_active_on_host; then
+            log "[bouncer] 重启后进程在跑；ENOENT 是否消失看下一轮（30 分钟后）"
         else
-            log "[bouncer] 重启后 nft set 仍为空（下一轮 30 分钟后再试）"
+            log "[bouncer] 重启后进程未起来（交给探针与下一轮）"
         fi
         exit 1
     fi

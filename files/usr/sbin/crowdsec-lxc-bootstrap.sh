@@ -1034,16 +1034,13 @@ _preflight() {
 # 本脚本不再有、也不该有 smartdns 的检查入口。
 _lxc_missing_deps() {
     _LXC_MISSING=""
-    for _lx_c in lxc-start lxc-stop lxc-ls lxc-info lxc-attach; do
-        command -v "$_lx_c" >/dev/null 2>&1 || _LXC_MISSING="$_LXC_MISSING $_lx_c"
-    done
-    # 文件齐了才冒烟：缺文件时上面已经判过，不必再花一次进程
-    if [ -z "$_LXC_MISSING" ]; then
-        case "$(lxc-start --version 2>&1)" in
-            *"Error loading"*|*"No such file"*|*"not found"*|*"cannot open shared object"*)
-                _LXC_MISSING=" lxc(动态库)" ;;
-        esac
-    fi
+    # 【v.180.199】五件套的 command -v 循环删除（用户 2026-10-31：lxc 容器默认必装）。
+    # 保留单次冒烟：任一件被删或 liblxc 断链，lxc-start --version 都会留下痕迹，
+    # 一次进程约 10ms，比五个 command -v 更便宜，还顺带验了动态库。
+    case "$(lxc-start --version 2>&1)" in
+        *"Error loading"*|*"No such file"*|*"not found"*|*"cannot open shared object"*)
+            _LXC_MISSING=" lxc(缺件或动态库)" ;;
+    esac
     [ -z "$_LXC_MISSING" ]
 }
 
@@ -1227,7 +1224,7 @@ verify_svc_bind() {
 #   规则 dest 指向不存在的 zone 会让 fw4 整表加载失败（firewall/network reload 卡死）
 # 无 dockerd → 不涉及，跳过
 verify_docker_fw() {
-    command -v dockerd >/dev/null 2>&1 || { log "[docker] 未安装 dockerd，本轮不校验 docker 防火墙"; return 0; }
+    # 【v.180.199】dockerd 默认必装，写死不探测（用户 2026-10-31 定）。
     # 【v.108.37】段类型也要验：build 里 `uci set firewall.docker=zone`，
     # verify 原来只查 name/input/output/forward/subnet。段类型被写坏（例如变成 rule 段）
     # 时这些 option 一样在，fw4 却根本不把它当 zone —— docker 网段的转发策略全失效。
@@ -1265,7 +1262,7 @@ build_svc_bind() {
 # docker 防火墙 builder（v.95）：没装 dockerd 就什么都不做；
 # 装了则补 docker zone（ACCEPT + 172.16.0.0/12）与两条 forwarding（wan zone 已删）。
 build_docker_fw() {
-    command -v dockerd >/dev/null 2>&1 || { log "[docker] 未安装 dockerd，跳过"; return 0; }
+    # 【v.180.199】dockerd 默认必装，写死不探测（用户 2026-10-31 定）。
     if ! run uci -q get firewall.docker >/dev/null 2>&1; then
         run uci -q set firewall.docker=zone >/dev/null 2>&1
     fi
@@ -2090,7 +2087,7 @@ ensure_group() {
 # 这里只报告、不参与判定：刚写完还没 reload 时看到的是旧表，拿来判死会误杀。
 _nft_fw_report() {
     _nft_reported=1
-    command -v nft >/dev/null 2>&1 || return 0
+    # 【v.180.199】nft 必在（fw4 依赖），写死不探测（用户 2026-10-31 定）。
     if ! run nft list chain inet fw4 forward_lxc >/dev/null 2>&1; then
         log "[FW] 未找到 nft 链 forward_lxc（zone 未绑 lxcbr0 或 firewall 未生成）"
         return 0
@@ -2252,10 +2249,9 @@ verify_ct_config() {
     [ -s "$CFG" ] || return 1
     grep -q "lxc.rootfs.path" "$CFG" 2>/dev/null || return 1
     grep -q "lxc.net.0.type" "$CFG" 2>/dev/null || return 1
-    if command -v lxc-info >/dev/null 2>&1; then
-        _vcc=$(run lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>&1)
-        printf '%s\n' "$_vcc" | grep -q 'at line "' && return 1
-    fi
+    # 【v.180.199】lxc-info 必在，去掉 command -v 外壳（用户 2026-10-31 定）。
+    _vcc=$(run lxc-info -P "$LXC_PATH" -n "$LXC_NAME" 2>&1)
+    printf '%s\n' "$_vcc" | grep -q 'at line "' && return 1
     return 0
 }
 build_ct_config() {

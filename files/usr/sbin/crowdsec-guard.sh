@@ -427,10 +427,7 @@ _lapi_audit() {
     # 容器没就位（overlay 未挂）时，LAPI 探测只会产出一堆「不可达」噪声。
     [ "$_CT_OK" = "1" ] || return 0
     command -v wget >/dev/null 2>&1 || return 0
-    command -v lxc-attach >/dev/null 2>&1 || {
-        _glog "【LAPI】缺少 lxc-attach，无法核查 LAPI 与 last_pull（这不是「正常」）"
-        return 0
-    }
+    # 【v.180.199】lxc-attach 必在（容器就是 LXC），写死不探测（用户 2026-10-31 定）。
     _lnow="$(date +%s 2>/dev/null)"
     case "$_lnow" in ''|*[!0-9]*) return 0 ;; esac
     _llast=0

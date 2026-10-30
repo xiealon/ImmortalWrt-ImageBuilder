@@ -230,13 +230,18 @@ ck "R15.11d net-only 检查 flush 结果并 exit 1" \
 # v.108.27 起 wan_input 整个节点已删，不在这份清单里 —— 它的「不适用」日志随函数一起没了。
 for _pair in \
     "verify_lan_input:本轮不校验 input/forward" \
-    "verify_svc_bind:本轮不校验管理服务绑定" \
-    "verify_docker_fw:本轮不校验 docker 防火墙"
+    "verify_svc_bind:本轮不校验管理服务绑定"
 do
     _vf=${_pair%%:*}
     _vt=${_pair#*:}
     ck "R15.12 $_vf 跳过时留日志" "$(grep -c "$_vt" "$BS_C")" "1"
 done
+# 【2026-10-31.0256】dockerd 与 LXC 默认必装，verify_docker_fw 里那句
+# `command -v dockerd || { log "未安装 dockerd..."; return 0; }` 已整体删除
+# （用户 2026-10-31 定：能写死的都写死）。「跳过时留日志」这条随之作废，
+# 改成反向锁：谁把探测加回来，这条就红。
+ck "R15.12b verify_docker_fw 不再探测 dockerd" \
+   "$(sed -n '/^verify_docker_fw() {/,/^}/p' "$BS_C" | grep -c 'command -v dockerd')" "0"
 
 echo "== 10c 容器常驻走 lxc-auto 服务，不许再 disable =="
 # v.56 起为了「容器只由本脚本负责」，build_ct_boot 里 disable lxc-auto 再自己 lxc-start。

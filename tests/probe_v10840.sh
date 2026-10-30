@@ -94,8 +94,8 @@ ck "R29.20 flush_uci 的 dhcp 组脏检查只剩 dhcp_ignore" \
    "$(sed -n '/^flush_uci() {/,/^}/p' "$BS" | grep -c 'for _o in dhcp_ignore; do')" "1"
 ck "R29.21 flush_uci 的 dhcp 组不再点名 dns_domain" \
    "$(sed -n '/^flush_uci() {/,/^}/p' "$BS" | grep -c 'dns_domain')" "0"
-ck "R29.22 版本号已推进（形如 2026-10-29.180.191）" \
-   "$(grep -cE '^SCRIPT_VER="[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\.[0-9]+\.[0-9]+"$' "$BS")" "1"
+ck "R29.22 版本号已推进（形如 2026-10-31.0256 或 2026-10-29.180.191）" \
+   "$(grep -cE '^SCRIPT_VER="[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\.[0-9]+(\.[0-9]+)?"$' "$BS")" "1"
 
 echo "-----"
 if [ "$R" -eq 0 ]; then

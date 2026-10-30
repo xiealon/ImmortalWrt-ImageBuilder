@@ -86,12 +86,22 @@ rm -rf "$LOCK" 2>/dev/null
 # 靠它决定要不要让 dnsmasq 退 53，而 LAN 静态地址由 bootstrap 的 NETBASE.lan_static 落地。
 # 为什么放在锁外：它不碰容器、不碰锁内资源，只写 uci + 重启 smartdns；
 # 硬顶 60s（脚本内部重启后要等约 15s），超时只记日志 —— DNS 配不上不该把开机收尾拖住。
-# 失败不判死：探针在「上游 0 条」连续 3 轮、且冷却闸门通过时会自己再调 --config
-# 重写一遍（v.180.198 起探针只数上游段，不再判 53 —— 53 起不来只能靠人看日志）。
+# 【v.180.198】开机也是「先检测，正常就跳过」（用户 2026-10-31 定）：
+#   判据与探针完全一致 —— 53 已由 smartdns 接管（--check），且 uci 里还有 server 段。
+#   都满足就一个字都不写：不 commit、不 restart；否则才走 --config 重写。
+#   口径因此统一为「一条上游都没有才恢复 13 条」：手工删过几条的用户，
+#   重启后不会被强制补回 13 条（此前是无条件重写，与探针口径正好相反）。
+# 失败不判死：探针在「DNS 不正常」连续 3 轮、且冷却闸门通过时会自己再调 --config。
 SD_RESTORE=/usr/sbin/pkg-restore-smartdns.sh
 if [ -x "$SD_RESTORE" ]; then
-    timeout 60 /bin/sh "$SD_RESTORE" --config >>"$LOG" 2>&1
-    [ "$?" = 0 ] || echo "[$(date '+%F %T')] 【DNS】smartdns 配置未完成（详见上方日志，探针会继续兜底）" >>"$LOG"
+    SD_UP_N=$(uci -q show smartdns 2>/dev/null | grep -c '=server$')
+    case "$SD_UP_N" in '' | *[!0-9]*) SD_UP_N=0 ;; esac
+    if timeout 20 /bin/sh "$SD_RESTORE" --check >/dev/null 2>&1 && [ "$SD_UP_N" -gt 0 ]; then
+        echo "[$(date '+%F %T')] 【DNS】配置已在位（53 归 smartdns，上游 $SD_UP_N 条），跳过重写" >>"$LOG"
+    else
+        timeout 60 /bin/sh "$SD_RESTORE" --config >>"$LOG" 2>&1
+        [ "$?" = 0 ] || echo "[$(date '+%F %T')] 【DNS】smartdns 配置未完成（详见上方日志，探针会继续兜底）" >>"$LOG"
+    fi
 else
     echo "[$(date '+%F %T')] 【DNS】未找到 $SD_RESTORE，跳过 smartdns 配置" >>"$LOG"
 fi

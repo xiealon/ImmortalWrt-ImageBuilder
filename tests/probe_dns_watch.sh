@@ -11,6 +11,7 @@
 # 本版盯六件事：
 #   A. 判据只数 uci 上游段，不碰 53、不碰进程、不碰 /proc；
 #   B. 修复只交给 pkg-restore-smartdns.sh --config，探针不补文件、不动 uci；
+#      「服务是否生效」交脚本的 --check 判，探针不重复实现 pidof / 53 反查；
 #   C. 触发链上不许出现 bootstrap（与 last_pull 那条链彻底分开）；
 #   D. 四道闸：1-2 轮告警 → 第 3 轮动作 → 冷却 → 连续失败锁存；
 #   E. 状态键不被 _probe_load 的贪婪 sed 串改；
@@ -44,6 +45,7 @@ echo "== 34.1 函数与调用位置 =="
 ck "R34.1a 有 _up_n" "$(grep -c '^_up_n()' "$PR")" "1"
 ck "R34.1b 有 _up_run" "$(grep -c '^_up_run()' "$PR")" "1"
 ck "R34.1c 有 _up_watch" "$(grep -c '^_up_watch()' "$PR")" "1"
+ck "R34.1g 有 _up_svc" "$(grep -c '^_up_svc()' "$PR")" "1"
 ck "R34.1d 旧函数已删净（_dns_ok/_dns_watch/_sd_run）" \
    "$(grep -cE '^_(dns_ok|dns_watch|sd_run)\\(\\)' "$PR")" "0"
 ck "R34.1e probe_tick 里调了 _up_watch" \
@@ -70,6 +72,11 @@ ck "R34.2e 不按 socket inode 反查归属" \
 # 上游连通性从来不在判据里：脚本修不好它，只会白撞冷却
 ck "R34.2f 全文件无 nslookup" \
    "$(grep -c 'nslookup' "$PR")" "0"
+# 服务判据不在探针里重写一遍：转调脚本的 --check（内部 _sd_serve）
+ck "R34.2g 服务判据交脚本 --check" \
+   "$(code _up_svc | grep -c '\-\-check')" "1"
+ck "R34.2h _up_svc 不自己 pidof / 读 /proc" \
+   "$(code _up_svc | grep -cE 'pidof|/proc/')" "0"
 
 echo
 echo "== 34.3 修复只交脚本；链上不许有 bootstrap =="
@@ -86,6 +93,8 @@ ck "R34.3e 不再 sleep 等服务" \
    "$(printf '%s' "$_ur" | grep -c 'sleep')" "0"
 _uw=$(code _up_watch)
 ck "R34.3f 交 --config" "$(printf '%s' "$_uw" | grep -c '_up_run --config')" "1"
+ck "R34.3m 判据两条都在（_up_svc + _up_n）" \
+   "$(printf '%s' "$_uw" | grep -c '_up_svc')|$(printf '%s' "$_uw" | grep -c '_up_n')" "1|1"
 ck "R34.3g 不调 _run_fix" "$(printf '%s' "$_uw" | grep -c '_run_fix')" "0"
 ck "R34.3h 不跑 bootstrap" "$(printf '%s' "$_uw" | grep -c '_boot')" "0"
 ck "R34.3i 不自己补文件" \
@@ -121,6 +130,7 @@ log_out="$TMPD/out.log"
 # 上游条数由 UPSRV 控制；--config 成败由 REPAIR_RC 控制；bootstrap 只打点
 plog() { printf '%s\n' "$*" >> "$log_out"; }
 _up_n() { printf '%s\n' "${UPSRV:-0}"; }
+_up_svc() { [ "${SVC_RC:-0}" = "0" ] && return 0; return 1; }
 _up_run() { [ "${REPAIR_RC:-1}" = "0" ] && return 0; return 1; }
 _boot() { echo x >> "$TMPD/boot_calls"; return 0; }
 . "$LIB"
@@ -131,6 +141,14 @@ UPSRV=13
 _up_watch
 ck "R34.4a 上游在时不动作" "$P_ACTION" ""
 ck "R34.4b 上游在时计数 0" "$P_UP_BAD" "0"
+
+# 上游配着、但 53 没被 smartdns 接管 —— 服务判据要能单独抓住这种
+SVC_RC=1
+_up_watch
+ck "R34.4b1 服务没生效也算坏" "$P_ACTION" "up-warn"
+ck "R34.4b2 原因指向 53" "$(grep -c '53 未由 smartdns 接管' "$log_out")" "1"
+SVC_RC=0
+P_UP_BAD=0; P_UP_FIX=0; P_ACTION=""
 
 UPSRV=0
 _up_watch
@@ -224,8 +242,8 @@ ck "R34.5l lxcbad 没被串改" "$P_LXC_BAD" "0"
 echo
 echo "== 34.6 文案 =="
 _log=$(cat "$log_out")
-ck "R34.6a 有【上游】专用标签" "$(yn "$(printf '%s' "$_log" | grep -c '【上游】')")" "yes"
-ck "R34.6b 不再有【DNS】标签" "$(printf '%s' "$_log" | grep -c '【DNS】')" "0"
+ck "R34.6a 有【DNS】专用标签" "$(yn "$(printf '%s' "$_log" | grep -c '【DNS】')")" "yes"
+ck "R34.6b 不再有【上游】标签" "$(printf '%s' "$_log" | grep -c '【上游】')" "0"
 ck "R34.6c 告警带上第几轮" "$(yn "$(grep -cF '第 $P_UP_BAD/$PROBE_STALL_ROUNDS 轮' "$PR")")" "yes"
 ck "R34.6d 需人工介入点了排查方向" \
    "$(yn "$(grep -c '/etc/config/smartdns' "$PR")")" "yes"

@@ -2430,23 +2430,35 @@ v.180.186 把「53 在听」从 `netstat -lnu` 的粗判改成按 socket inode �
 2. **53 通不代表配置对**。上游被删光时 53 照样在听、照样回 SERVFAIL 或超时，
    旧判据一路判 ok —— 这才是更常见、也更隐蔽的坏法。
 
-### v.180.198 之后的判据：只数上游段
+### v.180.198 之后的判据：服务 + 上游，两条一起判
 
 | 现场 | 判定 | 动作 |
 |---|---|---|
-| `uci show smartdns` 里 `=server` 段 ≥ 1 | 配着上游 | 不动手 |
-| 一条都没有 | 上游被删光 | 计数 → 第 3 轮交 `--config` 写回 13 条 |
+| `--check` 通过（pidof + 53 归属 smartdns） | 服务生效 | — |
+| `uci show smartdns` 里 `=server` 段 ≥ 1 | 配着上游 | — |
+| 上面任一条不满足 | 服务没起来 / 上游被删光 | 计数 → 第 3 轮交 `--config` 重写 |
 | 没装 smartdns 二进制 | 不归本通道管 | 放行（包由 `pkg-restore.sh` 管） |
 
-判据只有一句可读的话：**`uci -q show smartdns | grep -c '=server$'`**。
-用 uci 而不是查 smartdns 的实际生效配置，是因为 uci 是唯一事实来源，
-smartdns 的 init 每次 start 都从它生成 conf；数段只做一次 `uci show` + `grep`，
-约 10 ms，每 60 秒一轮可忽略。
+**两条都过才判好**，其余情况一律走同一套计数 / 冷却 / 锁存。两条判据都不在探针里
+重写一遍：
+
+- 服务生效 → `pkg-restore-smartdns.sh --check`（内部 `_sd_serve`：`pidof` 拿到 pid，
+  再从 `/proc/net/udp{,6}` 找 `local port=0035` 且 `st=07` 的 inode，最后在
+  `/proc/<pid>/fd/*` 里比对 `socket:[<inode>]` —— 这样 dnsmasq 占着 53 时不会误判成 ok）
+- 上游条数 → **`uci -q show smartdns | grep -c '=server$'`**。用 uci 而不是查 smartdns
+  的实际生效配置，是因为 uci 是唯一事实来源，smartdns 的 init 每次 start 都从它生成 conf；
+  数段只做一次 `uci show` + `grep`，约 10 ms，每 60 秒一轮可忽略。
 
 **不判「少了几条」**：用户可能自己删过某几条上游，那是配置自由；0 条才算失效。
 
-**已知盲区（已接受）**：进程挂了 / 53 没绑，只要 uci 段还在，本通道就判 ok，
-没有任何东西会自动发现 —— 那时要看的是 `logread` 里 smartdns 自己的报错。
+**开机同口径**：`/etc/rc.local` 不再无条件重写 —— 先跑一次 `--check` 并数一次 server 段，
+两项都过就只记一句「配置已在位（53 归 smartdns，上游 N 条），跳过重写」然后结束，
+**不 commit、不 restart**；不通过才走 `--config`。所以「手工删到 5 条」在重启后
+也不会被补回 13 条。
+
+**这条通道改过三次口径**，留个索引：v.180.117 只判 53（`pidof` + `netstat`）；
+v.180.186 把「53 在听」改成 socket inode 反查归属；v.180.198 先删 53 只留上游条数，
+同日又按要求把 53 判回来 —— 但改用脚本的 `--check`，且失败不再回滚给 dnsmasq。
 
 ### 与 last_pull 通道的关系
 
@@ -2456,8 +2468,9 @@ smartdns 的 init 每次 start 都从它生成 conf；数段只做一次 `uci sh
   独立的。共用的话，修上游会把「容器拉不动」的累计清零，反之亦然 —— 这正是
   v.108.58 在 `P_HUMAN` / `P_HUMAN_PULL` 上踩过的坑。
 - **不信退出码，看下一轮的事实**：v.180.198 删掉了 `_sd_run` 里「sleep 等服务起来
-  + 现场复验」那两步，`_up_run` 只转发脚本日志并返回退出码；上游到底写回没有，
-  由下一轮的 `_up_n` 再数一次。理由：复验只能验当时那一刻，还得白睡几秒。
+  + 现场复验」那两步，`_up_run` 只转发脚本日志并返回退出码；53 与上游到底有没有恢复，
+  由下一轮的 `_up_svc` / `_up_n` 各验一次。理由：复验只能验当时那一刻，还得白睡几秒，
+  而 `--config` 是异步生效的（restart 之后才慢慢绑上 53）。
 
 ### 状态键为什么叫 `upfix` / `uphold`
 
@@ -2472,7 +2485,7 @@ smartdns 的 init 每次 start 都从它生成 conf；数段只做一次 `uci sh
 
 | 阶段 | 耗时 |
 |---|---|
-| 连续 3 轮「上游 0 条」 | 120–180 s |
+| 连续 3 轮「DNS 不正常」（53 或上游） | 120–180 s |
 | 跑一轮 `pkg-restore-smartdns.sh --config` | 约 15 s（重写主段 + 13 条上游 + commit + restart） |
 | **真正写回** | **约 2–3 分钟** |
 

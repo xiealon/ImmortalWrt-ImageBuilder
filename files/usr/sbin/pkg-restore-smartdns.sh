@@ -364,7 +364,8 @@ case "${1:-}" in
     ;;
 # --config 与 --repair 现在等价：_sd_config 内部已经按「缺包先装包」的顺序走完，
 # 保留两个名字是为了调用点语义清楚（rc.local 开机配一次用 --config，
-# probe 在上游连续 0 条时兜底用 --repair。bootstrap 自 v.180.157 起不再调用本脚本）。
+# probe 在「DNS 不正常」（53 未接管 或 上游 0 条）时兜底用 --repair。
+# bootstrap 自 v.180.157 起不再调用本脚本）。
 --config|--repair)
     _sd_config && exit 0 || exit 1
     ;;

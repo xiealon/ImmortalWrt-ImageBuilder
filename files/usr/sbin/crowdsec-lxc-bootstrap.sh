@@ -5951,7 +5951,7 @@ if [ "${1:-}" = "--probe-check" ]; then
     exit $?
 fi
 
-# ---- 下发面健康检查（探针每 30 分钟一次，v.180.197）----
+# ---- 下发面健康检查（探针每 30 分钟一次，v.180.198）----
 # 为什么不能塞进 --probe-check：那条路径 60 秒一轮且只读，而这里要重启服务。
 # 为什么不能用 last_pull 判：netlink 脱节时 **拉取是成功的**，last_pull 照常刷新。
 # 判据改成直接数 bouncer 日志里的 netlink 错误 —— 它是最接近症状的信号：
@@ -5964,7 +5964,7 @@ if [ "${1:-}" = "--bouncer-heal" ]; then
         _ensure_bouncer_service
         exit 0
     fi
-    # 【2026-10-30.180.197】判据改为数全部 netlink 错误。
+    # 【2026-10-30.180.198】判据改为数全部 netlink 错误。
     # 为什么弃用 cscli decisions list：真机 2026-10-30 实测该命令返回
     # 「No active decisions」，而同一时刻 cscli metrics 报 Local API Decisions
     # 60315 条、内核 nft 有 69232 个元素 —— cscli 的列表视图与 bouncer 实际

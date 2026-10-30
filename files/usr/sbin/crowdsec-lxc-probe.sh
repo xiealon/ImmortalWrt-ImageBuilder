@@ -63,7 +63,7 @@ PROBE_FAIL_ALERT="${CS_PROBE_FAIL_ALERT:-3}"
 # 「bouncer 拉得到吗」，配置被改坏但还能拉的时候它照样是绿的 —— 所以每隔
 # AUDIT_EVERY 轮做一次从头到脚的体检。0 = 关闭。
 PROBE_AUDIT_EVERY="${CS_PROBE_AUDIT_EVERY:-30}"
-# 【v.180.196】bouncer 下发面健康检查间隔（按轮数，默认 30 轮 = 30 分钟）。
+# 【v.180.198】bouncer 下发面健康检查间隔（按轮数，默认 30 轮 = 30 分钟）。
 # 与体检同频但独立开关：体检只读（--verify-only 承诺不写），这里要重启服务。
 PROBE_HEAL_EVERY="${CS_PROBE_HEAL_EVERY:-30}"
 # 【v.108.67 设上限 / v.108.68 分档】bootstrap 内部每条宿主命令都有上限（v.108.66），
@@ -723,7 +723,7 @@ probe_tick() {
             _run_fix
         fi
     fi
-    # 【v.180.197】bouncer 下发面：与体检同频（每 PROBE_HEAL_EVERY 轮）。
+    # 【v.180.198】bouncer 下发面：与体检同频（每 PROBE_HEAL_EVERY 轮）。
     # 具体判据在 bootstrap 的 --bouncer-heal 里：数 bouncer 日志中本轮进程
     # （最后一次 Starting 之后）出现几次 netlink 错误（不限子类）—— 脱节时 last_pull
     # 照样新鲜，60 秒那套守护判定永远看不见它。动作只有一次重启，不写任何配置。

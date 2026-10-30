@@ -12,7 +12,7 @@ echo "Starting 99-custom.sh at $(date)" >>$LOGFILE
   uci commit
 
 FILE_PATH="/etc/openwrt_release"
-NEW_DESCRIPTION="Packaged by wukongdaily"
+NEW_DESCRIPTION="Packaged by DeepSeek"
 sed -i "s/DISTRIB_DESCRIPTION='[^']*'/DISTRIB_DESCRIPTION='$NEW_DESCRIPTION'/" "$FILE_PATH"
 
 CS_HOME='/etc/crowdsec'

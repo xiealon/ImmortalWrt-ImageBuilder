@@ -308,6 +308,29 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# 【v.180.195】第一遍的镜像本体，用完立刻删。
+# 两遍 make image 各产一个 ${ROOTFS_MB}MB 的 img；不删的话第二遍开跑时，
+# 第一遍的产物还躺在 bin/targets 里，磁盘峰值 = 两遍之和。
+# 只删镜像产物：packages/ 与 profiles.json 是第二遍要用的，一个都不能碰。
+# 第二遍 make image 每次都重新 install，删掉会照常重建，产物完整性不受影响。
+#
+# 稀疏性得现场说清楚：gen_image_generic 用 dd seek 铺空文件，理论上一份
+# 20G 的 img 实际只占几百 MB；但后续 cp 若没带 --sparse 会被实体化成 20G。
+# 到底是哪种，只有数字能定性 —— 所以这里同时打两个数：
+#   df  可用空间（真正被吃掉的盘）
+#   du  目录实际占用
+# du 远小于 img 逻辑大小 → 稀疏，这段清理省的是逻辑大小、不是真盘；
+# du ≈ 逻辑大小 → 实体，这段清理才真救命。
+echo "==> 清理第一遍镜像产物，把空间让给第二遍"
+df -h bin | tail -1
+du -sh bin/targets/x86/64 2>/dev/null
+rm -f bin/targets/x86/64/*.img \
+      bin/targets/x86/64/*.img.gz \
+      bin/targets/x86/64/*.rootfs.tar.gz
+echo "==> 清理后"
+df -h bin | tail -1
+du -sh bin/targets/x86/64 2>/dev/null
+
 # ---- 第一遍之后：收关键包 ipk 到 files/root/pkg-cache/ ----
 # files/ 在下面第二遍 make image 时合进 rootfs，所以这批 ipk 最终躺在 squashfs 里，
 # 刷机后是只读的 /rom/root/pkg-cache（不是 overlay 的 /root/pkg-cache）。

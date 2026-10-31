@@ -343,6 +343,12 @@ _up_watch() {
         P_UP_BAD=0
         P_UP_FIX=0
         P_UP_OK=0
+        # 【2026-10-31.1130】锁存必须在这里解除。原来只清 bad/fix，uphold 一直留在
+        # 状态文件里 —— 现场修好之后下一次故障会直接进 up-need-human-hold，连 warn
+        # 都不打，自愈等于被永久关掉。2026-10-31 真机实测到这个：修好 13 条上游后
+        # uphold 仍为 1，再删一次上游第一轮就 hold。其他四个通道（app/kmod/lxc/pull）
+        # 判好分支都有清零，只有这条漏了。
+        P_HUMAN_UP=0
         return 0
     fi
     P_UP_BAD=$((${P_UP_BAD:-0} + 1))

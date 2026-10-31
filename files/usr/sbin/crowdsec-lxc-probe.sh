@@ -427,6 +427,7 @@ _apps_watch() {
     # 而每轮都跑一次 opkg --force-reinstall 是实打实刷 flash。
     if [ "${P_HUMAN_APP:-0}" = "1" ]; then
         P_ACTION="app-need-human-hold"
+        plog "【应用】【需人工介入】已停止装回（$_aw_out，累计第 $P_APP_BAD 轮）。修好后重启探针或删除 $STATE_FILE 解除"
         return 0
     fi
     if [ "$P_APP_BAD" -lt "$PROBE_STALL_ROUNDS" ]; then
@@ -502,6 +503,7 @@ _kmods_watch() {
     P_KMOD_BAD=$((${P_KMOD_BAD:-0} + 1))
     if [ "${P_HUMAN_KMOD:-0}" = "1" ]; then
         P_ACTION="kmods-need-human-hold"
+        plog "【依赖文件】【需人工介入】已停止补回（$_kd_out，累计第 $P_KMOD_BAD 轮）。修好后重启探针或删除 $STATE_FILE 解除"
         return 0
     fi
     if [ "$P_KMOD_BAD" -lt "$PROBE_STALL_ROUNDS" ]; then
@@ -579,6 +581,7 @@ _lxc_watch() {
     P_LXC_BAD=$((${P_LXC_BAD:-0} + 1))
     if [ "${P_HUMAN_LXC:-0}" = "1" ]; then
         P_ACTION="lxc-need-human-hold"
+        plog "【lxc 文件】【需人工介入】已停止装回（$_lw_out，累计第 $P_LXC_BAD 轮）。修好后重启探针或删除 $STATE_FILE 解除"
         return 0
     fi
     if [ "$P_LXC_BAD" -lt "$PROBE_STALL_ROUNDS" ]; then

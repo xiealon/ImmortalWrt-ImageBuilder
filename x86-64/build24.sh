@@ -301,6 +301,37 @@ if [ -n "$ROOTFS_MB" ] && [ -f .config ]; then
     fi
 fi
 
+# 【v.180.196】给 Image/pad-to 打补丁 —— 大分区构建 OOM 的根因。
+#
+# 上游定义（include/image.mk）：
+#     define Image/pad-to
+#         dd if=$(1) of=$(1).new bs=$(2) conv=sync
+#         mv $(1).new $(1)
+#     endef
+# 调用方把 $(2) 传成 "$(CONFIG_TARGET_ROOTFS_PARTSIZE)M"，于是 20G 档就是
+# `dd bs=20480M` —— dd 会按 bs 预分配输入缓冲区，20480M = 20GiB。
+# runner 16GB 内存，直接 OOM：
+#     dd: memory exhausted by input buffer of size 21474836480 bytes (20 GiB)
+#
+# 24.10 一直没撞上是因为它的 10G / 20G 走 gen_image_generic.sh（dd seek 铺空文件），
+# 不经过 pad-to；25.12 换成了 Makefile 里的 pad-to，所以那边先炸（run 41210722525）。
+# 这里照样打一遍：命中就改，压根没这个模式就跳过 —— 24.10 上大概率是后者。
+#
+# 改法：bs 固定 1M（缓冲区 1MiB），复制完 truncate 到目标逻辑大小。
+# 中间是空洞、稀疏，产物与原来一致。
+_IMK="include/image.mk"
+if [ -f "$_IMK" ] && grep -q 'of=$(1).new bs=$(2) conv=sync' "$_IMK" 2>/dev/null; then
+    sed -i 's|dd if=$(1) of=$(1).new bs=$(2) conv=sync|dd if=$(1) of=$(1).new bs=1M conv=sync\n\ttruncate -s $(2) $(1).new|' "$_IMK"
+    if grep -q 'truncate -s $(2) $(1).new' "$_IMK" 2>/dev/null; then
+        echo "==> [patch] Image/pad-to 已改：bs=1M + truncate -s \$(2)（避开大缓冲）"
+    else
+        echo "::error::Image/pad-to 补丁没写进去，大分区仍会 OOM，终止"
+        exit 1
+    fi
+else
+    echo "==> [patch] Image/pad-to 未命中（本版 image 生成不走它），跳过"
+fi
+
 make image PROFILE="generic" PACKAGES="$PACKAGES" FILES="/home/build/immortalwrt/files" ROOTFS_PARTSIZE=$ROOTFS_MB
 
 if [ $? -ne 0 ]; then

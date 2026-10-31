@@ -321,6 +321,13 @@ fi
 # 中间是空洞、稀疏，产物与原来一致。
 _IMK="include/image.mk"
 if [ -f "$_IMK" ] && grep -q 'of=$(1).new bs=$(2) conv=sync' "$_IMK" 2>/dev/null; then
+    # truncate 必须存在：补丁靠它把 dd 的结果撑到分区大小。
+    # 万一没有，dd 只会产出 487MB 的 img，分区悄悄变成几百兆 ——
+    # 比 OOM 更糟（构建成功、固件却不对），所以这里直接拦死。
+    if ! command -v truncate >/dev/null 2>&1; then
+        echo "::error::容器里没有 truncate，补丁无法保证分区大小，终止"
+        exit 1
+    fi
     sed -i 's|dd if=$(1) of=$(1).new bs=$(2) conv=sync|dd if=$(1) of=$(1).new bs=1M conv=sync\n\ttruncate -s $(2) $(1).new|' "$_IMK"
     if grep -q 'truncate -s $(2) $(1).new' "$_IMK" 2>/dev/null; then
         echo "==> [patch] Image/pad-to 已改：bs=1M + truncate -s \$(2)（避开大缓冲）"

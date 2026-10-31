@@ -41,12 +41,12 @@ on:
       #   · crowdsec-guard 逐字节比对，被改坏 60 秒内复原
       # 要换网段：改 rootfs-skel/etc/crowdsec-net.conf 后重新构建，不要指望这里能填。
       # DNS 同样固定为网桥 IP（容器查路由器 dnsmasq，上游 DNS 由路由器自己跟）。
-      # 【v.180.194 历史】曾经只有 2G/3G/4G/10G，中间断档：想要 6G 只能选 10G 浪费、
+      # 历史：曾经只有 2G/3G/4G/10G，中间断档：想要 6G 只能选 10G 浪费、
       # 想要 12G 以上根本没门。后来等差补齐，现在已整体上移到 10G 起。
       # 教训：下拉框 / 白名单 / ROOTFS_SIZE 映射 这三处必须永远一起改。
       # 注意「分区大小」和「固件大小」是两件事：img 里未使用的空间全是零，
       # gzip 压完仍然只有几百 MB，所以 20G 分区出的固件也能正常下载/刷写。
-      # 【v.180.199】档位整体上移到 10G 起，2G/3G/4G/6G/8G 全部下线。
+      # 档位整体上移到 10G 起，2G/3G/4G/6G/8G 全部下线。
       # 理由：内置 CrowdSec 容器的 rootfs + 离线包库本身就吃掉大头，2G/3G 出来
       # 的机器再装 ssr-plus / daed 这类带一串依赖的包就没地方了，留着只会让人选错。
       # 注意 default 必须同步改成选项内的值 —— 否则 workflow_dispatch 会因为
@@ -111,7 +111,7 @@ jobs:
       - name: Set Executable Permissions
         run: chmod +x ${{ github.workspace }}/x86-64/build24.sh
 
-      # 【v.180.194 / v.180.197】先把 runner 自带、本构建完全用不到的工具链删掉。
+      # 先把 runner 自带、本构建完全用不到的工具链删掉。
       # 实测 GitHub 托管 runner 是 146G 盘（不是文档里说的 14G），清完剩 109G 可用，
       # 所以下面几步不是「抢救几个 G」，是给两遍 make image 的中间产物留余量。
       # 注意：20G 档失败的真因不是磁盘，是 Image/pad-to 里 dd bs=$(2) 会按分区大小

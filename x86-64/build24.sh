@@ -284,7 +284,10 @@ fi
 #                    （clashoo / luci-app-ssr-plus / luci-app-mosdns / v2ray-geo* 只在这里）
 #   B. repositories.conf 的官方 feed   按白名单取 Filename 再下载
 #                    （smartdns / lxc 全套 / daed / mosdns / crowdsec-bouncer）
-ROOTFS_MB="${PROFILE:-2048}"
+# 【v.180.199】缺省值跟 workflow 一起抬到 10240（10G）。
+# 原来缺省 2048（2G），那是档位还从 2G 起的时候写的；现在 2G~8G 已下线，
+# 留个 2G 缺省只会让「手动跑脚本不传 PROFILE」时产出一个装不下容器的固件。
+ROOTFS_MB="${PROFILE:-10240}"
 case "$ROOTFS_MB" in
     ''|*[!0-9]*)
         echo "::warning::PROFILE=$PROFILE 不是数字，分区沿用 .config 里已有的值"

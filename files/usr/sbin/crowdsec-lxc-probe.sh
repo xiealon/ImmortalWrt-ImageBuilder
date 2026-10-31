@@ -1,5 +1,5 @@
 #!/bin/sh
-# 【2026-10-31.0256】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
+# 【2026-10-31.1130】固件版本标记 —— 与 crowdsec-lxc-bootstrap.sh 的 SCRIPT_VER 同步，每次改脚本一起改
 # crowdsec-lxc-probe：运行期 last_pull 监视探针（v.106）
 # 职责边界（刻意收窄成一条）：
 #   只验证 last_pull。判停滞 → 告警 + 持引导锁重跑 crowdsec-lxc-bootstrap.sh。
@@ -91,7 +91,7 @@ PROBE_GUARD_MAX="${CS_PROBE_GUARD_MAX:-60}"
 #        /etc/init.d/crowdsec-lxc-probe
 # 只有 crowdsec-lxc-bootstrap.sh 的那一份参与 CFG_SHA_FILE 指纹判定；
 # 这里这份纯标记，改它不会触发任何重写。
-SCRIPT_VER="2026-10-31.0256"
+SCRIPT_VER="2026-10-31.1130"
 
 plog() { logger -t crowdsec-probe "$*"; }
 
@@ -332,11 +332,17 @@ _up_watch() {
         fi
     fi
     if [ -z "$_uw_why" ]; then
-        if [ "${P_UP_BAD:-0}" -gt 0 ]; then
+        # 【2026-10-31.1130】P_UP_BAD 在下面的 --config 之前就被清零了，所以「修好之后
+        # 的那一轮」它恒为 0 —— 原来的判据让这行恢复日志永远打不出来。
+        # 2026-10-31 真机实测：删光 13 条上游 → 3 轮后 --config 写回 → 日志里只有
+        #「已写回：下一轮复核」，没有「已恢复」，等于修好了没人知道。
+        # 补一个只活在内存里的 P_UP_OK：修复时置 1，下一轮判好时消费掉。
+        if [ "${P_UP_BAD:-0}" -gt 0 ] || [ "${P_UP_OK:-0}" = "1" ]; then
             plog "【DNS】已恢复（$_uw_n 条上游，53 由 smartdns 接管）"
         fi
         P_UP_BAD=0
         P_UP_FIX=0
+        P_UP_OK=0
         return 0
     fi
     P_UP_BAD=$((${P_UP_BAD:-0} + 1))
@@ -358,6 +364,9 @@ _up_watch() {
     fi
     P_UP_TRIG="$_uw_now"
     P_UP_BAD=0
+    # 【2026-10-31.1130】置标记：本轮修过，等下一轮复核。修好了就在判好分支打「已恢复」，
+    # 见那个分支里的说明。不持久化（只影响跨重启的一条日志，不影响任何判定）。
+    P_UP_OK=1
     # --config 会重写主段、13 条上游、commit 并重启 smartdns（约 15 秒），
     # 所以必须放在冷却闸门之后，不能每轮都来一次。
     P_ACTION="up-repair"

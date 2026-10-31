@@ -41,6 +41,11 @@ on:
       #   · crowdsec-guard 逐字节比对，被改坏 60 秒内复原
       # 要换网段：改 rootfs-skel/etc/crowdsec-net.conf 后重新构建，不要指望这里能填。
       # DNS 同样固定为网桥 IP（容器查路由器 dnsmasq，上游 DNS 由路由器自己跟）。
+      # 【v.180.194】分区档位补齐到 2G~20G。
+      # 原来只有 2G/3G/4G/10G：中间断档，想要 6G 只能选 10G 浪费、
+      # 想要 12G 以上根本没门。现在等差排开，跟下面两处 case 白名单严格同步。
+      # 注意「分区大小」和「固件大小」是两件事：img 里未使用的空间全是零，
+      # gzip 压完仍然只有几百 MB，所以 20G 分区出的固件也能正常下载/刷写。
       Profile:
         description: '软件包空间大小（最低 2G：内置 CrowdSec 容器的 rootfs 需要，选 1G 会直接构建失败）'
         required: true
@@ -50,7 +55,12 @@ on:
           - '2G'
           - '3G'
           - '4G'
+          - '6G'
+          - '8G'
           - '10G'
+          - '12G'
+          - '16G'
+          - '20G'
       Enable Store:
         description: "集成 store 商店"
         required: false
@@ -100,6 +110,19 @@ jobs:
       - name: Set Executable Permissions
         run: chmod +x ${{ github.workspace }}/x86-64/build24.sh
 
+      # 【v.180.194】托管 runner 只有 14G SSD，而 combined-efi.img 是按 Profile 大小落地的
+      # （10G 档就是 10G 的 img；即便未使用区是零、稀疏文件实际占用不大，gzip 仍要整读一遍，
+      # 再加上两遍 make image 的中间产物，10G 以上很容易把盘吃满）。
+      # 爆盘的报错是 "No space left on device"，出现在 make image 尾部，看着像分区参数被拒，
+      # 实际是磁盘不够 —— 所以先把 runner 自带、本构建完全用不到的工具链删掉。
+      - name: Free Disk Space
+        run: |
+          echo "== 清理前 ==" && df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache 2>/dev/null || true
+          sudo apt-get clean || true
+          echo "== 清理后 ==" && df -h /
+
       - name: Validate Crowdsec Build Parameters
         env:
           CS_KEY: ${{ inputs['Crowdsec Enroll Key'] }}
@@ -122,9 +145,9 @@ jobs:
           # 会造出一个「勾了却没有容器」的固件，然后开机时网络也不配、查不出原因。
           # 这里直接失败，让人把 Profile 调大重跑。
           case "$CS_PROFILE" in
-            2G|3G|4G|10G) ;;
+            2G|3G|4G|6G|8G|10G|12G|16G|20G) ;;
             *)
-              echo "::error::Profile=$CS_PROFILE 空间不足：CrowdSec 容器需要 2G 以上 rootfs，请把 Profile 调到 2G / 3G / 4G / 10G 后重跑"
+              echo "::error::Profile=$CS_PROFILE 空间不足：CrowdSec 容器需要 2G 以上 rootfs，请把 Profile 调到 2G/3G/4G/6G/8G/10G/12G/16G/20G 后重跑"
               exit 1
               ;;
           esac
@@ -310,23 +333,18 @@ jobs:
         run: |
           profile="${{ github.event.inputs['Profile'] }}"
           case "$profile" in
-            1G)
-              ROOTFS_SIZE=1024
-              ;;
-            2G)
-              ROOTFS_SIZE=2048
-              ;;
-            3G)
-              ROOTFS_SIZE=3072
-              ;;
-            4G)
-              ROOTFS_SIZE=4096
-              ;;
-            10G)
-              ROOTFS_SIZE=10240
-              ;;
+            1G)  ROOTFS_SIZE=1024  ;;
+            2G)  ROOTFS_SIZE=2048  ;;
+            3G)  ROOTFS_SIZE=3072  ;;
+            4G)  ROOTFS_SIZE=4096  ;;
+            6G)  ROOTFS_SIZE=6144  ;;
+            8G)  ROOTFS_SIZE=8192  ;;
+            10G) ROOTFS_SIZE=10240 ;;
+            12G) ROOTFS_SIZE=12288 ;;
+            16G) ROOTFS_SIZE=16384 ;;
+            20G) ROOTFS_SIZE=20480 ;;
             *)
-              echo "::error::未知 profile=$profile（可选 1G/2G/3G/4G/10G）"
+              echo "::error::未知 profile=$profile（可选 1G/2G/3G/4G/6G/8G/10G/12G/16G/20G）"
               exit 1
               ;;
           esac
